@@ -42,6 +42,13 @@ The unit suite covers exact note citations, unsupported-question abstention, PDF
 The baseline evaluation corpus verifies one supported citation and one abstention through the deterministic scaffold.
 The generator-specific corpus verifies a supported citation and an abstention when related source text is retrieved but does not contain the requested attribute.
 
+## Recorded public result
+
+On 2026-07-27, the Qwen3 8B 4-bit MLX candidate passed the generator-specific public corpus on the current Apple Silicon Mac.
+The run passed `supported-deployment-owner` and `abstained-owner-phone-number` for a result of 2/2.
+This demonstrates the local adapter’s structured response parsing, citation resolution, and related-evidence abstention path.
+It does not establish production-quality generation, broad retrieval quality, semantic claim support, or robust behavior against adversarial document text.
+
 ## Future release gate
 
 Before selecting a local model configuration, extend the corpus with public or synthetic cases for OCR warnings, removal, reindexing, citation validity, and unsupported questions.
