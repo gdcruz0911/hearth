@@ -1,0 +1,48 @@
+# Local Python tooling
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Secrets and machine-specific configuration
+.env
+.env.*
+!.env.example
+.DS_Store
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Hearth runtime data and private content
+.hearth/
+data/
+documents/
+vault/
+ocr/
+indexes/
+models/
+runs/
+artifacts/
+logs/
+
+# Local databases, model weights, and derived retrieval data
+*.sqlite
+*.sqlite-*
+*.db
+*.db-*
+*.safetensors
+*.gguf
+*.onnx
+*.mlmodel
+*.mlpackage/
+
+# Imported documents are private by default.
+# Public or synthetic fixtures belong under tests/fixtures/public/ and may be explicitly unignored.
+*.pdf
+!tests/fixtures/public/
+!tests/fixtures/public/**/*.pdf
