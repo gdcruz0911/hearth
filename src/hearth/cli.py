@@ -4,6 +4,7 @@ import argparse
 from pathlib import Path
 
 from .domain import ImportError
+from .evaluation import EvaluationCorpusError, evaluate_corpus, load_evaluation_corpus
 from .service import HearthService
 
 
@@ -24,6 +25,8 @@ def main() -> int:
     reindexer.add_argument("path")
     remover = subcommands.add_parser("remove", help="Remove a document and its derived records.")
     remover.add_argument("path")
+    evaluator = subcommands.add_parser("evaluate", help="Run a local synthetic or public evaluation corpus.")
+    evaluator.add_argument("corpus", type=Path)
     args = parser.parse_args()
     service = HearthService(args.database, ocr_output_directory=args.ocr_output_directory)
     try:
@@ -33,6 +36,14 @@ def main() -> int:
             print(f"Reindexed document {service.reindex_document(args.path)}.")
         elif args.command == "remove":
             print("Removed." if service.remove_document(args.path) else "No matching document found.")
+        elif args.command == "evaluate":
+            outcomes = evaluate_corpus(service, load_evaluation_corpus(args.corpus))
+            for outcome in outcomes:
+                detail = "" if outcome.passed else f": {'; '.join(outcome.errors)}"
+                print(f"{outcome.case_id}: {'PASS' if outcome.passed else 'FAIL'}{detail}")
+            passed_count = sum(outcome.passed for outcome in outcomes)
+            print(f"Summary: {passed_count}/{len(outcomes)} cases passed.")
+            return 0 if passed_count == len(outcomes) else 1
         else:
             answer = service.answer(args.question)
             print(answer.text)
@@ -48,7 +59,7 @@ def main() -> int:
                     f"[{citation.document_name}, page {citation.page_number}{section}, "
                     f"chunk {citation.chunk_id}{extraction}{confidence}] {citation.quote}"
                 )
-    except ImportError as exc:
+    except (EvaluationCorpusError, ImportError) as exc:
         parser.error(str(exc))
     finally:
         service.close()

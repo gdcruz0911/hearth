@@ -8,6 +8,9 @@ version = "0.1.0"
 description = "Local-first, evidence-bound document chat foundation."
 requires-python = ">=3.11"
 
+[project.optional-dependencies]
+local-inference = ["mlx-lm>=0.31.3,<0.32"]
+
 [project.scripts]
 hearth = "hearth.cli:main"
 

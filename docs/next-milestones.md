@@ -26,10 +26,12 @@ Test deletion, reindexing, version mismatch handling, and retrieval quality agai
 Propose and approve an ADR for the local inference runtime and initial models.
 Add model adapters that do not make network calls or fall back to a remote model.
 Require structured responses that preserve evidence IDs for validation under ADR-0006.
+Run MLX benchmarks in an interactive macOS session with Metal access.
 
 ## 5. Create the local evaluation corpus and release gate
 
-Add synthetic or public fixtures and expected outcomes for supported answers, exact citations, abstentions, OCR warnings, deletion, and reindexing.
+The baseline harness covers one supported citation and one abstention using only synthetic public material.
+Expand it with expected outcomes for OCR warnings, deletion, and reindexing before selecting a production model.
 Record model, retrieval, and prompt configuration alongside each evaluation run without storing private prompts or responses in Git.
 
 ## 6. Prepare the private source repository baseline
