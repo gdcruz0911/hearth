@@ -13,6 +13,7 @@ htmlcov/
 .env.*
 !.env.example
 .DS_Store
+HANDOFF.md
 *.pem
 *.key
 *.p12

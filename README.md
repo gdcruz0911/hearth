@@ -81,4 +81,3 @@ An optional host-side MLX benchmark is documented in [benchmarking](docs/benchma
 - [Evaluation](docs/evaluation.md)
 - [Architecture Decision Records](docs/decisions/README.md)
 - [Next milestones](docs/next-milestones.md)
-- [Agent handoff](HANDOFF.md)
