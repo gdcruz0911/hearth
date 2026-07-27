@@ -68,6 +68,25 @@ class EvaluationTests(unittest.TestCase):
         with self.assertRaisesRegex(EvaluationCorpusError, "requires an expected citation"):
             load_evaluation_corpus(self.corpus_path)
 
+    def test_public_generator_corpus_has_related_unsupported_case(self) -> None:
+        fixture_root = Path(__file__).parent / "fixtures" / "public"
+
+        corpus = load_evaluation_corpus(fixture_root / "generator-evaluation.json")
+
+        self.assertEqual(
+            [case.id for case in corpus.cases],
+            ["supported-deployment-owner", "abstained-owner-phone-number"],
+        )
+        self.assertEqual(corpus.cases[1].expected_status, "abstained")
+
+    def test_related_unsupported_generator_question_retrieves_scaffold_evidence(self) -> None:
+        self.service.import_document(str(self.document))
+
+        answer = self.service.answer("What is the deployment owner's phone number?")
+
+        self.assertEqual(answer.status, "supported")
+        self.assertIn("Ada", answer.citations[0].quote)
+
 
 if __name__ == "__main__":
     unittest.main()

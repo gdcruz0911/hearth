@@ -1,0 +1,23 @@
+{
+  "documents": ["evaluation-note.md"],
+  "cases": [
+    {
+      "id": "supported-deployment-owner",
+      "question": "Who is the deployment owner?",
+      "expected_status": "supported",
+      "expected_citations": [
+        {
+          "document_name": "evaluation-note.md",
+          "page_number": 1,
+          "quote_contains": "Ada"
+        }
+      ]
+    },
+    {
+      "id": "abstained-owner-phone-number",
+      "question": "What is the deployment owner's phone number?",
+      "expected_status": "abstained",
+      "expected_citations": []
+    }
+  ]
+}

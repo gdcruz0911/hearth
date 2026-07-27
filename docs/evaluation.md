@@ -21,6 +21,12 @@ To exercise the experimental local generator on the same public corpus from an i
 PYTHONPATH=src .venv/bin/python -m hearth.cli --generator-model /path/to/local/model --database /private/tmp/hearth-generator-evaluation.sqlite evaluate tests/fixtures/public/baseline-evaluation.json
 ```
 
+Run the generator-specific public corpus to test an answer with evidence and an unsupported attribute despite related retrieved evidence.
+
+```bash
+PYTHONPATH=src .venv/bin/python -m hearth.cli --generator-model /path/to/local/model --database /private/tmp/hearth-generator-evaluation.sqlite evaluate tests/fixtures/public/generator-evaluation.json
+```
+
 This host-side check is required before any generator model can become the product default.
 
 ## Corpus rules
@@ -34,6 +40,7 @@ Each abstained case must define no expected citations.
 
 The unit suite covers exact note citations, unsupported-question abstention, PDF page metadata, OCR fallback behavior, removal, reindexing, and structured-generator response validation.
 The baseline evaluation corpus verifies one supported citation and one abstention through the deterministic scaffold.
+The generator-specific corpus verifies a supported citation and an abstention when related source text is retrieved but does not contain the requested attribute.
 
 ## Future release gate
 
