@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 
 from hearth.domain import ExtractedPage, SourceDocument
+from hearth.extraction import PdfExtractor
 from hearth.service import HearthService
 
 
@@ -17,6 +18,34 @@ class FakePdfExtractor:
                 ExtractedPage(2, "The backup location is encrypted local storage.", section="Security"),
             ),
         )
+
+
+class NativePdfExtractorWithBlankPage:
+    def extract(self, path: Path) -> SourceDocument:
+        return SourceDocument(
+            path=path,
+            pages=(
+                ExtractedPage(1, "The account is active.", section="Native"),
+                ExtractedPage(2, "", section="Scanned"),
+            ),
+        )
+
+
+class FakeOcrFallback:
+    def __init__(self) -> None:
+        self.calls: list[tuple[Path, tuple[int, ...]]] = []
+
+    def extract_pages(self, pdf_path: Path, page_numbers: tuple[int, ...]) -> dict[int, ExtractedPage]:
+        self.calls.append((pdf_path, page_numbers))
+        return {
+            2: ExtractedPage(
+                2,
+                "The scanned archive is stored locally.",
+                section="Scanned",
+                extraction_method="ocr",
+                ocr_confidence=0.92,
+            )
+        }
 
 
 class HearthServiceTests(unittest.TestCase):
@@ -80,6 +109,23 @@ class HearthServiceTests(unittest.TestCase):
         self.assertEqual(answer.status, "supported")
         self.assertEqual(answer.citations[0].page_number, 2)
         self.assertEqual(answer.citations[0].section, "Security")
+
+    def test_ocr_fallback_replaces_only_blank_pages_and_marks_citation(self) -> None:
+        pdf = self.root / "scanned.pdf"
+        pdf.write_bytes(b"placeholder")
+        fallback = FakeOcrFallback()
+        extractor = PdfExtractor(NativePdfExtractorWithBlankPage(), fallback)
+        self.service.close()
+        self.service = HearthService(self.database, pdf_extractor=extractor)
+
+        self.service.import_document(str(pdf))
+        answer = self.service.answer("Where is the scanned archive stored?")
+
+        self.assertEqual(fallback.calls, [(pdf.resolve(), (2,))])
+        self.assertEqual(answer.status, "supported")
+        self.assertEqual(answer.citations[0].page_number, 2)
+        self.assertEqual(answer.citations[0].extraction_method, "ocr")
+        self.assertEqual(answer.citations[0].ocr_confidence, 0.92)
 
 
 if __name__ == "__main__":

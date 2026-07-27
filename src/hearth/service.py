@@ -5,16 +5,30 @@ from pathlib import Path
 from .answering import EvidenceAnswerer, validate_answer
 from .chunking import chunk_page
 from .domain import Answer, ImportError
-from .extraction import PageExtractor, PdfExtractor, PopplerPdfExtractor, TextNoteExtractor
+from .extraction import OcrmyPdfFallback, PageExtractor, PdfExtractor, PopplerPdfExtractor, TextNoteExtractor
 from .retrieval import HashingVectorIndex, IdentityReranker, Reranker
 from .store import SQLiteStore
 
 
 class HearthService:
-    def __init__(self, database_path: Path, pdf_extractor: PageExtractor | None = None, reranker: Reranker | None = None):
+    def __init__(
+        self,
+        database_path: Path,
+        pdf_extractor: PageExtractor | None = None,
+        reranker: Reranker | None = None,
+        ocr_output_directory: Path | None = None,
+    ):
         self._store = SQLiteStore(database_path)
         self._note_extractor = TextNoteExtractor()
-        self._pdf_extractor = pdf_extractor or PdfExtractor(native_extractor=PopplerPdfExtractor())
+        native_pdf_extractor = PopplerPdfExtractor()
+        self._pdf_extractor = pdf_extractor or PdfExtractor(
+            native_extractor=native_pdf_extractor,
+            ocr_fallback=(
+                OcrmyPdfFallback(native_pdf_extractor, ocr_output_directory)
+                if ocr_output_directory is not None
+                else None
+            ),
+        )
         self._reranker = reranker or IdentityReranker()
         self._answerer = EvidenceAnswerer()
 

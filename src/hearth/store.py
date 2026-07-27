@@ -46,7 +46,8 @@ class SQLiteStore:
     def list_chunks(self) -> list[Chunk]:
         rows = self._connection.execute(
             """SELECT chunks.id, documents.id AS document_id, documents.display_name, pages.page_number,
-            pages.section, chunks.text, chunks.char_start, chunks.char_end, pages.extraction_method
+            pages.section, chunks.text, chunks.char_start, chunks.char_end, pages.extraction_method,
+            pages.ocr_confidence
             FROM chunks
             JOIN pages ON pages.id = chunks.page_id
             JOIN documents ON documents.id = pages.document_id
@@ -57,6 +58,7 @@ class SQLiteStore:
                 id=row["id"], document_id=row["document_id"], document_name=row["display_name"],
                 page_number=row["page_number"], section=row["section"], text=row["text"],
                 char_start=row["char_start"], char_end=row["char_end"], extraction_method=row["extraction_method"],
+                ocr_confidence=row["ocr_confidence"],
             )
             for row in rows
         ]

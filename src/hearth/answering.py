@@ -16,6 +16,8 @@ class EvidenceAnswerer:
                 section=item.chunk.section,
                 chunk_id=item.chunk.id,
                 quote=item.chunk.text,
+                extraction_method=item.chunk.extraction_method,
+                ocr_confidence=item.chunk.ocr_confidence,
             )
             for item in evidence
         )

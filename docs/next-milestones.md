@@ -9,11 +9,11 @@ Install or otherwise provide the local Poppler tools required by the existing PD
 Add synthetic or public PDF fixtures under `tests/fixtures/public/`.
 Verify page boundaries, native text extraction, extraction failure reporting, and citation page accuracy.
 
-## 2. Connect local OCR fallback
+## 2. Verify local OCR fallback with installed tooling
 
-Implement an OCRmyPDF-backed local OCR adapter for image-only PDF pages.
-Preserve extraction method, OCR confidence or warnings, page identity, and original document provenance.
-Add tests for native-text pages, OCR-required pages, OCR failure, and reindexing after OCR.
+The OCRmyPDF-backed local OCR adapter is configured through a caller-supplied output directory.
+Verify it with installed local tools and public or synthetic PDF fixtures.
+Add coverage for OCR failure and reindexing after OCR.
 
 ## 3. Select and integrate the production local retrieval index
 

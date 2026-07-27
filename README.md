@@ -23,10 +23,12 @@ python -m unittest discover -s tests -v
 
 PDF import uses local Poppler tools when `pdfinfo` and `pdftotext` are installed.
 If they are unavailable, the CLI reports the missing local prerequisite instead of pretending that a PDF was imported.
+Pass `--ocr-output-directory` to enable the local OCRmyPDF fallback for image-only pages.
+OCR output is derived private data and must remain outside version control.
 
 ## Planned integrations
 
-- `OCRFallback` can connect OCRmyPDF and record OCR provenance per page.
+- `OcrmyPdfFallback` runs OCRmyPDF locally when an OCR output directory is configured.
 - `EmbeddingIndex` can replace the local lexical index with an MLX-backed vector index.
 - `Reranker` can connect a local MLX reranker.
 - `EvidenceAnswerer` can connect a local MLX generator while preserving evidence identifiers.

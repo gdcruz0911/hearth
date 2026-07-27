@@ -34,6 +34,7 @@ class Chunk:
     char_start: int
     char_end: int
     extraction_method: str
+    ocr_confidence: float | None
 
 
 @dataclass(frozen=True)
@@ -49,6 +50,8 @@ class Citation:
     section: str | None
     chunk_id: int
     quote: str
+    extraction_method: str
+    ocr_confidence: float | None
 
 
 @dataclass(frozen=True)

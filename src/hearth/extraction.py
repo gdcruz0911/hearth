@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 import re
 import subprocess
+from uuid import uuid4
 from typing import Protocol
 
 from .domain import ExtractedPage, ImportError, SourceDocument
@@ -11,7 +12,7 @@ from .domain import ExtractedPage, ImportError, SourceDocument
 class OCRFallback(Protocol):
     """Local OCR extension point for image-only PDF pages."""
 
-    def extract_page(self, pdf_path: Path, page_number: int) -> ExtractedPage: ...
+    def extract_pages(self, pdf_path: Path, page_numbers: tuple[int, ...]) -> dict[int, ExtractedPage]: ...
 
 
 class PageExtractor(Protocol):
@@ -55,12 +56,13 @@ class PdfExtractor:
         document = self._native_extractor.extract(path)
         if not document.pages:
             raise ImportError("PDF extractor returned no pages.")
-        pages = []
-        for page in document.pages:
-            if page.text.strip() or self._ocr_fallback is None:
-                pages.append(page)
-            else:
-                pages.append(self._ocr_fallback.extract_page(path, page.page_number))
+        blank_page_numbers = tuple(page.page_number for page in document.pages if not page.text.strip())
+        ocr_pages = (
+            self._ocr_fallback.extract_pages(path, blank_page_numbers)
+            if blank_page_numbers and self._ocr_fallback is not None
+            else {}
+        )
+        pages = [ocr_pages.get(page.page_number, page) for page in document.pages]
         return SourceDocument(path=path, pages=tuple(pages))
 
 
@@ -93,6 +95,54 @@ class PopplerPdfExtractor:
             timeout=30,
         )
         return ExtractedPage(page_number=page_number, text=result.stdout, extraction_method="native")
+
+
+class OcrmyPdfFallback:
+    """Runs local OCRmyPDF once and returns only the requested OCR page text."""
+
+    def __init__(self, native_extractor: PageExtractor, output_directory: Path):
+        self._native_extractor = native_extractor
+        self._output_directory = output_directory
+
+    def extract_pages(self, pdf_path: Path, page_numbers: tuple[int, ...]) -> dict[int, ExtractedPage]:
+        if not page_numbers:
+            return {}
+        self._output_directory.mkdir(parents=True, exist_ok=True)
+        output_path = self._output_directory / f"{pdf_path.stem}-{uuid4().hex}.pdf"
+        try:
+            subprocess.run(
+                ["ocrmypdf", "--skip-text", "--output-type", "pdf", str(pdf_path), str(output_path)],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=600,
+            )
+            ocr_document = self._native_extractor.extract(output_path)
+        except FileNotFoundError as exc:
+            output_path.unlink(missing_ok=True)
+            raise ImportError("OCR fallback requires local OCRmyPDF.") from exc
+        except subprocess.TimeoutExpired as exc:
+            output_path.unlink(missing_ok=True)
+            raise ImportError("OCR fallback timed out after 10 minutes.") from exc
+        except subprocess.CalledProcessError as exc:
+            output_path.unlink(missing_ok=True)
+            raise ImportError("Local OCR fallback failed.") from exc
+        except ImportError:
+            output_path.unlink(missing_ok=True)
+            raise
+
+        requested = set(page_numbers)
+        return {
+            page.page_number: ExtractedPage(
+                page_number=page.page_number,
+                text=page.text,
+                section=page.section,
+                extraction_method="ocr",
+                ocr_confidence=None,
+            )
+            for page in ocr_document.pages
+            if page.page_number in requested and page.text.strip()
+        }
 
 
 def _first_markdown_heading(text: str) -> str | None:

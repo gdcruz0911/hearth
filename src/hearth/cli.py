@@ -10,6 +10,11 @@ from .service import HearthService
 def main() -> int:
     parser = argparse.ArgumentParser(description="Local-only, evidence-bound document chat.")
     parser.add_argument("--database", type=Path, default=Path(".hearth/hearth.sqlite"))
+    parser.add_argument(
+        "--ocr-output-directory",
+        type=Path,
+        help="Private local directory for OCR-derived PDFs. Enables local OCRmyPDF fallback.",
+    )
     subcommands = parser.add_subparsers(dest="command", required=True)
     importer = subcommands.add_parser("import", help="Import a local note or configured PDF.")
     importer.add_argument("path")
@@ -20,7 +25,7 @@ def main() -> int:
     remover = subcommands.add_parser("remove", help="Remove a document and its derived records.")
     remover.add_argument("path")
     args = parser.parse_args()
-    service = HearthService(args.database)
+    service = HearthService(args.database, ocr_output_directory=args.ocr_output_directory)
     try:
         if args.command == "import":
             print(f"Imported document {service.import_document(args.path)}.")
@@ -33,7 +38,16 @@ def main() -> int:
             print(answer.text)
             for citation in answer.citations:
                 section = f", section {citation.section}" if citation.section else ""
-                print(f"[{citation.document_name}, page {citation.page_number}{section}, chunk {citation.chunk_id}] {citation.quote}")
+                extraction = f", extraction {citation.extraction_method}"
+                confidence = (
+                    f", OCR confidence {citation.ocr_confidence:.2f}"
+                    if citation.ocr_confidence is not None
+                    else ""
+                )
+                print(
+                    f"[{citation.document_name}, page {citation.page_number}{section}, "
+                    f"chunk {citation.chunk_id}{extraction}{confidence}] {citation.quote}"
+                )
     except ImportError as exc:
         parser.error(str(exc))
     finally:
