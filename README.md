@@ -29,6 +29,25 @@ python3 -m venv .venv
 .venv/bin/python -m pip install ".[local-inference]"
 ```
 
+## Local model benchmark
+
+The first local generator candidate is stored outside the repository at `~/Library/Application Support/Hearth/models/qwen3-8b-4bit`.
+Run its offline benchmark from an interactive macOS terminal with Metal access.
+
+```bash
+scripts/benchmark_qwen3_8b.sh
+```
+
+The runner refuses to use the network and uses only a public smoke-test prompt.
+The smoke test is the GPU verification and will fail without a usable local MLX device.
+It reports prompt throughput, generation throughput, and peak memory for three trials.
+It does not evaluate document retrieval, citations, or abstention.
+Those require the future evidence-bound model-adapter integration.
+
+Each downloaded model is isolated in its own directory under `~/Library/Application Support/Hearth/models/`.
+To remove a model, move only that model's exact directory to the macOS Trash in Finder.
+Do not remove the surrounding `Hearth` directory because it also contains the local model cache and may later contain other runtime data.
+
 PDF import uses local Poppler tools when `pdfinfo` and `pdftotext` are installed.
 If they are unavailable, the CLI reports the missing local prerequisite instead of pretending that a PDF was imported.
 Pass `--ocr-output-directory` to enable the local OCRmyPDF fallback for image-only pages.
