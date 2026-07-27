@@ -11,7 +11,8 @@ It supports local import, search, removal, reindexing, deterministic evaluation,
 The current answer path returns retrieved source text with citations instead of generated prose.
 
 The local MLX runtime and three candidate models are provisioned separately for host-side benchmarking.
-MLX embeddings, reranking, and generator adapters are not implemented yet.
+An opt-in MLX generator adapter is implemented behind `--generator-model` and still requires host-side evidence evaluation.
+MLX embeddings and reranking are not implemented yet.
 
 ## Privacy boundary
 
@@ -65,7 +66,8 @@ An optional host-side MLX benchmark is documented in [benchmarking](docs/benchma
 ## Limitations
 
 - Retrieval uses a deterministic hashed-vector scaffold rather than a production semantic embedding index.
-- Reranking and generated answers are not implemented.
+- Reranking is not implemented.
+- Generated answers require an explicitly configured local model and remain experimental until citation and abstention evaluation is complete.
 - OCR quality depends on the source scan and can be poor for handwriting, complex layouts, tables, formulas, and low-quality images.
 - There is no graphical interface, web server, cloud synchronization, or multi-user support.
 
@@ -79,3 +81,4 @@ An optional host-side MLX benchmark is documented in [benchmarking](docs/benchma
 - [Evaluation](docs/evaluation.md)
 - [Architecture Decision Records](docs/decisions/README.md)
 - [Next milestones](docs/next-milestones.md)
+- [Agent handoff](HANDOFF.md)

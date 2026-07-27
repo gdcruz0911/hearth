@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+from .answering import LocalInferenceError, MLXLocalGenerator, StructuredGeneratorAnswerer
 from .domain import ImportError
 from .evaluation import EvaluationCorpusError, evaluate_corpus, load_evaluation_corpus
 from .service import HearthService
@@ -16,6 +17,11 @@ def main() -> int:
         type=Path,
         help="Private local directory for OCR-derived PDFs. Enables local OCRmyPDF fallback.",
     )
+    parser.add_argument(
+        "--generator-model",
+        type=Path,
+        help="Pre-provisioned local MLX model directory. Enables generated evidence-bound answers.",
+    )
     subcommands = parser.add_subparsers(dest="command", required=True)
     importer = subcommands.add_parser("import", help="Import a local note or configured PDF.")
     importer.add_argument("path")
@@ -28,8 +34,18 @@ def main() -> int:
     evaluator = subcommands.add_parser("evaluate", help="Run a local synthetic or public evaluation corpus.")
     evaluator.add_argument("corpus", type=Path)
     args = parser.parse_args()
-    service = HearthService(args.database, ocr_output_directory=args.ocr_output_directory)
+    service: HearthService | None = None
     try:
+        answerer = (
+            StructuredGeneratorAnswerer(MLXLocalGenerator(args.generator_model))
+            if args.generator_model is not None
+            else None
+        )
+        service = HearthService(
+            args.database,
+            answerer=answerer,
+            ocr_output_directory=args.ocr_output_directory,
+        )
         if args.command == "import":
             print(f"Imported document {service.import_document(args.path)}.")
         elif args.command == "reindex":
@@ -59,10 +75,11 @@ def main() -> int:
                     f"[{citation.document_name}, page {citation.page_number}{section}, "
                     f"chunk {citation.chunk_id}{extraction}{confidence}] {citation.quote}"
                 )
-    except (EvaluationCorpusError, ImportError) as exc:
+    except (EvaluationCorpusError, ImportError, LocalInferenceError) as exc:
         parser.error(str(exc))
     finally:
-        service.close()
+        if service is not None:
+            service.close()
     return 0
 
 

@@ -41,6 +41,6 @@ It does not establish whole-system memory headroom, retrieval quality, citation 
 
 ## Next evaluation
 
-The next model milestone is an evidence-bound generator adapter that receives only approved retrieved chunks and returns structured citation IDs.
-The application must validate those IDs under [ADR-0006](decisions/ADR-0006-evidence-bound-answer-contract.md).
-The candidate cannot become Hearth’s default generator until a synthetic or public corpus covers supported answers, citations, and abstention.
+The evidence-bound generator adapter now receives only approved retrieved chunks and returns structured citation IDs.
+The application validates those IDs under [ADR-0006](decisions/ADR-0006-evidence-bound-answer-contract.md) and [ADR-0007](decisions/ADR-0007-structured-local-generator-response.md).
+The candidate cannot become Hearth’s default generator until a synthetic or public corpus covers supported answers, citations, and abstention through the host-side adapter.

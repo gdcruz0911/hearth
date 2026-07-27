@@ -3,8 +3,9 @@
 ## Status
 
 MLX is installed as an optional local runtime for host-side benchmarking on this Apple Silicon Mac.
-The current Hearth application does not yet load an MLX embedding model, reranker, or generator during document chat.
-The deterministic retrieval and direct-evidence answer path remain the active implementation.
+Hearth includes an opt-in MLX generator adapter for document chat when a pre-provisioned local model directory is explicitly configured.
+The deterministic retrieval and direct-evidence answer path remain the default implementation.
+MLX embeddings and reranking are not implemented.
 
 ## Candidate models
 
@@ -23,6 +24,18 @@ Install the optional local inference dependencies in the project virtual environ
 
 Model provisioning is intentionally separate from the application runtime.
 It requires a local model directory before the benchmark can run and may use a model registry during that explicit provisioning step.
+
+## Experimental generator
+
+Pass an existing local model directory to the CLI to enable generated answers.
+
+```bash
+.venv/bin/python -m hearth.cli --generator-model /path/to/local/model --database .hearth/hearth.sqlite search "your question"
+```
+
+The adapter rejects a directory without `model.safetensors` and does not accept a model repository identifier.
+It sets Hugging Face Hub offline mode before loading MLX and does not configure a remote fallback.
+Malformed model output becomes an explicit abstention under [ADR-0007](decisions/ADR-0007-structured-local-generator-response.md).
 
 ## Runtime storage
 

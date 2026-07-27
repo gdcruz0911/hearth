@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from .answering import EvidenceAnswerer, validate_answer
+from .answering import Answerer, EvidenceAnswerer, validate_answer
 from .chunking import chunk_page
 from .domain import Answer, ImportError
 from .extraction import OCRmyPDFFallback, PageExtractor, PdfExtractor, PopplerPdfExtractor, TextNoteExtractor
@@ -16,6 +16,7 @@ class HearthService:
         database_path: Path,
         pdf_extractor: PageExtractor | None = None,
         reranker: Reranker | None = None,
+        answerer: Answerer | None = None,
         ocr_output_directory: Path | None = None,
     ):
         self._store = SQLiteStore(database_path)
@@ -30,7 +31,7 @@ class HearthService:
             ),
         )
         self._reranker = reranker or IdentityReranker()
-        self._answerer = EvidenceAnswerer()
+        self._answerer = answerer or EvidenceAnswerer()
 
     def close(self) -> None:
         self._store.close()
@@ -56,7 +57,7 @@ class HearthService:
             return Answer.abstain()
         candidates = HashingVectorIndex(self._store.list_chunks()).search(question, limit=20)
         evidence = self._reranker.rerank(question, candidates, limit=6)
-        return validate_answer(self._answerer.answer(evidence), evidence)
+        return validate_answer(self._answerer.answer(question, evidence), evidence)
 
 
 def _validated_local_file(raw_path: str) -> Path:

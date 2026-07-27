@@ -21,7 +21,9 @@ Local note or PDF
 `SQLiteStore` is the authoritative store for document identities, page metadata, chunks, and provenance.
 `HashingVectorIndex` is an in-memory deterministic retrieval scaffold built from stored chunks for the current query.
 `IdentityReranker` preserves candidate order until a local reranker is integrated.
-`EvidenceAnswerer` returns retrieved evidence directly until a constrained local generator is integrated.
+`EvidenceAnswerer` returns retrieved evidence directly when no generator is configured.
+`StructuredGeneratorAnswerer` accepts only strict JSON from an opt-in local generator and resolves citation metadata from the approved evidence bundle.
+`MLXLocalGenerator` loads a pre-provisioned local model directory and does not accept a model repository identifier.
 `validate_answer` rejects a non-abstained answer whose citations are absent or reference chunks outside the approved evidence bundle.
 
 ## Data boundaries
@@ -36,6 +38,7 @@ Future embeddings and vector indexes must remain derived local data that can be 
 The application must preserve document, page, section, extraction method, OCR confidence when available, and chunk identity through citation rendering.
 Local adapters must not introduce cloud fallback, telemetry, or document transmission.
 Generated answers must follow the evidence-bound contract in [ADR-0006](decisions/ADR-0006-evidence-bound-answer-contract.md).
+The structured generator response protocol is defined in [ADR-0007](decisions/ADR-0007-structured-local-generator-response.md).
 
 ## Related decisions
 
@@ -43,3 +46,4 @@ Generated answers must follow the evidence-bound contract in [ADR-0006](decision
 - [ADR-0003: Local PDF and OCR ingestion](decisions/ADR-0003-local-pdf-and-ocr-ingestion.md)
 - [ADR-0004: Local retrieval and index lifecycle](decisions/ADR-0004-local-retrieval-and-index-lifecycle.md)
 - [ADR-0006: Evidence-bound answer contract](decisions/ADR-0006-evidence-bound-answer-contract.md)
+- [ADR-0007: Structured local generator response](decisions/ADR-0007-structured-local-generator-response.md)

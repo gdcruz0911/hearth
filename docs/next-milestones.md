@@ -20,9 +20,8 @@ Test deletion, reindexing, version mismatch handling, and retrieval quality agai
 
 ## 4. Integrate local reranking and generation
 
-Add model adapters that do not make network calls or fall back to a remote model.
-Require structured responses that preserve evidence IDs for validation under ADR-0006.
-Evaluate the local generator against citations and abstention after the successful host-side performance benchmark.
+Evaluate the local generator adapter against citations and abstention after the successful host-side performance benchmark.
+Expand the public or synthetic corpus to cover malformed output, unsupported questions, and source-bound generated answers.
 
 ## 5. Create the local evaluation corpus and release gate
 
