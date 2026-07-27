@@ -5,7 +5,7 @@ from pathlib import Path
 from .answering import EvidenceAnswerer, validate_answer
 from .chunking import chunk_page
 from .domain import Answer, ImportError
-from .extraction import OcrmyPdfFallback, PageExtractor, PdfExtractor, PopplerPdfExtractor, TextNoteExtractor
+from .extraction import OCRmyPDFFallback, PageExtractor, PdfExtractor, PopplerPdfExtractor, TextNoteExtractor
 from .retrieval import HashingVectorIndex, IdentityReranker, Reranker
 from .store import SQLiteStore
 
@@ -24,7 +24,7 @@ class HearthService:
         self._pdf_extractor = pdf_extractor or PdfExtractor(
             native_extractor=native_pdf_extractor,
             ocr_fallback=(
-                OcrmyPdfFallback(native_pdf_extractor, ocr_output_directory)
+                OCRmyPDFFallback(native_pdf_extractor, ocr_output_directory)
                 if ocr_output_directory is not None
                 else None
             ),

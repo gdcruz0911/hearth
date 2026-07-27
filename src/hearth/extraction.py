@@ -97,7 +97,7 @@ class PopplerPdfExtractor:
         return ExtractedPage(page_number=page_number, text=result.stdout, extraction_method="native")
 
 
-class OcrmyPdfFallback:
+class OCRmyPDFFallback:
     """Runs local OCRmyPDF once and returns only the requested OCR page text."""
 
     def __init__(self, native_extractor: PageExtractor, output_directory: Path):

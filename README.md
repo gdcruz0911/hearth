@@ -1,65 +1,81 @@
 # Hearth
 
 Hearth is a local-first, evidence-bound document chat foundation.
-It does not make network requests, download models, send telemetry, or fall back to cloud services.
+It is designed to answer from imported local documents with page-level source evidence or to abstain when no retrieved evidence supports an answer.
 
-## First milestone
+## Status
 
-The current CLI imports UTF-8 text and Markdown notes, plus PDFs through a per-page extraction interface.
-It persists document, page, section, and chunk provenance in SQLite.
-It uses a deterministic local hashed vector index as a scaffold for an MLX embedding index.
-It answers only when retrieved evidence supports the question and otherwise abstains.
+Hearth currently supports UTF-8 text and Markdown notes, plus PDF text extraction through local Poppler tools.
+It stores document, page, section, chunk, and extraction provenance in local SQLite.
+It supports local import, search, removal, reindexing, deterministic evaluation, and optional OCRmyPDF fallback for image-only PDF pages.
+The current answer path returns retrieved source text with citations instead of generated prose.
 
-OCR, PDF text extraction, vector embedding, reranking, and generation are all explicit interfaces.
-The initial implementation includes no hidden approximations of those capabilities.
+The local MLX runtime and three candidate models are provisioned separately for host-side benchmarking.
+MLX embeddings, reranking, and generator adapters are not implemented yet.
+
+## Privacy boundary
+
+Hearth keeps imported documents and runtime data on the local machine.
+The current application code has no configured cloud service, telemetry, or cloud-model fallback.
+Installing dependencies and provisioning models are separate operations that can use package or model registries.
+Do not commit private documents, OCR output, SQLite databases, indexes, model weights, prompts, responses, or absolute local paths.
+
+See [privacy guidance](docs/privacy.md) for the precise boundary and Git hygiene.
+
+## Requirements
+
+- Python 3.11 or later.
+- Poppler (`pdfinfo` and `pdftotext`) for PDF imports.
+- OCRmyPDF for optional OCR of image-only PDF pages.
+- macOS on Apple Silicon and MLX for the optional host-side model benchmark.
 
 ## Quick start
 
-```bash
-python -m hearth.cli --database .hearth/hearth.sqlite import path/to/note.md
-python -m hearth.cli --database .hearth/hearth.sqlite search "your question"
-python -m hearth.cli --database .hearth/hearth.sqlite evaluate tests/fixtures/public/baseline-evaluation.json
-python -m unittest discover -s tests -v
-```
-
-To install the optional local MLX runtime, create an ignored virtual environment and install the extra.
+Create an isolated development environment and install Hearth.
 
 ```bash
 python3 -m venv .venv
-.venv/bin/python -m pip install ".[local-inference]"
+.venv/bin/python -m pip install -e .
 ```
 
-## Local model benchmark
-
-The first local generator candidate is stored outside the repository at `~/Library/Application Support/Hearth/models/qwen3-8b-4bit`.
-Run its offline benchmark from an interactive macOS terminal with Metal access.
+Import a local note, query it, and run the public evaluation corpus.
 
 ```bash
-scripts/benchmark_qwen3_8b.sh
+.venv/bin/python -m hearth.cli --database .hearth/hearth.sqlite import path/to/note.md
+.venv/bin/python -m hearth.cli --database .hearth/hearth.sqlite search "your question"
+.venv/bin/python -m hearth.cli --database .hearth/hearth.sqlite evaluate tests/fixtures/public/baseline-evaluation.json
 ```
 
-The runner refuses to use the network and uses only a public smoke-test prompt.
-The smoke test is the GPU verification and will fail without a usable local MLX device.
-It reports prompt throughput, generation throughput, and peak memory for three trials.
-It does not evaluate document retrieval, citations, or abstention.
-Those require the future evidence-bound model-adapter integration.
+## Verification
 
-Each downloaded model is isolated in its own directory under `~/Library/Application Support/Hearth/models/`.
-To remove a model, move only that model's exact directory to the macOS Trash in Finder.
-Do not remove the surrounding `Hearth` directory because it also contains the local model cache and may later contain other runtime data.
+Run the focused unit suite.
 
-PDF import uses local Poppler tools when `pdfinfo` and `pdftotext` are installed.
-If they are unavailable, the CLI reports the missing local prerequisite instead of pretending that a PDF was imported.
-Pass `--ocr-output-directory` to enable the local OCRmyPDF fallback for image-only pages.
-OCR output is derived private data and must remain outside version control.
+```bash
+PYTHONPATH=src .venv/bin/python -m unittest discover -s tests -v
+```
 
-The evaluation command reports only case IDs and pass or fail status.
-Use synthetic or public documents in version-controlled corpora.
-Do not add private prompts, responses, or document contents to an evaluation corpus.
+Run the deterministic public evaluation corpus.
 
-## Planned integrations
+```bash
+PYTHONPATH=src .venv/bin/python -m hearth.cli --database /private/tmp/hearth-evaluation.sqlite evaluate tests/fixtures/public/baseline-evaluation.json
+```
 
-- `OcrmyPdfFallback` runs OCRmyPDF locally when an OCR output directory is configured.
-- `EmbeddingIndex` can replace the local lexical index with an MLX-backed vector index.
-- `Reranker` can connect a local MLX reranker.
-- `EvidenceAnswerer` can connect a local MLX generator while preserving evidence identifiers.
+An optional host-side MLX benchmark is documented in [benchmarking](docs/benchmarking.md).
+
+## Limitations
+
+- Retrieval uses a deterministic hashed-vector scaffold rather than a production semantic embedding index.
+- Reranking and generated answers are not implemented.
+- OCR quality depends on the source scan and can be poor for handwriting, complex layouts, tables, formulas, and low-quality images.
+- There is no graphical interface, web server, cloud synchronization, or multi-user support.
+
+## Project documentation
+
+- [Architecture](docs/architecture.md)
+- [Privacy](docs/privacy.md)
+- [Local inference](docs/local-inference.md)
+- [Benchmarking](docs/benchmarking.md)
+- [PDF and OCR](docs/pdf-and-ocr.md)
+- [Evaluation](docs/evaluation.md)
+- [Architecture Decision Records](docs/decisions/README.md)
+- [Next milestones](docs/next-milestones.md)
