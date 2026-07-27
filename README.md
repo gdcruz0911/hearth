@@ -12,7 +12,8 @@ The current answer path returns retrieved source text with citations instead of 
 
 The local MLX runtime and three candidate models are provisioned separately for host-side benchmarking.
 An opt-in MLX generator adapter is implemented behind `--generator-model` and still requires host-side evidence evaluation.
-MLX embeddings and reranking are not implemented yet.
+An opt-in MLX embedding and flat-index path is implemented behind `--embedding-model` and `--index-directory`.
+MLX reranking is not implemented yet.
 
 ## Privacy boundary
 

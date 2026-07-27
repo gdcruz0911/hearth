@@ -13,10 +13,10 @@ Expand coverage beyond the existing page-boundary, native-text, and citation che
 The `OCRmyPDFFallback` adapter is configured through a caller-supplied output directory.
 Add public or synthetic fixtures for OCR failure and reindexing after OCR.
 
-## 3. Integrate the production local retrieval index
+## 3. Evaluate the local semantic retrieval index
 
-Replace the deterministic hashed-vector scaffold with the approved local embedding implementation.
-Test deletion, reindexing, version mismatch handling, and retrieval quality against a local evaluation corpus.
+Run the MLX embedding and flat-index path against public or synthetic retrieval cases from an interactive macOS terminal.
+Test deletion, reindexing, version mismatch handling, and retrieval quality before making semantic retrieval the default path.
 
 ## 4. Integrate local reranking and generation
 

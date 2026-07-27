@@ -48,6 +48,17 @@ class FakeOcrFallback:
         }
 
 
+class FakeSemanticIndex:
+    def __init__(self) -> None:
+        self.rebuild_chunk_ids: list[tuple[int, ...]] = []
+
+    def rebuild(self, chunks) -> None:
+        self.rebuild_chunk_ids.append(tuple(chunk.id for chunk in chunks))
+
+    def search(self, question: str, chunks, limit: int = 20):
+        return []
+
+
 class HearthServiceTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary_directory = tempfile.TemporaryDirectory()
@@ -126,6 +137,18 @@ class HearthServiceTests(unittest.TestCase):
         self.assertEqual(answer.citations[0].page_number, 2)
         self.assertEqual(answer.citations[0].extraction_method, "ocr")
         self.assertEqual(answer.citations[0].ocr_confidence, 0.92)
+
+    def test_semantic_index_rebuilds_after_import_and_removal(self) -> None:
+        semantic_index = FakeSemanticIndex()
+        self.service.close()
+        self.service = HearthService(self.database, semantic_index=semantic_index)
+
+        self.service.import_document(str(self.note))
+        self.service.remove_document(str(self.note))
+
+        self.assertEqual(len(semantic_index.rebuild_chunk_ids), 2)
+        self.assertTrue(semantic_index.rebuild_chunk_ids[0])
+        self.assertEqual(semantic_index.rebuild_chunk_ids[1], ())
 
 
 if __name__ == "__main__":

@@ -5,7 +5,8 @@
 MLX is installed as an optional local runtime for host-side benchmarking on this Apple Silicon Mac.
 Hearth includes an opt-in MLX generator adapter for document chat when a pre-provisioned local model directory is explicitly configured.
 The deterministic retrieval and direct-evidence answer path remain the default implementation.
-MLX embeddings and reranking are not implemented.
+An opt-in MLX embedding and flat-index path is implemented.
+MLX reranking is not implemented.
 
 ## Candidate models
 
@@ -36,6 +37,18 @@ Pass an existing local model directory to the CLI to enable generated answers.
 The adapter rejects a directory without `model.safetensors` and does not accept a model repository identifier.
 It sets Hugging Face Hub offline mode before loading MLX and does not configure a remote fallback.
 Malformed model output becomes an explicit abstention under [ADR-0007](decisions/ADR-0007-structured-local-generator-response.md).
+
+## Experimental semantic retrieval
+
+Pass a pre-provisioned local embedding model directory and a private index directory together to enable semantic retrieval.
+
+```bash
+.venv/bin/python -m hearth.cli --embedding-model /path/to/local/embedding-model --index-directory /path/to/private/index --database .hearth/hearth.sqlite import path/to/note.md
+```
+
+The flat index stores only derived vectors and chunk IDs outside SQLite.
+It validates model fingerprint, dimension, normalization, chunking version, and ordered chunk IDs before search.
+It rebuilds on document import, removal, and reindexing rather than silently using stale vectors.
 
 ## Runtime storage
 

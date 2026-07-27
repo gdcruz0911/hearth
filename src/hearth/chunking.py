@@ -4,6 +4,8 @@ import re
 
 from .domain import ExtractedPage
 
+CHUNKING_VERSION = "sentence-boundary-v1-target-400-overlap-60"
+
 
 def chunk_page(page: ExtractedPage, target_tokens: int = 400, overlap_tokens: int = 60) -> list[tuple[str, int, int]]:
     """Chunk one page on sentence boundaries using whitespace as a token estimate."""

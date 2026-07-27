@@ -19,7 +19,8 @@ Local note or PDF
 `OCRmyPDFFallback` is an optional local extension that fills only pages with no native text.
 `chunk_page` preserves page boundaries and stores character offsets for each chunk.
 `SQLiteStore` is the authoritative store for document identities, page metadata, chunks, and provenance.
-`HashingVectorIndex` is an in-memory deterministic retrieval scaffold built from stored chunks for the current query.
+`HashingVectorIndex` is an in-memory deterministic retrieval scaffold used when no semantic index is configured.
+`FlatVectorIndex` stores derived normalized float32 vectors and chunk IDs in a versioned local index directory when a semantic index is configured.
 `IdentityReranker` preserves candidate order until a local reranker is integrated.
 `EvidenceAnswerer` returns retrieved evidence directly when no generator is configured.
 `StructuredGeneratorAnswerer` accepts only strict JSON from an opt-in local generator and resolves citation metadata from the approved evidence bundle.
@@ -39,6 +40,7 @@ The application must preserve document, page, section, extraction method, OCR co
 Local adapters must not introduce cloud fallback, telemetry, or document transmission.
 Generated answers must follow the evidence-bound contract in [ADR-0006](decisions/ADR-0006-evidence-bound-answer-contract.md).
 The structured generator response protocol is defined in [ADR-0007](decisions/ADR-0007-structured-local-generator-response.md).
+The semantic embedding and index format are defined in [ADR-0008](decisions/ADR-0008-local-embedding-and-flat-vector-index.md).
 
 ## Related decisions
 
@@ -47,3 +49,4 @@ The structured generator response protocol is defined in [ADR-0007](decisions/AD
 - [ADR-0004: Local retrieval and index lifecycle](decisions/ADR-0004-local-retrieval-and-index-lifecycle.md)
 - [ADR-0006: Evidence-bound answer contract](decisions/ADR-0006-evidence-bound-answer-contract.md)
 - [ADR-0007: Structured local generator response](decisions/ADR-0007-structured-local-generator-response.md)
+- [ADR-0008: Local embedding and flat vector index](decisions/ADR-0008-local-embedding-and-flat-vector-index.md)

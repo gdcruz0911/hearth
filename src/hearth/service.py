@@ -5,6 +5,7 @@ from pathlib import Path
 from .answering import Answerer, EvidenceAnswerer, validate_answer
 from .chunking import chunk_page
 from .domain import Answer, ImportError
+from .embedding import FlatVectorIndex
 from .extraction import OCRmyPDFFallback, PageExtractor, PdfExtractor, PopplerPdfExtractor, TextNoteExtractor
 from .retrieval import HashingVectorIndex, IdentityReranker, Reranker
 from .store import SQLiteStore
@@ -17,6 +18,7 @@ class HearthService:
         pdf_extractor: PageExtractor | None = None,
         reranker: Reranker | None = None,
         answerer: Answerer | None = None,
+        semantic_index: FlatVectorIndex | None = None,
         ocr_output_directory: Path | None = None,
     ):
         self._store = SQLiteStore(database_path)
@@ -32,6 +34,7 @@ class HearthService:
         )
         self._reranker = reranker or IdentityReranker()
         self._answerer = answerer or EvidenceAnswerer()
+        self._semantic_index = semantic_index
 
     def close(self) -> None:
         self._store.close()
@@ -43,10 +46,15 @@ class HearthService:
         chunks_by_page = {page.page_number: chunk_page(page) for page in document.pages}
         if not any(chunks_by_page.values()):
             raise ImportError("No extractable text was found in the document.")
-        return self._store.replace_document(path, document.pages, chunks_by_page)
+        document_id = self._store.replace_document(path, document.pages, chunks_by_page)
+        self._rebuild_semantic_index()
+        return document_id
 
     def remove_document(self, raw_path: str) -> bool:
-        return self._store.remove_document(_validated_local_file(raw_path))
+        removed = self._store.remove_document(_validated_local_file(raw_path))
+        if removed:
+            self._rebuild_semantic_index()
+        return removed
 
     def reindex_document(self, raw_path: str) -> int:
         """Re-extract and replace all derived chunks for one local document."""
@@ -55,9 +63,18 @@ class HearthService:
     def answer(self, question: str) -> Answer:
         if not question.strip():
             return Answer.abstain()
-        candidates = HashingVectorIndex(self._store.list_chunks()).search(question, limit=20)
+        chunks = self._store.list_chunks()
+        candidates = (
+            self._semantic_index.search(question, chunks, limit=20)
+            if self._semantic_index is not None
+            else HashingVectorIndex(chunks).search(question, limit=20)
+        )
         evidence = self._reranker.rerank(question, candidates, limit=6)
         return validate_answer(self._answerer.answer(question, evidence), evidence)
+
+    def _rebuild_semantic_index(self) -> None:
+        if self._semantic_index is not None:
+            self._semantic_index.rebuild(self._store.list_chunks())
 
 
 def _validated_local_file(raw_path: str) -> Path:
