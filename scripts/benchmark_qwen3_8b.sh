@@ -4,9 +4,11 @@ set -euo pipefail
 
 repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 python_bin="$repository_root/.venv/bin/python"
+generate_bin="$repository_root/.venv/bin/mlx_lm.generate"
+benchmark_bin="$repository_root/.venv/bin/mlx_lm.benchmark"
 model_dir="${HEARTH_GENERATOR_MODEL_DIR:-$HOME/Library/Application Support/Hearth/models/qwen3-8b-4bit}"
 
-if [[ ! -x "$python_bin" ]]; then
+if [[ ! -x "$python_bin" || ! -x "$generate_bin" || ! -x "$benchmark_bin" ]]; then
   echo "Missing Hearth virtual environment at $python_bin." >&2
   exit 1
 fi
@@ -25,7 +27,7 @@ print(f"MLX device: {mx.default_device()}")
 '
 
 echo "Running public-prompt smoke test..."
-"$python_bin" -m mlx_lm.generate \
+"$generate_bin" \
   --model "$model_dir" \
   --prompt "Reply with the single word: ready" \
   --max-tokens 8 \
@@ -34,7 +36,7 @@ echo "Running public-prompt smoke test..."
   --verbose false
 
 echo "Running performance benchmark..."
-"$python_bin" -m mlx_lm.benchmark \
+"$benchmark_bin" \
   --model "$model_dir" \
   --prompt-tokens 512 \
   --generation-tokens 128 \
