@@ -38,6 +38,37 @@ class Chunk:
 
 
 @dataclass(frozen=True)
+class ImportedDocument:
+    id: int
+    name: str
+    page_count: int
+    chunk_count: int
+    ocr_page_count: int
+
+
+@dataclass(frozen=True)
+class ChunkInspection:
+    id: int
+    char_start: int
+    char_end: int
+
+
+@dataclass(frozen=True)
+class PageInspection:
+    page_number: int
+    section: str | None
+    extraction_method: str
+    ocr_confidence: float | None
+    chunks: tuple[ChunkInspection, ...]
+
+
+@dataclass(frozen=True)
+class DocumentInspection:
+    document: ImportedDocument
+    pages: tuple[PageInspection, ...]
+
+
+@dataclass(frozen=True)
 class Evidence:
     chunk: Chunk
     score: float

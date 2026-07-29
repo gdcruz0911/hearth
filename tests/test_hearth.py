@@ -193,6 +193,45 @@ class HearthServiceTests(unittest.TestCase):
         self.assertTrue(semantic_index.rebuild_chunk_ids[0])
         self.assertEqual(semantic_index.rebuild_chunk_ids[1], ())
 
+    def test_collection_inspection_returns_metadata_without_document_text_or_source_path(self) -> None:
+        document_id = self.service.import_document(str(self.note))
+
+        documents = self.service.list_documents()
+        inspection = self.service.inspect_document(document_id)
+
+        self.assertEqual(documents[0].id, document_id)
+        self.assertEqual(documents[0].name, "facts.md")
+        self.assertEqual(documents[0].page_count, 1)
+        self.assertEqual(documents[0].chunk_count, 1)
+        self.assertEqual(documents[0].ocr_page_count, 0)
+        self.assertIsNotNone(inspection)
+        assert inspection is not None
+        self.assertEqual(inspection.pages[0].page_number, 1)
+        self.assertEqual(inspection.pages[0].section, "Operations")
+        self.assertEqual(inspection.pages[0].extraction_method, "native")
+        self.assertEqual(len(inspection.pages[0].chunks), 1)
+        self.assertFalse(hasattr(inspection, "text"))
+        self.assertFalse(hasattr(inspection.pages[0].chunks[0], "text"))
+
+    def test_collection_inspection_marks_ocr_pages_for_review(self) -> None:
+        pdf = self.root / "scanned.pdf"
+        pdf.write_bytes(b"placeholder")
+        extractor = PdfExtractor(NativePdfExtractorWithBlankPage(), FakeOcrFallback())
+        self.service.close()
+        self.service = HearthService(self.database, pdf_extractor=extractor)
+
+        document_id = self.service.import_document(str(pdf))
+        document = self.service.list_documents()[0]
+        inspection = self.service.inspect_document(document_id)
+
+        self.assertEqual(document.ocr_page_count, 1)
+        self.assertIsNotNone(inspection)
+        assert inspection is not None
+        ocr_page = inspection.pages[1]
+        self.assertEqual(ocr_page.extraction_method, "ocr")
+        self.assertEqual(ocr_page.ocr_confidence, 0.92)
+        self.assertEqual(len(ocr_page.chunks), 1)
+
     def test_flat_semantic_index_reindex_and_removal_replace_active_content(self) -> None:
         initial_text = "The deployment owner is Ada."
         updated_text = "The deployment owner is Lin."

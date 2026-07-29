@@ -50,8 +50,3 @@ Evaluate a local claim-support checker separately from reranking because better 
 Any future claim-support mechanism must supersede or supplement ADR-0010 through a new ADR with explicit evaluation thresholds and rollback behavior.
 Hearth currently has no conversational memory and answers only from the currently imported collection.
 If a future feature persists conversation state, define its local storage, deletion, retention, and citation boundaries in a new ADR.
-
-## 9. Add collection inspection commands
-
-Add a local CLI command to list imported documents and inspect page, chunk, extraction-method, and OCR-warning metadata.
-Avoid exporting document text by default.

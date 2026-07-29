@@ -4,13 +4,13 @@ import argparse
 from pathlib import Path
 
 from .answering import LocalInferenceError, MLXLocalGenerator, StructuredGeneratorAnswerer
-from .domain import ImportError
+from .domain import DocumentInspection, ImportedDocument, ImportError
 from .embedding import EmbeddingError, FlatVectorIndex, IndexError, MLXEmbedder
 from .evaluation import EvaluationCorpusError, evaluate_corpus, load_evaluation_corpus
 from .service import HearthService
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Local-only, evidence-bound document chat.")
     parser.add_argument("--database", type=Path, default=Path(".hearth/hearth.sqlite"))
     parser.add_argument(
@@ -42,9 +42,12 @@ def main() -> int:
     reindexer.add_argument("path")
     remover = subcommands.add_parser("remove", help="Remove a document and its derived records.")
     remover.add_argument("path")
+    subcommands.add_parser("list", help="List imported documents without document text or source paths.")
+    inspector = subcommands.add_parser("inspect", help="Inspect one document's local provenance metadata.")
+    inspector.add_argument("document_id", type=int)
     evaluator = subcommands.add_parser("evaluate", help="Run a local synthetic or public evaluation corpus.")
     evaluator.add_argument("corpus", type=Path)
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     if (args.embedding_model is None) != (args.index_directory is None):
         parser.error("--embedding-model and --index-directory must be provided together.")
     service: HearthService | None = None
@@ -71,6 +74,14 @@ def main() -> int:
             print(f"Reindexed document {service.reindex_document(args.path)}.")
         elif args.command == "remove":
             print("Removed." if service.remove_document(args.path) else "No matching document found.")
+        elif args.command == "list":
+            _print_documents(service.list_documents())
+        elif args.command == "inspect":
+            inspection = service.inspect_document(args.document_id)
+            if inspection is None:
+                print(f"No imported document with ID {args.document_id}.")
+                return 1
+            _print_document_inspection(inspection)
         elif args.command == "evaluate":
             outcomes = evaluate_corpus(service, load_evaluation_corpus(args.corpus))
             for outcome in outcomes:
@@ -100,6 +111,34 @@ def main() -> int:
         if service is not None:
             service.close()
     return 0
+
+
+def _print_documents(documents: list[ImportedDocument]) -> None:
+    if not documents:
+        print("No imported documents.")
+        return
+    for document in documents:
+        print(
+            f"{document.id}: {document.name} "
+            f"(pages: {document.page_count}, chunks: {document.chunk_count}, OCR pages: {document.ocr_page_count})"
+        )
+
+
+def _print_document_inspection(inspection: DocumentInspection) -> None:
+    document = inspection.document
+    print(f"Document {document.id}: {document.name}")
+    for page in inspection.pages:
+        metadata = [
+            f"section: {page.section or 'none'}",
+            f"extraction: {page.extraction_method}",
+            f"chunks: {len(page.chunks)}",
+        ]
+        if page.extraction_method == "ocr":
+            confidence = f"{page.ocr_confidence:.2f}" if page.ocr_confidence is not None else "unavailable"
+            metadata.extend((f"OCR confidence: {confidence}", "OCR warning: verify against the original document"))
+        print(f"Page {page.page_number} ({', '.join(metadata)})")
+        for chunk in page.chunks:
+            print(f"  Chunk {chunk.id} (characters: {chunk.char_start}-{chunk.char_end})")
 
 
 if __name__ == "__main__":

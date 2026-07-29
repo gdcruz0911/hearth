@@ -4,7 +4,7 @@ from pathlib import Path
 
 from .answering import Answerer, EvidenceAnswerer, validate_answer
 from .chunking import chunk_page
-from .domain import Answer, ImportError
+from .domain import Answer, DocumentInspection, ImportedDocument, ImportError
 from .embedding import FlatVectorIndex
 from .extraction import OCRmyPDFFallback, PageExtractor, PdfExtractor, PopplerPdfExtractor, TextNoteExtractor
 from .retrieval import HashingVectorIndex, IdentityReranker, Reranker, has_lexical_support
@@ -59,6 +59,14 @@ class HearthService:
     def reindex_document(self, raw_path: str) -> int:
         """Re-extract and replace all derived chunks for one local document."""
         return self.import_document(raw_path)
+
+    def list_documents(self) -> list[ImportedDocument]:
+        """Return collection metadata without document text or canonical source paths."""
+        return self._store.list_documents()
+
+    def inspect_document(self, document_id: int) -> DocumentInspection | None:
+        """Return one document's page and chunk provenance without document text."""
+        return self._store.inspect_document(document_id)
 
     def answer(self, question: str) -> Answer:
         if not question.strip():

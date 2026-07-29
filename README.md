@@ -7,7 +7,7 @@ It is designed to answer from imported local documents with page-level source ev
 
 Hearth currently supports UTF-8 text and Markdown notes, plus PDF text extraction through local Poppler tools.
 It stores document, page, section, chunk, and extraction provenance in local SQLite.
-It supports local import, search, removal, reindexing, deterministic evaluation, and optional OCRmyPDF fallback for image-only PDF pages.
+It supports local import, search, removal, reindexing, collection inspection, deterministic evaluation, and optional OCRmyPDF fallback for image-only PDF pages.
 The default answer path returns retrieved source text with citations instead of generated prose.
 
 The local MLX runtime and three candidate models are provisioned separately for host-side evaluation.
@@ -46,8 +46,13 @@ Import a local note, query it, and run the public evaluation corpus.
 ```bash
 .venv/bin/python -m hearth.cli --database .hearth/hearth.sqlite import path/to/note.md
 .venv/bin/python -m hearth.cli --database .hearth/hearth.sqlite search "your question"
+.venv/bin/python -m hearth.cli --database .hearth/hearth.sqlite list
+.venv/bin/python -m hearth.cli --database .hearth/hearth.sqlite inspect 1
 .venv/bin/python -m hearth.cli --database .hearth/hearth.sqlite evaluate tests/fixtures/public/baseline-evaluation.json
 ```
+
+`list` reports imported document metadata and the ID used by `inspect`.
+`inspect` reports page, chunk, extraction, and OCR-warning metadata without rendering stored document text or canonical source paths.
 
 ## Verification
 
