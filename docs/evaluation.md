@@ -42,6 +42,34 @@ PYTHONPATH=src .venv/bin/python -m hearth.cli \
 The evaluation import rebuilds the derived index from the corpus documents.
 The command requires a host macOS terminal with Apple Silicon GPU access and does not download a model.
 
+The multi-document semantic corpus adds source disambiguation and unrelated-question coverage.
+
+```bash
+PYTHONPATH=src .venv/bin/python -m hearth.cli \
+  --embedding-model /path/to/local/embedding-model \
+  --index-directory /path/to/local/semantic-index \
+  --database /private/tmp/hearth-semantic-evaluation.sqlite \
+  evaluate tests/fixtures/public/semantic-evaluation.json
+```
+
+To evaluate the full experimental path, provide both local model options and run the generator-specific corpus.
+
+```bash
+PYTHONPATH=src .venv/bin/python -m hearth.cli \
+  --generator-model /path/to/local/generator-model \
+  --embedding-model /path/to/local/embedding-model \
+  --index-directory /path/to/local/semantic-index \
+  --database /private/tmp/hearth-semantic-generator-evaluation.sqlite \
+  evaluate tests/fixtures/public/generator-evaluation.json
+```
+
+Run the real local OCR integration test only on a machine with Poppler and OCRmyPDF installed.
+
+```bash
+HEARTH_RUN_OCR_INTEGRATION=1 PYTHONPATH=src .venv/bin/python \
+  -m unittest discover -s tests -p test_ocr_integration.py -v
+```
+
 ## Corpus rules
 
 Version-controlled corpora may contain only synthetic or public documents.
@@ -55,6 +83,8 @@ The unit suite covers exact note citations, unsupported-question abstention, PDF
 The baseline evaluation corpus verifies one supported citation and one abstention through the deterministic scaffold.
 The generator-specific corpus verifies a supported citation and an abstention when related source text is retrieved but does not contain the requested attribute.
 The semantic-index regression test verifies that unrelated retrieved evidence causes abstention while question-term-supported evidence remains answerable.
+The multi-document semantic corpus verifies source disambiguation, exact citation provenance, and unrelated-question abstention.
+The opt-in OCR integration test uses a synthetic image-only PDF and verifies local OCR citation metadata.
 
 ## Recorded public result
 
@@ -68,6 +98,11 @@ The run passed `supported-deployment-owner` and `abstained-annual-budget` for a 
 The run used the ADR-0009 lexical evidence-sufficiency gate.
 It confirms the observed unrelated-retrieval failure now abstains on the host MLX path.
 It does not establish a calibrated semantic relevance threshold, broad retrieval quality, multilingual behavior, or paraphrase robustness.
+
+On 2026-07-29, the Qwen3 8B 4-bit generator and Qwen3 Embedding 0.6B 4-bit MLX candidates passed the generator-specific public corpus together on the current Apple Silicon Mac.
+The run passed `supported-deployment-owner` and `abstained-owner-phone-number` for a result of 2/2.
+This confirms the combined local retrieval and structured-generator path for those narrow public cases.
+It does not establish claim-level support for arbitrary generated wording, broad retrieval quality, or model-default suitability.
 
 ## Future release gate
 

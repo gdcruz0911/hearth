@@ -34,3 +34,23 @@ Record model, retrieval, and prompt configuration alongside each evaluation run 
 
 Review the staged file list and diff for private documents, runtime data, credentials, absolute local paths, prompts, and responses.
 Commit and push only coherent source-only milestones after that review.
+
+## 7. Build a local model-evaluation leaderboard
+
+Evaluate pre-provisioned local generators, embedding models, and rerankers against a fixed synthetic or public corpus.
+Record model identity and fingerprint, chunking version, retrieval configuration, citation and abstention outcomes, malformed-response rate, latency, and peak memory.
+Do not use private documents, prompts, responses, or runtime paths in version-controlled leaderboard data.
+Do not automatically select a model from leaderboard results.
+Use the results to propose an explicit ADR for a default model configuration.
+
+## 8. Improve claim support and memory boundaries
+
+The current lexical gate rejects unrelated cited evidence but cannot prove that every generated claim is entailed by its citation.
+Evaluate a local claim-support checker separately from reranking because better retrieval alone cannot validate generated wording.
+Hearth currently has no conversational memory and answers only from the currently imported collection.
+If a future feature persists conversation state, define its local storage, deletion, retention, and citation boundaries in a new ADR.
+
+## 9. Add collection inspection commands
+
+Add a local CLI command to list imported documents and inspect page, chunk, extraction-method, and OCR-warning metadata.
+Avoid exporting document text by default.

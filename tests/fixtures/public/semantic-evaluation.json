@@ -1,0 +1,59 @@
+{
+  "documents": ["semantic-operations.md", "semantic-procurement.md"],
+  "cases": [
+    {
+      "id": "supported-deployment-owner",
+      "question": "Who is the deployment owner?",
+      "expected_status": "supported",
+      "expected_citations": [
+        {
+          "document_name": "semantic-operations.md",
+          "page_number": 1,
+          "quote_contains": "Ada"
+        }
+      ]
+    },
+    {
+      "id": "supported-archive-location",
+      "question": "Where is the archive location?",
+      "expected_status": "supported",
+      "expected_citations": [
+        {
+          "document_name": "semantic-operations.md",
+          "page_number": 1,
+          "quote_contains": "encrypted local storage"
+        }
+      ]
+    },
+    {
+      "id": "supported-procurement-owner",
+      "question": "Who is the procurement owner?",
+      "expected_status": "supported",
+      "expected_citations": [
+        {
+          "document_name": "semantic-procurement.md",
+          "page_number": 1,
+          "quote_contains": "Lin"
+        }
+      ]
+    },
+    {
+      "id": "supported-training-budget",
+      "question": "What is the training budget?",
+      "expected_status": "supported",
+      "expected_citations": [
+        {
+          "document_name": "semantic-procurement.md",
+          "page_number": 1,
+          "quote_contains": "1200 credits"
+        }
+      ]
+    },
+    {
+      "id": "abstained-quarterly-revenue",
+      "question": "What is the quarterly revenue?",
+      "expected_status": "abstained",
+      "expected_citations": []
+    }
+  ]
+}

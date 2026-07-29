@@ -8,11 +8,12 @@ It is designed to answer from imported local documents with page-level source ev
 Hearth currently supports UTF-8 text and Markdown notes, plus PDF text extraction through local Poppler tools.
 It stores document, page, section, chunk, and extraction provenance in local SQLite.
 It supports local import, search, removal, reindexing, deterministic evaluation, and optional OCRmyPDF fallback for image-only PDF pages.
-The current answer path returns retrieved source text with citations instead of generated prose.
+The default answer path returns retrieved source text with citations instead of generated prose.
 
-The local MLX runtime and three candidate models are provisioned separately for host-side benchmarking.
-An opt-in MLX generator adapter is implemented behind `--generator-model` and still requires host-side evidence evaluation.
+The local MLX runtime and three candidate models are provisioned separately for host-side evaluation.
+An opt-in MLX generator adapter is implemented behind `--generator-model`.
 An opt-in MLX embedding and flat-index path is implemented behind `--embedding-model` and `--index-directory`.
+The combined path passed the current narrow public host evaluation but remains experimental.
 MLX reranking is not implemented yet.
 
 ## Privacy boundary
@@ -66,10 +67,13 @@ An optional host-side MLX benchmark is documented in [benchmarking](docs/benchma
 
 ## Limitations
 
-- Retrieval uses a deterministic hashed-vector scaffold rather than a production semantic embedding index.
+- The default retrieval path uses a deterministic hashed-vector scaffold.
+- The optional local semantic embedding index is not yet a production-qualified default.
 - Reranking is not implemented.
-- Generated answers require an explicitly configured local model and remain experimental until citation and abstention evaluation is complete.
+- Generated answers require an explicitly configured local model and remain experimental despite the current narrow citation and abstention evaluation.
 - OCR quality depends on the source scan and can be poor for handwriting, complex layouts, tables, formulas, and low-quality images.
+- Hearth has no conversational memory.
+  It answers from the currently imported collection, so removed documents and reindexed source changes are not retained as answerable evidence.
 - There is no graphical interface, web server, cloud synchronization, or multi-user support.
 
 ## Project documentation

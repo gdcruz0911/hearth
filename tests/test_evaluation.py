@@ -79,6 +79,24 @@ class EvaluationTests(unittest.TestCase):
         )
         self.assertEqual(corpus.cases[1].expected_status, "abstained")
 
+    def test_public_semantic_corpus_covers_multiple_documents_and_disambiguation(self) -> None:
+        fixture_root = Path(__file__).parent / "fixtures" / "public"
+        corpus = load_evaluation_corpus(fixture_root / "semantic-evaluation.json")
+
+        outcomes = evaluate_corpus(self.service, corpus)
+
+        self.assertEqual(
+            [outcome.case_id for outcome in outcomes],
+            [
+                "supported-deployment-owner",
+                "supported-archive-location",
+                "supported-procurement-owner",
+                "supported-training-budget",
+                "abstained-quarterly-revenue",
+            ],
+        )
+        self.assertTrue(all(outcome.passed for outcome in outcomes))
+
     def test_related_unsupported_generator_question_retrieves_scaffold_evidence(self) -> None:
         self.service.import_document(str(self.document))
 

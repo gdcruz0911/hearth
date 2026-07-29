@@ -7,7 +7,7 @@ Local note or PDF
   -> local extraction and optional local OCR
   -> page-aware chunking
   -> SQLite provenance store
-  -> deterministic local retrieval scaffold
+  -> deterministic local retrieval scaffold or optional local flat semantic index
   -> local reranking boundary
   -> evidence-bound answer rendering
 ```
@@ -26,13 +26,14 @@ Local note or PDF
 `StructuredGeneratorAnswerer` accepts only strict JSON from an opt-in local generator and resolves citation metadata from the approved evidence bundle.
 `MLXLocalGenerator` loads a pre-provisioned local model directory and does not accept a model repository identifier.
 `validate_answer` rejects a non-abstained answer whose citations are absent or reference chunks outside the approved evidence bundle.
+`has_lexical_support` adds the ADR-0009 fail-closed check that a supported answer's cited evidence shares a meaningful term with the question.
 
 ## Data boundaries
 
 Original documents remain at their local source paths and are not stored as document bytes in SQLite.
 SQLite records canonical source paths, display names, pages, extraction metadata, sections, chunks, and character offsets.
-The current deterministic index is derived in memory and is not a durable retrieval artifact.
-Future embeddings and vector indexes must remain derived local data that can be rebuilt from source documents and SQLite provenance.
+The deterministic hashed index is derived in memory when no semantic index is configured.
+When configured, `FlatVectorIndex` stores its derived vectors and manifest in a local versioned directory that can be rebuilt from source documents and SQLite provenance.
 
 ## Design constraints
 
@@ -41,6 +42,7 @@ Local adapters must not introduce cloud fallback, telemetry, or document transmi
 Generated answers must follow the evidence-bound contract in [ADR-0006](decisions/ADR-0006-evidence-bound-answer-contract.md).
 The structured generator response protocol is defined in [ADR-0007](decisions/ADR-0007-structured-local-generator-response.md).
 The semantic embedding and index format are defined in [ADR-0008](decisions/ADR-0008-local-embedding-and-flat-vector-index.md).
+The lexical evidence-sufficiency gate is defined in [ADR-0009](decisions/ADR-0009-lexical-evidence-sufficiency-gate.md).
 
 ## Related decisions
 
@@ -50,3 +52,4 @@ The semantic embedding and index format are defined in [ADR-0008](decisions/ADR-
 - [ADR-0006: Evidence-bound answer contract](decisions/ADR-0006-evidence-bound-answer-contract.md)
 - [ADR-0007: Structured local generator response](decisions/ADR-0007-structured-local-generator-response.md)
 - [ADR-0008: Local embedding and flat vector index](decisions/ADR-0008-local-embedding-and-flat-vector-index.md)
+- [ADR-0009: Lexical evidence sufficiency gate](decisions/ADR-0009-lexical-evidence-sufficiency-gate.md)

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
 
 from hearth.domain import Evidence, ExtractedPage, SourceDocument
+from hearth.embedding import EmbeddingSpec, FlatVectorIndex
 from hearth.extraction import PdfExtractor
 from hearth.service import HearthService
 
@@ -62,6 +64,22 @@ class FakeSemanticIndex:
 class SemanticIndexReturningFirstChunk(FakeSemanticIndex):
     def search(self, question: str, chunks, limit: int = 20):
         return [Evidence(chunks[0], 0.9)] if chunks else []
+
+
+class FakeFlatEmbedder:
+    spec = EmbeddingSpec(
+        model_name="synthetic-embedding-model",
+        model_fingerprint="synthetic-fingerprint",
+        dimension=2,
+        pooling="last-token",
+        normalization="l2",
+    )
+
+    def __init__(self, vectors: dict[str, list[float]]):
+        self._vectors = vectors
+
+    def embed(self, texts: list[str]) -> list[list[float]]:
+        return [self._vectors[text] for text in texts]
 
 
 class HearthServiceTests(unittest.TestCase):
@@ -174,6 +192,48 @@ class HearthServiceTests(unittest.TestCase):
         self.assertEqual(len(semantic_index.rebuild_chunk_ids), 2)
         self.assertTrue(semantic_index.rebuild_chunk_ids[0])
         self.assertEqual(semantic_index.rebuild_chunk_ids[1], ())
+
+    def test_flat_semantic_index_reindex_and_removal_replace_active_content(self) -> None:
+        initial_text = "The deployment owner is Ada."
+        updated_text = "The deployment owner is Lin."
+        question = "Who is the deployment owner?"
+        self.note.write_text(initial_text, encoding="utf-8")
+        index = FlatVectorIndex(
+            self.root / "semantic-index",
+            FakeFlatEmbedder(
+                {
+                    initial_text: [1.0, 0.0],
+                    updated_text: [1.0, 0.0],
+                    question: [1.0, 0.0],
+                }
+            ),
+        )
+        self.service.close()
+        self.service = HearthService(self.database, semantic_index=index)
+
+        self.service.import_document(str(self.note))
+        self.note.write_text(updated_text, encoding="utf-8")
+        self.service.reindex_document(str(self.note))
+        answer = self.service.answer(question)
+
+        versions = [path for path in (self.root / "semantic-index" / "versions").iterdir() if path.is_dir()]
+        self.assertEqual(answer.status, "supported")
+        self.assertIn("Lin", answer.text)
+        self.assertNotIn("Ada", answer.text)
+        self.assertEqual(len(versions), 1)
+
+        self.assertTrue(self.service.remove_document(str(self.note)))
+        active_version = json.loads(
+            (self.root / "semantic-index" / "active.json").read_text(encoding="utf-8")
+        )["version"]
+        active_manifest = json.loads(
+            (self.root / "semantic-index" / "versions" / active_version / "manifest.json").read_text(encoding="utf-8")
+        )
+        remaining_versions = [path for path in (self.root / "semantic-index" / "versions").iterdir() if path.is_dir()]
+
+        self.assertEqual(self.service.answer(question).status, "abstained")
+        self.assertEqual(active_manifest["chunk_ids"], [])
+        self.assertEqual(len(remaining_versions), 1)
 
 
 if __name__ == "__main__":
