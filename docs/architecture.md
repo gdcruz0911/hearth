@@ -23,7 +23,7 @@ Local note or PDF
 `FlatVectorIndex` stores derived normalized float32 vectors and chunk IDs in a versioned local index directory when a semantic index is configured.
 `IdentityReranker` preserves candidate order until a local reranker is integrated.
 `EvidenceAnswerer` returns retrieved evidence directly when no generator is configured.
-`StructuredGeneratorAnswerer` accepts only strict JSON from an opt-in local generator and resolves citation metadata from the approved evidence bundle.
+`StructuredGeneratorAnswerer` accepts only strict JSON from an opt-in local generator, resolves citation metadata from the approved evidence bundle, and rejects generated factual text that is not a normalized contiguous span of a cited quote.
 `MLXLocalGenerator` loads a pre-provisioned local model directory and does not accept a model repository identifier.
 `validate_answer` rejects a non-abstained answer whose citations are absent or reference chunks outside the approved evidence bundle.
 `has_lexical_support` adds the ADR-0009 fail-closed check that a supported answer's cited evidence shares a meaningful term with the question.
@@ -43,6 +43,7 @@ Generated answers must follow the evidence-bound contract in [ADR-0006](decision
 The structured generator response protocol is defined in [ADR-0007](decisions/ADR-0007-structured-local-generator-response.md).
 The semantic embedding and index format are defined in [ADR-0008](decisions/ADR-0008-local-embedding-and-flat-vector-index.md).
 The lexical evidence-sufficiency gate is defined in [ADR-0009](decisions/ADR-0009-lexical-evidence-sufficiency-gate.md).
+The verbatim evidence answer contract is defined in [ADR-0010](decisions/ADR-0010-verbatim-evidence-answer-contract.md).
 
 ## Related decisions
 
@@ -53,3 +54,4 @@ The lexical evidence-sufficiency gate is defined in [ADR-0009](decisions/ADR-000
 - [ADR-0007: Structured local generator response](decisions/ADR-0007-structured-local-generator-response.md)
 - [ADR-0008: Local embedding and flat vector index](decisions/ADR-0008-local-embedding-and-flat-vector-index.md)
 - [ADR-0009: Lexical evidence sufficiency gate](decisions/ADR-0009-lexical-evidence-sufficiency-gate.md)
+- [ADR-0010: Verbatim evidence answer contract](decisions/ADR-0010-verbatim-evidence-answer-contract.md)

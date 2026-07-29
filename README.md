@@ -13,7 +13,7 @@ The default answer path returns retrieved source text with citations instead of 
 The local MLX runtime and three candidate models are provisioned separately for host-side evaluation.
 An opt-in MLX generator adapter is implemented behind `--generator-model`.
 An opt-in MLX embedding and flat-index path is implemented behind `--embedding-model` and `--index-directory`.
-The combined path passed the current narrow public host evaluation but remains experimental.
+The combined path passed a narrow public host evaluation before the current verbatim-answer contract and must be rerun before it can be relied on.
 MLX reranking is not implemented yet.
 
 ## Privacy boundary
@@ -71,6 +71,7 @@ An optional host-side MLX benchmark is documented in [benchmarking](docs/benchma
 - The optional local semantic embedding index is not yet a production-qualified default.
 - Reranking is not implemented.
 - Generated answers require an explicitly configured local model and remain experimental despite the current narrow citation and abstention evaluation.
+- Generated factual text must be a verbatim cited evidence span, so valid paraphrases and multi-source synthesis can abstain.
 - OCR quality depends on the source scan and can be poor for handwriting, complex layouts, tables, formulas, and low-quality images.
 - Hearth has no conversational memory.
   It answers from the currently imported collection, so removed documents and reindexed source changes are not retained as answerable evidence.

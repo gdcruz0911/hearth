@@ -63,6 +63,8 @@ PYTHONPATH=src .venv/bin/python -m hearth.cli \
   evaluate tests/fixtures/public/generator-evaluation.json
 ```
 
+After a structured-generator contract change, rerun every host-side generator corpus before relying on previously recorded generator results.
+
 Run the real local OCR integration test only on a machine with Poppler and OCRmyPDF installed.
 
 ```bash
@@ -85,10 +87,11 @@ The generator-specific corpus verifies a supported citation and an abstention wh
 The semantic-index regression test verifies that unrelated retrieved evidence causes abstention while question-term-supported evidence remains answerable.
 The multi-document semantic corpus verifies source disambiguation, exact citation provenance, and unrelated-question abstention.
 The opt-in OCR integration test uses a synthetic image-only PDF and verifies local OCR citation metadata.
+Structured-generator tests reject a paraphrase even when it has an approved citation ID and accept only normalized verbatim evidence spans.
 
 ## Recorded public result
 
-On 2026-07-27, the Qwen3 8B 4-bit MLX candidate passed the generator-specific public corpus on the current Apple Silicon Mac.
+On 2026-07-27, before ADR-0010, the Qwen3 8B 4-bit MLX candidate passed the generator-specific public corpus on the current Apple Silicon Mac.
 The run passed `supported-deployment-owner` and `abstained-owner-phone-number` for a result of 2/2.
 This demonstrates the local adapter’s structured response parsing, citation resolution, and related-evidence abstention path.
 It does not establish production-quality generation, broad retrieval quality, semantic claim support, or robust behavior against adversarial document text.
@@ -99,10 +102,15 @@ The run used the ADR-0009 lexical evidence-sufficiency gate.
 It confirms the observed unrelated-retrieval failure now abstains on the host MLX path.
 It does not establish a calibrated semantic relevance threshold, broad retrieval quality, multilingual behavior, or paraphrase robustness.
 
-On 2026-07-29, the Qwen3 8B 4-bit generator and Qwen3 Embedding 0.6B 4-bit MLX candidates passed the generator-specific public corpus together on the current Apple Silicon Mac.
+On 2026-07-29, before ADR-0010, the Qwen3 8B 4-bit generator and Qwen3 Embedding 0.6B 4-bit MLX candidates passed the generator-specific public corpus together on the current Apple Silicon Mac.
 The run passed `supported-deployment-owner` and `abstained-owner-phone-number` for a result of 2/2.
 This confirms the combined local retrieval and structured-generator path for those narrow public cases.
 It does not establish claim-level support for arbitrary generated wording, broad retrieval quality, or model-default suitability.
+
+On 2026-07-29, the Qwen3 Embedding 0.6B 4-bit MLX candidate passed the multi-document semantic corpus on the current Apple Silicon Mac.
+The run passed five cases for a result of 5/5.
+It verifies source disambiguation and unrelated-question abstention through the local semantic index.
+It does not evaluate generated answers or establish a production model default.
 
 ## Future release gate
 

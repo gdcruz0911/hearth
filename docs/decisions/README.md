@@ -14,3 +14,4 @@ Each record is a standalone Markdown file with graph-indexable frontmatter.
 | [ADR-0007](ADR-0007-structured-local-generator-response.md) | Structured local generator response | accepted | 2026-07-27 | - |
 | [ADR-0008](ADR-0008-local-embedding-and-flat-vector-index.md) | Local embedding and flat vector index | accepted | 2026-07-27 | - |
 | [ADR-0009](ADR-0009-lexical-evidence-sufficiency-gate.md) | Lexical evidence sufficiency gate | accepted | 2026-07-29 | - |
+| [ADR-0010](ADR-0010-verbatim-evidence-answer-contract.md) | Verbatim evidence answer contract | accepted | 2026-07-29 | - |

@@ -42,6 +42,41 @@ class StructuredGeneratorAnswererTests(unittest.TestCase):
         self.assertEqual(answer.citations[0].quote, "The owner is Ada.")
         self.assertIn("Who is the owner?", generator.prompts[0])
         self.assertIn('"chunk_id": 11', generator.prompts[0])
+        self.assertIn("verbatim contiguous excerpt", generator.prompts[0])
+
+    def test_normalized_verbatim_answer_is_supported(self) -> None:
+        generator = FakeGenerator('{"status":"supported","answer":"the owner is ada.","citation_chunk_ids":[11]}')
+
+        answer = StructuredGeneratorAnswerer(generator).answer("Who is the owner?", self.evidence)
+
+        self.assertEqual(answer.status, "supported")
+        self.assertEqual(answer.text, "the owner is ada.")
+
+    def test_verbatim_partial_answer_is_supported(self) -> None:
+        generator = FakeGenerator('{"status":"supported","answer":"Ada","citation_chunk_ids":[11]}')
+
+        answer = StructuredGeneratorAnswerer(generator).answer("Who is the owner?", self.evidence)
+
+        self.assertEqual(answer.status, "supported")
+        self.assertEqual(answer.text, "Ada")
+
+    def test_paraphrased_answer_abstains_even_with_valid_citation(self) -> None:
+        generator = FakeGenerator('{"status":"supported","answer":"Ada leads the team.","citation_chunk_ids":[11]}')
+
+        answer = StructuredGeneratorAnswerer(generator).answer("Who is the owner?", self.evidence)
+
+        self.assertEqual(answer.status, "abstained")
+        self.assertEqual(answer.citations, ())
+
+    def test_answer_from_an_uncited_chunk_abstains(self) -> None:
+        generator = FakeGenerator(
+            '{"status":"supported","answer":"The review is Tuesday.","citation_chunk_ids":[11]}'
+        )
+
+        answer = StructuredGeneratorAnswerer(generator).answer("When is the review?", self.evidence)
+
+        self.assertEqual(answer.status, "abstained")
+        self.assertEqual(answer.citations, ())
 
     def test_explicit_abstention_is_preserved(self) -> None:
         generator = FakeGenerator('{"status":"abstained","answer":"","citation_chunk_ids":[]}')

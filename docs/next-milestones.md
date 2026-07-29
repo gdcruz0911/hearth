@@ -45,8 +45,9 @@ Use the results to propose an explicit ADR for a default model configuration.
 
 ## 8. Improve claim support and memory boundaries
 
-The current lexical gate rejects unrelated cited evidence but cannot prove that every generated claim is entailed by its citation.
+ADR-0010 requires generated factual text to be a normalized verbatim span from cited evidence.
 Evaluate a local claim-support checker separately from reranking because better retrieval alone cannot validate generated wording.
+Any future claim-support mechanism must supersede or supplement ADR-0010 through a new ADR with explicit evaluation thresholds and rollback behavior.
 Hearth currently has no conversational memory and answers only from the currently imported collection.
 If a future feature persists conversation state, define its local storage, deletion, retention, and citation boundaries in a new ADR.
 
