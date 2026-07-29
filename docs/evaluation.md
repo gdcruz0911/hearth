@@ -81,12 +81,12 @@ Each abstained case must define no expected citations.
 
 ## Current coverage
 
-The unit suite covers exact note citations, unsupported-question abstention, PDF page metadata, OCR fallback behavior, removal, reindexing, and structured-generator response validation.
+The unit suite covers exact note citations, unsupported-question abstention, PDF page metadata, OCR fallback behavior, removal, reindexing, semantic-index rebuilding after OCR reindexing, and structured-generator response validation.
 The baseline evaluation corpus verifies one supported citation and one abstention through the deterministic scaffold.
 The generator-specific corpus verifies a supported citation and an abstention when related source text is retrieved but does not contain the requested attribute.
 The semantic-index regression test verifies that unrelated retrieved evidence causes abstention while question-term-supported evidence remains answerable.
 The multi-document semantic corpus verifies source disambiguation, exact citation provenance, and unrelated-question abstention.
-The opt-in OCR integration test uses a synthetic image-only PDF and verifies local OCR citation metadata.
+The opt-in OCR integration test uses a synthetic image-only PDF and verifies local OCR citation metadata, record replacement after reindexing, and one surviving inspected document.
 Structured-generator tests reject a paraphrase even when it has an approved citation ID and accept only normalized verbatim evidence spans.
 
 ## Recorded public result
@@ -111,6 +111,10 @@ On 2026-07-29, the Qwen3 Embedding 0.6B 4-bit MLX candidate passed the multi-doc
 The run passed five cases for a result of 5/5.
 It verifies source disambiguation and unrelated-question abstention through the local semantic index.
 It does not evaluate generated answers or establish a production model default.
+
+On 2026-07-29, the local Poppler and OCRmyPDF image-only-PDF integration test passed after reindexing the public fixture.
+It verifies that reindexing keeps one collection record, preserves OCR page provenance, and returns a cited answer from the reindexed content.
+It does not define retention or deletion behavior for derived OCR PDFs.
 
 ## Future release gate
 

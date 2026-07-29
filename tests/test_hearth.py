@@ -181,6 +181,35 @@ class HearthServiceTests(unittest.TestCase):
         self.assertEqual(answer.citations[0].extraction_method, "ocr")
         self.assertEqual(answer.citations[0].ocr_confidence, 0.92)
 
+    def test_ocr_reindex_replaces_records_and_rebuilds_semantic_index(self) -> None:
+        pdf = self.root / "scanned.pdf"
+        pdf.write_bytes(b"placeholder")
+        fallback = FakeOcrFallback()
+        semantic_index = FakeSemanticIndex()
+        extractor = PdfExtractor(NativePdfExtractorWithBlankPage(), fallback)
+        self.service.close()
+        self.service = HearthService(
+            self.database,
+            pdf_extractor=extractor,
+            semantic_index=semantic_index,
+        )
+
+        self.service.import_document(str(pdf))
+        document_id = self.service.reindex_document(str(pdf))
+        documents = self.service.list_documents()
+        inspection = self.service.inspect_document(document_id)
+
+        self.assertEqual(fallback.calls, [(pdf.resolve(), (2,)), (pdf.resolve(), (2,))])
+        self.assertEqual(len(documents), 1)
+        self.assertEqual(documents[0].id, document_id)
+        self.assertEqual(documents[0].page_count, 2)
+        self.assertEqual(documents[0].ocr_page_count, 1)
+        self.assertIsNotNone(inspection)
+        assert inspection is not None
+        self.assertEqual(inspection.pages[1].extraction_method, "ocr")
+        self.assertEqual(len(semantic_index.rebuild_chunk_ids), 2)
+        self.assertTrue(all(chunk_ids for chunk_ids in semantic_index.rebuild_chunk_ids))
+
     def test_semantic_index_rebuilds_after_import_and_removal(self) -> None:
         semantic_index = FakeSemanticIndex()
         self.service.close()

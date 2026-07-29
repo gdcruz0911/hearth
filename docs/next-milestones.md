@@ -8,10 +8,12 @@ It is not an accepted Architecture Decision Record and does not select implement
 Add synthetic or public PDF fixtures under `tests/fixtures/public/`.
 Expand coverage beyond the existing page-boundary, native-text, and citation checks.
 
-## 2. Expand local OCR fallback verification
+## 2. Define OCR output lifecycle
 
-The `OCRmyPDFFallback` adapter is configured through a caller-supplied output directory.
-Add public or synthetic fixtures for OCR failure and reindexing after OCR.
+The import and reindex path is verified against the public image-only PDF fixture.
+Each successful OCR run writes a derived PDF to the caller-configured private output directory.
+Choose retention and deletion semantics for those artifacts, including reindexing, source removal, and failed cleanup.
+Record that decision in a new ADR before implementation because it determines private-data retention behavior.
 
 ## 3. Evaluate the local semantic retrieval index
 

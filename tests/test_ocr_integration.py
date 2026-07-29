@@ -35,8 +35,21 @@ class OCRIntegrationTests(unittest.TestCase):
         self.assertEqual(native_document.pages[0].text.strip(), "")
 
         self.service.import_document(str(self.fixture))
+        document_id = self.service.reindex_document(str(self.fixture))
+        documents = self.service.list_documents()
+        inspection = self.service.inspect_document(document_id)
         answer = self.service.answer("Where is the archive?")
 
+        self.assertEqual(len(documents), 1)
+        self.assertEqual(documents[0].id, document_id)
+        self.assertEqual(documents[0].name, "ocr-image-only.pdf")
+        self.assertEqual(documents[0].page_count, 1)
+        self.assertEqual(documents[0].chunk_count, 1)
+        self.assertEqual(documents[0].ocr_page_count, 1)
+        self.assertIsNotNone(inspection)
+        assert inspection is not None
+        self.assertEqual(inspection.pages[0].extraction_method, "ocr")
+        self.assertEqual(len(inspection.pages[0].chunks), 1)
         self.assertEqual(answer.status, "supported")
         self.assertEqual(answer.citations[0].document_name, "ocr-image-only.pdf")
         self.assertEqual(answer.citations[0].page_number, 1)
