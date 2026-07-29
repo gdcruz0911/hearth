@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from hearth.domain import ExtractedPage, SourceDocument
+from hearth.domain import Evidence, ExtractedPage, SourceDocument
 from hearth.extraction import PdfExtractor
 from hearth.service import HearthService
 
@@ -59,6 +59,11 @@ class FakeSemanticIndex:
         return []
 
 
+class SemanticIndexReturningFirstChunk(FakeSemanticIndex):
+    def search(self, question: str, chunks, limit: int = 20):
+        return [Evidence(chunks[0], 0.9)] if chunks else []
+
+
 class HearthServiceTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary_directory = tempfile.TemporaryDirectory()
@@ -90,6 +95,26 @@ class HearthServiceTests(unittest.TestCase):
 
         self.assertEqual(answer.status, "abstained")
         self.assertEqual(answer.citations, ())
+
+    def test_semantic_retrieval_without_question_term_support_abstains(self) -> None:
+        self.service.close()
+        self.service = HearthService(self.database, semantic_index=SemanticIndexReturningFirstChunk())
+        self.service.import_document(str(self.note))
+
+        answer = self.service.answer("What is the annual budget?")
+
+        self.assertEqual(answer.status, "abstained")
+        self.assertEqual(answer.citations, ())
+
+    def test_semantic_retrieval_with_question_term_support_answers(self) -> None:
+        self.service.close()
+        self.service = HearthService(self.database, semantic_index=SemanticIndexReturningFirstChunk())
+        self.service.import_document(str(self.note))
+
+        answer = self.service.answer("Who is the deployment owner?")
+
+        self.assertEqual(answer.status, "supported")
+        self.assertIn("Ada", answer.text)
 
     def test_removal_deletes_searchable_content(self) -> None:
         self.service.import_document(str(self.note))

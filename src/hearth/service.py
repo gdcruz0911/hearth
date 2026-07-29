@@ -7,7 +7,7 @@ from .chunking import chunk_page
 from .domain import Answer, ImportError
 from .embedding import FlatVectorIndex
 from .extraction import OCRmyPDFFallback, PageExtractor, PdfExtractor, PopplerPdfExtractor, TextNoteExtractor
-from .retrieval import HashingVectorIndex, IdentityReranker, Reranker
+from .retrieval import HashingVectorIndex, IdentityReranker, Reranker, has_lexical_support
 from .store import SQLiteStore
 
 
@@ -70,7 +70,12 @@ class HearthService:
             else HashingVectorIndex(chunks).search(question, limit=20)
         )
         evidence = self._reranker.rerank(question, candidates, limit=6)
-        return validate_answer(self._answerer.answer(question, evidence), evidence)
+        answer = validate_answer(self._answerer.answer(question, evidence), evidence)
+        if answer.status == "supported" and not has_lexical_support(
+            question, [citation.quote for citation in answer.citations]
+        ):
+            return Answer.abstain()
+        return answer
 
     def _rebuild_semantic_index(self) -> None:
         if self._semantic_index is not None:

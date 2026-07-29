@@ -64,6 +64,14 @@ def _terms(text: str) -> set[str]:
     }
 
 
+def has_lexical_support(question: str, texts: list[str]) -> bool:
+    """Returns whether cited text contains a meaningful term from the question."""
+    question_terms = _terms(question)
+    if not question_terms:
+        return False
+    return any(question_terms.intersection(_terms(text)) for text in texts)
+
+
 def _vector(text: str, dimensions: int) -> list[float]:
     vector = [0.0] * dimensions
     for term in _terms(text):

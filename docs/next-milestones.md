@@ -22,6 +22,7 @@ Test deletion, reindexing, version mismatch handling, and retrieval quality befo
 
 Evaluate the local generator adapter against citations and abstention after the successful host-side performance benchmark.
 Expand the public or synthetic corpus to cover malformed output, unsupported questions, and source-bound generated answers.
+Evaluate whether a local reranker or claim-support checker should replace or supplement the conservative lexical evidence-sufficiency gate from ADR-0009.
 
 ## 5. Create the local evaluation corpus and release gate
 
