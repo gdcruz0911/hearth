@@ -29,6 +29,19 @@ PYTHONPATH=src .venv/bin/python -m hearth.cli --generator-model /path/to/local/m
 
 This host-side check is required before any generator model can become the product default.
 
+To exercise the experimental local semantic index, supply both a pre-provisioned embedding model and a local derived-index directory.
+
+```bash
+PYTHONPATH=src .venv/bin/python -m hearth.cli \
+  --embedding-model /path/to/local/embedding-model \
+  --index-directory /path/to/local/semantic-index \
+  --database /private/tmp/hearth-semantic-evaluation.sqlite \
+  evaluate tests/fixtures/public/baseline-evaluation.json
+```
+
+The evaluation import rebuilds the derived index from the corpus documents.
+The command requires a host macOS terminal with Apple Silicon GPU access and does not download a model.
+
 ## Corpus rules
 
 Version-controlled corpora may contain only synthetic or public documents.
@@ -41,6 +54,7 @@ Each abstained case must define no expected citations.
 The unit suite covers exact note citations, unsupported-question abstention, PDF page metadata, OCR fallback behavior, removal, reindexing, and structured-generator response validation.
 The baseline evaluation corpus verifies one supported citation and one abstention through the deterministic scaffold.
 The generator-specific corpus verifies a supported citation and an abstention when related source text is retrieved but does not contain the requested attribute.
+The semantic-index regression test verifies that unrelated retrieved evidence causes abstention while question-term-supported evidence remains answerable.
 
 ## Recorded public result
 
@@ -48,6 +62,12 @@ On 2026-07-27, the Qwen3 8B 4-bit MLX candidate passed the generator-specific pu
 The run passed `supported-deployment-owner` and `abstained-owner-phone-number` for a result of 2/2.
 This demonstrates the local adapter’s structured response parsing, citation resolution, and related-evidence abstention path.
 It does not establish production-quality generation, broad retrieval quality, semantic claim support, or robust behavior against adversarial document text.
+
+On 2026-07-29, the Qwen3 Embedding 0.6B 4-bit MLX candidate passed the baseline public corpus through the local flat semantic index on the current Apple Silicon Mac.
+The run passed `supported-deployment-owner` and `abstained-annual-budget` for a result of 2/2.
+The run used the ADR-0009 lexical evidence-sufficiency gate.
+It confirms the observed unrelated-retrieval failure now abstains on the host MLX path.
+It does not establish a calibrated semantic relevance threshold, broad retrieval quality, multilingual behavior, or paraphrase robustness.
 
 ## Future release gate
 
