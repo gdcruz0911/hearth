@@ -2,7 +2,8 @@
 
 ## Local runtime boundary
 
-Imported documents, derived OCR PDFs, SQLite databases, retrieval artifacts, local model weights, prompts, and responses are runtime data that remain on the user’s Mac.
+Imported documents, SQLite databases, retrieval artifacts, local model weights, prompts, and responses are runtime data that remain on the user’s Mac.
+Derived OCR PDFs are deleted after local text extraction by default and remain runtime data only when explicitly retained for inspection.
 The current ingestion, retrieval, and answer paths use local files, SQLite, and local command-line tools.
 The current application code does not configure telemetry, a cloud database, a hosted vector service, a cloud model API, or a cloud fallback.
 
@@ -20,7 +21,7 @@ Public or synthetic PDF fixtures are allowed only under `tests/fixtures/public/`
 
 ## Operational guidance
 
-Keep OCR output and local databases outside version control.
+Keep any explicitly retained OCR output and local databases outside version control.
 Review `git status` and the staged diff before every commit.
 Use only synthetic or public data in tests and version-controlled evaluation corpora.
 Treat any file containing canonical source paths as private runtime data because paths can reveal user names and directory structure.

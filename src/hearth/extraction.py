@@ -98,11 +98,12 @@ class PopplerPdfExtractor:
 
 
 class OCRmyPDFFallback:
-    """Runs local OCRmyPDF once and returns only the requested OCR page text."""
+    """Runs local OCRmyPDF and deletes its derived PDF unless retention is explicitly enabled."""
 
-    def __init__(self, native_extractor: PageExtractor, output_directory: Path):
+    def __init__(self, native_extractor: PageExtractor, output_directory: Path, retain_output: bool = False):
         self._native_extractor = native_extractor
         self._output_directory = output_directory
+        self._retain_output = retain_output
 
     def extract_pages(self, pdf_path: Path, page_numbers: tuple[int, ...]) -> dict[int, ExtractedPage]:
         if not page_numbers:
@@ -118,31 +119,36 @@ class OCRmyPDFFallback:
                 timeout=600,
             )
             ocr_document = self._native_extractor.extract(output_path)
+            requested = set(page_numbers)
+            return {
+                page.page_number: ExtractedPage(
+                    page_number=page.page_number,
+                    text=page.text,
+                    section=page.section,
+                    extraction_method="ocr",
+                    ocr_confidence=None,
+                )
+                for page in ocr_document.pages
+                if page.page_number in requested and page.text.strip()
+            }
         except FileNotFoundError as exc:
-            output_path.unlink(missing_ok=True)
             raise ImportError("OCR fallback requires local OCRmyPDF.") from exc
         except subprocess.TimeoutExpired as exc:
-            output_path.unlink(missing_ok=True)
             raise ImportError("OCR fallback timed out after 10 minutes.") from exc
         except subprocess.CalledProcessError as exc:
-            output_path.unlink(missing_ok=True)
             raise ImportError("Local OCR fallback failed.") from exc
-        except ImportError:
-            output_path.unlink(missing_ok=True)
-            raise
+        finally:
+            if not self._retain_output:
+                _delete_temporary_ocr_output(output_path)
 
-        requested = set(page_numbers)
-        return {
-            page.page_number: ExtractedPage(
-                page_number=page.page_number,
-                text=page.text,
-                section=page.section,
-                extraction_method="ocr",
-                ocr_confidence=None,
-            )
-            for page in ocr_document.pages
-            if page.page_number in requested and page.text.strip()
-        }
+
+def _delete_temporary_ocr_output(output_path: Path) -> None:
+    try:
+        output_path.unlink(missing_ok=True)
+    except OSError as exc:
+        raise ImportError(
+            "Temporary OCR output could not be deleted. Remove it manually before retrying."
+        ) from exc
 
 
 def _first_markdown_heading(text: str) -> str | None:

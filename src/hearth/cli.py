@@ -16,7 +16,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--ocr-output-directory",
         type=Path,
-        help="Private local directory for OCR-derived PDFs. Enables local OCRmyPDF fallback.",
+        help="Private local scratch directory for OCRmyPDF. Enables local OCR fallback.",
+    )
+    parser.add_argument(
+        "--retain-ocr-output",
+        action="store_true",
+        help="Keep OCR-derived PDFs in --ocr-output-directory for local inspection.",
     )
     parser.add_argument(
         "--generator-model",
@@ -50,6 +55,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if (args.embedding_model is None) != (args.index_directory is None):
         parser.error("--embedding-model and --index-directory must be provided together.")
+    if args.retain_ocr_output and args.ocr_output_directory is None:
+        parser.error("--retain-ocr-output requires --ocr-output-directory.")
     service: HearthService | None = None
     try:
         answerer = (
@@ -67,6 +74,7 @@ def main(argv: list[str] | None = None) -> int:
             answerer=answerer,
             semantic_index=semantic_index,
             ocr_output_directory=args.ocr_output_directory,
+            retain_ocr_output=args.retain_ocr_output,
         )
         if args.command == "import":
             print(f"Imported document {service.import_document(args.path)}.")

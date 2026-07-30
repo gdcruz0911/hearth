@@ -20,14 +20,21 @@ class HearthService:
         answerer: Answerer | None = None,
         semantic_index: FlatVectorIndex | None = None,
         ocr_output_directory: Path | None = None,
+        retain_ocr_output: bool = False,
     ):
+        if retain_ocr_output and ocr_output_directory is None:
+            raise ValueError("retain_ocr_output requires ocr_output_directory.")
         self._store = SQLiteStore(database_path)
         self._note_extractor = TextNoteExtractor()
         native_pdf_extractor = PopplerPdfExtractor()
         self._pdf_extractor = pdf_extractor or PdfExtractor(
             native_extractor=native_pdf_extractor,
             ocr_fallback=(
-                OCRmyPDFFallback(native_pdf_extractor, ocr_output_directory)
+                OCRmyPDFFallback(
+                    native_pdf_extractor,
+                    ocr_output_directory,
+                    retain_output=retain_ocr_output,
+                )
                 if ocr_output_directory is not None
                 else None
             ),

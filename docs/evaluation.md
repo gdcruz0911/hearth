@@ -86,7 +86,7 @@ The baseline evaluation corpus verifies one supported citation and one abstentio
 The generator-specific corpus verifies a supported citation and an abstention when related source text is retrieved but does not contain the requested attribute.
 The semantic-index regression test verifies that unrelated retrieved evidence causes abstention while question-term-supported evidence remains answerable.
 The multi-document semantic corpus verifies source disambiguation, exact citation provenance, and unrelated-question abstention.
-The opt-in OCR integration test uses a synthetic image-only PDF and verifies local OCR citation metadata, record replacement after reindexing, and one surviving inspected document.
+The opt-in OCR integration test uses a synthetic image-only PDF and verifies local OCR citation metadata, record replacement after reindexing, default temporary-output deletion, explicit output retention, and one surviving inspected document.
 Structured-generator tests reject a paraphrase even when it has an approved citation ID and accept only normalized verbatim evidence spans.
 
 ## Recorded public result
@@ -113,8 +113,7 @@ It verifies source disambiguation and unrelated-question abstention through the 
 It does not evaluate generated answers or establish a production model default.
 
 On 2026-07-29, the local Poppler and OCRmyPDF image-only-PDF integration test passed after reindexing the public fixture.
-It verifies that reindexing keeps one collection record, preserves OCR page provenance, and returns a cited answer from the reindexed content.
-It does not define retention or deletion behavior for derived OCR PDFs.
+It verifies that reindexing keeps one collection record, preserves OCR page provenance, returns a cited answer from the reindexed content, deletes temporary derived PDFs by default, and retains one only when explicitly configured.
 
 ## Future release gate
 

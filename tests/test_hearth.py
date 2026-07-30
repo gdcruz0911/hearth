@@ -181,6 +181,10 @@ class HearthServiceTests(unittest.TestCase):
         self.assertEqual(answer.citations[0].extraction_method, "ocr")
         self.assertEqual(answer.citations[0].ocr_confidence, 0.92)
 
+    def test_retaining_ocr_output_requires_an_output_directory(self) -> None:
+        with self.assertRaisesRegex(ValueError, "retain_ocr_output requires ocr_output_directory"):
+            HearthService(self.database, retain_ocr_output=True)
+
     def test_ocr_reindex_replaces_records_and_rebuilds_semantic_index(self) -> None:
         pdf = self.root / "scanned.pdf"
         pdf.write_bytes(b"placeholder")

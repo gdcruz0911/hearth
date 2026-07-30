@@ -16,7 +16,7 @@ Local note or PDF
 
 `TextNoteExtractor` imports UTF-8 text and Markdown files as one logical page.
 `PopplerPdfExtractor` extracts digital PDF text one page at a time through local Poppler commands.
-`OCRmyPDFFallback` is an optional local extension that fills only pages with no native text.
+`OCRmyPDFFallback` is an optional local extension that fills only pages with no native text and deletes its derived PDF after extraction unless retention is explicitly configured.
 `chunk_page` preserves page boundaries and stores character offsets for each chunk.
 `SQLiteStore` is the authoritative store for document identities, page metadata, chunks, and provenance.
 `HashingVectorIndex` is an in-memory deterministic retrieval scaffold used when no semantic index is configured.
@@ -32,6 +32,7 @@ Local note or PDF
 
 Original documents remain at their local source paths and are not stored as document bytes in SQLite.
 SQLite records canonical source paths, display names, pages, extraction metadata, sections, chunks, and character offsets.
+OCR-derived PDFs are transient private scratch artifacts by default and remain only when a user explicitly opts in to retention for inspection.
 The deterministic hashed index is derived in memory when no semantic index is configured.
 When configured, `FlatVectorIndex` stores its derived vectors and manifest in a local versioned directory that can be rebuilt from source documents and SQLite provenance.
 
@@ -44,6 +45,7 @@ The structured generator response protocol is defined in [ADR-0007](decisions/AD
 The semantic embedding and index format are defined in [ADR-0008](decisions/ADR-0008-local-embedding-and-flat-vector-index.md).
 The lexical evidence-sufficiency gate is defined in [ADR-0009](decisions/ADR-0009-lexical-evidence-sufficiency-gate.md).
 The verbatim evidence answer contract is defined in [ADR-0010](decisions/ADR-0010-verbatim-evidence-answer-contract.md).
+The OCR artifact lifecycle is defined in [ADR-0011](decisions/ADR-0011-transient-ocr-artifact-lifecycle.md).
 
 ## Related decisions
 
@@ -55,3 +57,4 @@ The verbatim evidence answer contract is defined in [ADR-0010](decisions/ADR-001
 - [ADR-0008: Local embedding and flat vector index](decisions/ADR-0008-local-embedding-and-flat-vector-index.md)
 - [ADR-0009: Lexical evidence sufficiency gate](decisions/ADR-0009-lexical-evidence-sufficiency-gate.md)
 - [ADR-0010: Verbatim evidence answer contract](decisions/ADR-0010-verbatim-evidence-answer-contract.md)
+- [ADR-0011: Transient OCR artifact lifecycle](decisions/ADR-0011-transient-ocr-artifact-lifecycle.md)

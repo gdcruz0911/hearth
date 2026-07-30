@@ -55,3 +55,19 @@ class OCRIntegrationTests(unittest.TestCase):
         self.assertEqual(answer.citations[0].page_number, 1)
         self.assertEqual(answer.citations[0].extraction_method, "ocr")
         self.assertIn("cedar shelf", answer.citations[0].quote.lower())
+        self.assertEqual(list((self.root / "ocr-output").iterdir()), [])
+
+    def test_explicit_retention_keeps_ocr_pdf(self) -> None:
+        retained_service = HearthService(
+            self.root / "retained.sqlite",
+            ocr_output_directory=self.root / "retained-ocr-output",
+            retain_ocr_output=True,
+        )
+        try:
+            retained_service.import_document(str(self.fixture))
+        finally:
+            retained_service.close()
+
+        retained_files = list((self.root / "retained-ocr-output").iterdir())
+        self.assertEqual(len(retained_files), 1)
+        self.assertEqual(retained_files[0].suffix, ".pdf")

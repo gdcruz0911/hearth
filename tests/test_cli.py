@@ -91,6 +91,15 @@ class CollectionInspectionCliTests(unittest.TestCase):
         self.assertIn("OCR warning: verify against the original document", output.getvalue())
         self.assertNotIn("OCR-derived archive metadata.", output.getvalue())
 
+    def test_retain_ocr_output_requires_an_output_directory(self) -> None:
+        error = io.StringIO()
+
+        with contextlib.redirect_stderr(error), self.assertRaises(SystemExit) as exit_context:
+            main(["--retain-ocr-output", "list"])
+
+        self.assertEqual(exit_context.exception.code, 2)
+        self.assertIn("--retain-ocr-output requires --ocr-output-directory.", error.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main()

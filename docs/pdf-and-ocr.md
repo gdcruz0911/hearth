@@ -13,8 +13,11 @@ OCR is optional and enabled by passing `--ocr-output-directory` to the CLI.
 It substitutes OCR text only for those blank pages and preserves native text for pages that already had usable extraction.
 Pages produced by the fallback are marked with the `ocr` extraction method in citations.
 
-The output directory is caller-configured because OCR PDFs are derived private data.
-Keep it outside source control and manage it alongside its source document.
+The output directory is caller-configured private scratch space because OCR PDFs are derived private data.
+Hearth deletes the derived OCR PDF after local text extraction by default.
+If manual inspection needs the enhanced PDF, explicitly pass `--retain-ocr-output` with the output directory.
+Retained files are private runtime data and remain in that caller-managed directory until manually removed.
+Hearth does not offer a broad cleanup command because it cannot safely delete unrelated files from a caller-owned directory.
 OCR failures and timeouts are reported as import errors rather than silently returning incomplete extraction.
 
 ## Quality limits
@@ -32,4 +35,4 @@ Both tools run locally when Hearth invokes them.
 
 ## Decision record
 
-The ingestion policy is defined in [ADR-0003](decisions/ADR-0003-local-pdf-and-ocr-ingestion.md).
+The ingestion and artifact-retention policies are defined in [ADR-0003](decisions/ADR-0003-local-pdf-and-ocr-ingestion.md) and [ADR-0011](decisions/ADR-0011-transient-ocr-artifact-lifecycle.md).
