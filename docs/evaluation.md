@@ -85,6 +85,7 @@ The unit suite covers exact note citations, native PDF page boundaries and citat
 The baseline evaluation corpus verifies one supported citation and one abstention through the deterministic scaffold.
 The generator-specific corpus verifies a supported citation and an abstention when related source text is retrieved but does not contain the requested attribute.
 The semantic-index regression test verifies that unrelated retrieved evidence causes abstention while question-term-supported evidence remains answerable.
+The opt-in local MLX semantic integration test verifies real reindex replacement, deletion, and fail-closed manifest mismatch handling with synthetic temporary content.
 The multi-document semantic corpus verifies source disambiguation, exact citation provenance, and unrelated-question abstention.
 The opt-in OCR integration test uses a synthetic image-only PDF and verifies local OCR citation metadata, record replacement after reindexing, default temporary-output deletion, explicit output retention, and one surviving inspected document.
 Structured-generator tests reject a paraphrase even when it has an approved citation ID and accept only normalized verbatim evidence spans.
@@ -117,6 +118,10 @@ It verifies that reindexing keeps one collection record, preserves OCR page prov
 
 On 2026-07-30, the local Poppler native-text PDF integration test passed against a public two-page fixture.
 It verifies page-isolated native extraction, collection metadata, and page-specific citations for two distinct questions.
+
+On 2026-07-30, the Qwen3 Embedding 0.6B 4-bit MLX candidate passed the local semantic lifecycle integration test on the current Apple Silicon Mac.
+It verifies real reindex replacement, deletion abstention, and fail-closed manifest mismatch handling with synthetic temporary content.
+It does not establish production-default suitability, broader retrieval quality, or a model-selection decision.
 
 ## Future release gate
 
