@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <meta name="color-scheme" content="light">
+    <meta name="color-scheme" content="dark">
     <title>Hearth</title>
     <link rel="stylesheet" href="assets/app.css">
     <script defer src="assets/app.js"></script>
@@ -11,54 +11,71 @@
   <body>
     <main class="shell">
       <header class="topbar">
-        <div>
-          <p class="eyebrow">Local-first document chat</p>
+        <div class="brand">
+          <p class="eyebrow">Your private knowledge base</p>
           <h1>Hearth</h1>
         </div>
-        <button id="import-button" class="button button-primary" type="button">Import a local file</button>
+        <div class="topbar-actions">
+          <p class="local-note">Runs only on this Mac</p>
+          <button id="import-button" class="button button-primary" type="button">Import a local file</button>
+        </div>
       </header>
 
       <p id="status-message" class="status" role="status" aria-live="polite">Loading your local collection.</p>
 
-      <section class="intro-grid" aria-label="Collection overview">
-        <div class="intro-copy">
-          <p class="eyebrow">Your private knowledge base</p>
-          <h2>Ask from the documents you have chosen.</h2>
-          <p>Hearth runs only on this Mac. It keeps original files in place, shows evidence for every supported answer, and asks before changing a file or collection record.</p>
-        </div>
-        <dl id="health-summary" class="health-summary"></dl>
-      </section>
-
-      <section class="ask-panel" aria-labelledby="ask-heading">
-        <div>
-          <p class="eyebrow">Evidence-bound search</p>
-          <h2 id="ask-heading">What would you like to find?</h2>
-        </div>
-        <form id="search-form">
-          <label class="sr-only" for="question">Question</label>
-          <input id="question" name="question" autocomplete="off" placeholder="Ask about your imported documents" required>
-          <button class="button button-primary" type="submit">Ask Hearth</button>
-        </form>
-        <div id="answer-panel" class="answer-panel" hidden></div>
-      </section>
-
-      <section class="workspace" aria-label="Collection workspace">
-        <div class="collection-panel">
-          <div class="section-heading">
-            <div>
-              <p class="eyebrow">Collection</p>
-              <h2>Documents</h2>
-            </div>
-            <span id="document-count" class="count"></span>
+      <section class="map-section" aria-labelledby="map-heading">
+        <header class="map-heading">
+          <div>
+            <p class="eyebrow">Collection topology</p>
+            <h2 id="map-heading">Where your knowledge gathers</h2>
           </div>
-          <div id="attention-panel" class="attention-panel" hidden></div>
-          <div id="document-list" class="document-list"></div>
+          <dl id="health-summary" class="health-summary" aria-label="Collection health"></dl>
+        </header>
+
+        <div id="map-surface" class="map-surface" role="region" aria-label="Interactive knowledge map">
+          <svg id="map-links" class="map-links" aria-hidden="true"></svg>
+          <div id="map-nodes" class="map-nodes"></div>
+          <div class="map-key" aria-label="Map key">
+            <span><i class="key-dot key-dot-hearth"></i>Hearth</span>
+            <span><i class="key-dot key-dot-cluster"></i>Shared section</span>
+            <span><i class="key-dot key-dot-document"></i>Source</span>
+          </div>
         </div>
+
+        <footer class="map-footer">
+          <p id="map-summary" class="map-summary"></p>
+          <button id="reset-map" class="button button-quiet" type="button">Return to hearth</button>
+        </footer>
+      </section>
+
+      <section class="support-grid" aria-label="Collection tools">
+        <section class="ask-panel" aria-labelledby="ask-heading">
+          <p class="eyebrow">Evidence-bound search</p>
+          <h2 id="ask-heading">What do you want to find?</h2>
+          <form id="search-form">
+            <label class="sr-only" for="question">Question</label>
+            <input id="question" name="question" autocomplete="off" placeholder="Ask about your imported documents" required>
+            <button class="button button-primary" type="submit">Ask Hearth</button>
+          </form>
+          <div id="answer-panel" class="answer-panel" hidden></div>
+        </section>
 
         <aside id="detail-panel" class="detail-panel" aria-live="polite">
-          <p class="empty-state">Choose a document to inspect its local provenance and available actions.</p>
+          <p class="empty-state">Select a source in the map to inspect its provenance and available actions.</p>
         </aside>
       </section>
+
+      <details class="collection-panel">
+        <summary>
+          <span>
+            <span class="eyebrow">Accessible source list</span>
+            <strong>Browse all local sources</strong>
+          </span>
+          <span id="document-count" class="count"></span>
+        </summary>
+        <div id="attention-panel" class="attention-panel" hidden></div>
+        <div id="document-list" class="document-list"></div>
+      </details>
     </main>
   </body>
 </html>

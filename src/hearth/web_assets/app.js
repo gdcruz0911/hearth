@@ -1,5 +1,6 @@
 const rootPath = new URL(".", window.location.href).pathname;
-const state = { documents: [], selectedDocumentId: null };
+const svgNamespace = "http://www.w3.org/2000/svg";
+const state = { clusters: [], documents: [], edges: [], selectedDocumentId: null };
 
 const elements = {
   answer: document.querySelector("#answer-panel"),
@@ -9,7 +10,12 @@ const elements = {
   documentList: document.querySelector("#document-list"),
   health: document.querySelector("#health-summary"),
   importButton: document.querySelector("#import-button"),
+  mapLinks: document.querySelector("#map-links"),
+  mapNodes: document.querySelector("#map-nodes"),
+  mapSummary: document.querySelector("#map-summary"),
+  mapSurface: document.querySelector("#map-surface"),
   question: document.querySelector("#question"),
+  resetMap: document.querySelector("#reset-map"),
   search: document.querySelector("#search-form"),
   status: document.querySelector("#status-message"),
 };
@@ -48,10 +54,9 @@ function button(label, className, onClick) {
 function renderHealth(health) {
   elements.health.replaceChildren();
   const stats = [
-    ["Documents", health.document_count],
-    ["Pages", health.page_count],
-    ["Evidence chunks", health.chunk_count],
-    ["OCR review", health.ocr_page_count],
+    ["Sources", health.document_count],
+    ["Evidence", health.chunk_count],
+    ["Needs review", health.source_attention.length],
   ];
   for (const [label, value] of stats) {
     const row = document.createElement("div");
@@ -74,9 +79,9 @@ function renderHealth(health) {
 
 function renderDocuments() {
   elements.documentList.replaceChildren();
-  elements.documentCount.textContent = `${state.documents.length} total`;
+  elements.documentCount.textContent = `${state.documents.length} source${state.documents.length === 1 ? "" : "s"}`;
   if (!state.documents.length) {
-    elements.documentList.append(make("p", "empty-state", "No documents yet. Import one local note or PDF to begin."));
+    elements.documentList.append(make("p", "empty-state", "No sources yet. Import one local note or PDF to kindle the first part of your map."));
     return;
   }
   for (const item of state.documents) {
@@ -84,9 +89,129 @@ function renderDocuments() {
     row.setAttribute("aria-current", String(item.id === state.selectedDocumentId));
     const copy = document.createElement("span");
     copy.append(make("span", "document-name", item.name));
-    copy.append(make("span", "document-meta", `${item.page_count} pages · ${item.chunk_count} chunks · ${item.ocr_page_count} OCR pages`));
+    copy.append(make("span", "document-meta", `${item.page_count} pages · ${item.chunk_count} evidence units · ${item.ocr_page_count} OCR pages`));
     row.append(copy, make("span", "subtle", `#${item.id}`));
     elements.documentList.append(row);
+  }
+}
+
+function pointOnRing(index, total, centerX, centerY, radiusX, radiusY, offset = -Math.PI / 2) {
+  const angle = offset + (Math.PI * 2 * index) / Math.max(total, 1);
+  return { x: centerX + Math.cos(angle) * radiusX, y: centerY + Math.sin(angle) * radiusY };
+}
+
+function meanPoint(points, fallback) {
+  if (!points.length) return fallback;
+  return points.reduce((total, point) => ({ x: total.x + point.x, y: total.y + point.y }), { x: 0, y: 0 });
+}
+
+function nodePoint(document, index, documentCount, clusterPoints, center) {
+  const relatedClusters = state.edges
+    .filter((edge) => edge.document_id === document.id)
+    .map((edge) => clusterPoints.get(edge.cluster_id))
+    .filter(Boolean);
+  const sharedPoint = meanPoint(relatedClusters, center);
+  const angle = ((document.id * 2.399963229728653) + (index / Math.max(documentCount, 1))) % (Math.PI * 2);
+  const spread = relatedClusters.length ? 118 + (index % 3) * 20 : 150 + (index % 4) * 20;
+  return {
+    x: sharedPoint.x + Math.cos(angle) * spread,
+    y: sharedPoint.y + Math.sin(angle) * (spread * 0.78),
+  };
+}
+
+function addLink(from, to, className = "") {
+  const line = document.createElementNS(svgNamespace, "line");
+  line.setAttribute("x1", String(from.x));
+  line.setAttribute("y1", String(from.y));
+  line.setAttribute("x2", String(to.x));
+  line.setAttribute("y2", String(to.y));
+  if (className) line.setAttribute("class", className);
+  elements.mapLinks.append(line);
+}
+
+function addMapNode({ label, kind, point, size, selected, onClick, description }) {
+  const node = button("", `map-node map-node-${kind}${selected ? " is-selected" : ""}`, onClick);
+  node.style.setProperty("--node-size", `${size}px`);
+  node.style.left = `${point.x}px`;
+  node.style.top = `${point.y}px`;
+  node.setAttribute("aria-label", description || label);
+  node.append(make("span", "map-node-label", label));
+  elements.mapNodes.append(node);
+}
+
+function renderMap() {
+  const width = Math.max(elements.mapSurface.clientWidth, 320);
+  const height = Math.max(elements.mapSurface.clientHeight, 460);
+  const center = { x: width / 2, y: height / 2 };
+  const clusterPoints = new Map();
+  const documentPoints = new Map();
+  const maxChunks = Math.max(...state.documents.map((item) => item.chunk_count), 1);
+
+  state.clusters.forEach((cluster, index) => {
+    clusterPoints.set(
+      cluster.id,
+      pointOnRing(index, state.clusters.length, center.x, center.y, width * 0.3, height * 0.28),
+    );
+  });
+  state.documents.forEach((document, index) => {
+    documentPoints.set(document.id, nodePoint(document, index, state.documents.length, clusterPoints, center));
+  });
+
+  elements.mapLinks.replaceChildren();
+  elements.mapNodes.replaceChildren();
+  elements.mapLinks.setAttribute("viewBox", `0 0 ${width} ${height}`);
+  elements.mapLinks.setAttribute("width", String(width));
+  elements.mapLinks.setAttribute("height", String(height));
+
+  for (const point of clusterPoints.values()) addLink(center, point, "core-link");
+  for (const edge of state.edges) {
+    const documentPoint = documentPoints.get(edge.document_id);
+    const clusterPoint = clusterPoints.get(edge.cluster_id);
+    if (documentPoint && clusterPoint) addLink(documentPoint, clusterPoint, "relationship-link");
+  }
+  for (const document of state.documents) {
+    if (!state.edges.some((edge) => edge.document_id === document.id)) addLink(center, documentPoints.get(document.id), "relationship-link");
+  }
+
+  addMapNode({
+    label: "Hearth",
+    kind: "hearth",
+    point: center,
+    size: 106,
+    selected: state.selectedDocumentId === null,
+    onClick: resetMap,
+    description: "Hearth, the center of your local collection",
+  });
+  for (const cluster of state.clusters) {
+    addMapNode({
+      label: cluster.label,
+      kind: "cluster",
+      point: clusterPoints.get(cluster.id),
+      size: 72 + Math.min(cluster.document_count, 4) * 6,
+      selected: false,
+      onClick: () => setStatus(`${cluster.label} connects ${cluster.document_count} local source${cluster.document_count === 1 ? "" : "s"}.`),
+      description: `${cluster.label}, shared by ${cluster.document_count} local source${cluster.document_count === 1 ? "" : "s"}`,
+    });
+  }
+  for (const document of state.documents) {
+    const intensity = 38 + Math.round((document.chunk_count / maxChunks) * 22);
+    addMapNode({
+      label: document.name,
+      kind: "document",
+      point: documentPoints.get(document.id),
+      size: intensity,
+      selected: document.id === state.selectedDocumentId,
+      onClick: () => showDocument(document.id),
+      description: `${document.name}, ${document.chunk_count} evidence units`,
+    });
+  }
+
+  if (!state.documents.length) {
+    elements.mapSummary.textContent = "Import a local source to begin shaping this map. Hearth never moves or copies it without an explicit preview.";
+  } else if (state.clusters.length) {
+    elements.mapSummary.textContent = `${state.clusters.length} shared section${state.clusters.length === 1 ? "" : "s"} connect your ${state.documents.length} local source${state.documents.length === 1 ? "" : "s"}. Larger source embers contain more indexed evidence.`;
+  } else {
+    elements.mapSummary.textContent = `${state.documents.length} local source${state.documents.length === 1 ? "" : "s"} gathered around the hearth. Add headings to reveal shared structure.`;
   }
 }
 
@@ -143,7 +268,7 @@ function renderPreview(preview) {
       setStatus(result.applied.message || "The local action was applied.");
       await refresh();
       if (state.selectedDocumentId && result.applied.action !== "remove") await showDocument(state.selectedDocumentId);
-      if (result.applied.action === "remove") elements.details.replaceChildren(make("p", "empty-state", "The local collection record was removed. The source file remains in place."));
+      if (result.applied.action === "remove") resetMap();
     } catch (error) {
       setStatus(error.message, "error");
     }
@@ -173,9 +298,9 @@ function renderDetail(inspection) {
   detail.replaceChildren();
   const header = make("div", "detail-header");
   const copy = document.createElement("div");
-  copy.append(make("p", "eyebrow", "Document provenance"), make("h2", "", inspection.document.name));
+  copy.append(make("p", "eyebrow", "Selected source"), make("h2", "", inspection.document.name));
   header.append(copy, make("span", "count", `#${inspection.document.id}`));
-  detail.append(header, make("p", "subtle", `${inspection.document.page_count} pages · ${inspection.document.chunk_count} chunks · ${inspection.document.ocr_page_count} OCR pages`));
+  detail.append(header, make("p", "subtle", `${inspection.document.page_count} pages · ${inspection.document.chunk_count} evidence units · ${inspection.document.ocr_page_count} OCR pages`));
   const pages = make("div", "page-list");
   inspection.pages.forEach((page) => pages.append(pageCard(page)));
   detail.append(pages);
@@ -219,18 +344,30 @@ async function showDocument(documentId) {
     const inspection = await api(`documents/${documentId}`);
     state.selectedDocumentId = documentId;
     renderDocuments();
+    renderMap();
     renderDetail(inspection);
   } catch (error) {
     setStatus(error.message, "error");
   }
 }
 
+function resetMap() {
+  state.selectedDocumentId = null;
+  renderDocuments();
+  renderMap();
+  elements.details.replaceChildren(make("p", "empty-state", "Select a source in the map to inspect its provenance and available actions."));
+  setStatus("Returned to the center of your local collection.");
+}
+
 async function refresh() {
   try {
-    const [health, documents] = await Promise.all([api("health"), api("documents")]);
-    state.documents = documents.documents;
+    const [health, collectionMap] = await Promise.all([api("health"), api("map")]);
+    state.documents = collectionMap.documents;
+    state.clusters = collectionMap.clusters;
+    state.edges = collectionMap.edges;
     renderHealth(health);
     renderDocuments();
+    renderMap();
   } catch (error) {
     setStatus(error.message, "error");
   }
@@ -259,5 +396,8 @@ elements.search.addEventListener("submit", async (event) => {
     setStatus(error.message, "error");
   }
 });
+
+elements.resetMap.addEventListener("click", resetMap);
+window.addEventListener("resize", renderMap);
 
 refresh().then(() => setStatus("Your local collection is ready."));

@@ -71,6 +71,31 @@ class HearthWebServerTests(unittest.TestCase):
         self.assertNotIn("The deployment owner is Ada.", rendered)
         self.assertTrue(self.note.is_file())
 
+    def test_collection_map_groups_documents_by_shared_section_without_source_content(self) -> None:
+        self._json_request("POST", "api/import")
+        second_note = self.root / "handoff.md"
+        second_note.write_text("# Operations\n\nThe handoff owner is Lin.\n", encoding="utf-8")
+        self.selected_file = second_note
+        self._json_request("POST", "api/import")
+
+        collection_map = self._json_request("GET", "api/map")
+
+        self.assertEqual(len(collection_map["documents"]), 2)
+        self.assertEqual(
+            collection_map["clusters"],
+            [{"id": "section:operations", "label": "Operations", "document_count": 2}],
+        )
+        self.assertEqual(
+            collection_map["edges"],
+            [
+                {"document_id": 1, "cluster_id": "section:operations"},
+                {"document_id": 2, "cluster_id": "section:operations"},
+            ],
+        )
+        rendered = json.dumps(collection_map)
+        self.assertNotIn(str(self.note), rendered)
+        self.assertNotIn("The deployment owner is Ada.", rendered)
+
     def test_previewed_rename_requires_one_apply_and_preserves_search(self) -> None:
         self._json_request("POST", "api/import")
         preview = self._json_request(

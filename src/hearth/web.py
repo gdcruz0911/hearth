@@ -110,6 +110,8 @@ class HearthWebApplication:
             return self._json_response(_health_payload(self._service.collection_health()))
         if relative_path == "api/documents":
             return self._json_response({"documents": [_document_payload(item) for item in self._service.list_documents()]})
+        if relative_path == "api/map":
+            return self._json_response(_collection_map_payload(self._service))
         if relative_path.startswith("api/documents/"):
             document_id = _document_id(relative_path.removeprefix("api/documents/"))
             inspection = self._service.inspect_document(document_id)
@@ -464,6 +466,51 @@ def _health_payload(health: CollectionHealth) -> dict[str, Any]:
             {"document_id": item.document_id, "document_name": item.document_name, "status": item.status}
             for item in health.source_attention
         ],
+    }
+
+
+def _collection_map_payload(service: HearthService) -> dict[str, Any]:
+    """Expose only persisted document structure for the browser's relationship map.
+
+    Matching section labels provide an honest, inspectable initial connection between
+    documents. The map intentionally does not claim semantic similarity until the
+    service has a dedicated, explainable relationship model.
+    """
+
+    documents = service.list_documents()
+    clusters: dict[str, dict[str, Any]] = {}
+    edges: list[dict[str, Any]] = []
+
+    for document in documents:
+        inspection = service.inspect_document(document.id)
+        if inspection is None:
+            continue
+        document_cluster_ids: set[str] = set()
+        for page in inspection.pages:
+            section = page.section.strip() if page.section else "Unsectioned material"
+            cluster_id = f"section:{section.casefold()}"
+            cluster = clusters.setdefault(
+                cluster_id,
+                {"id": cluster_id, "label": section, "document_ids": set()},
+            )
+            cluster["document_ids"].add(document.id)
+            document_cluster_ids.add(cluster_id)
+        edges.extend(
+            {"document_id": document.id, "cluster_id": cluster_id}
+            for cluster_id in sorted(document_cluster_ids)
+        )
+
+    return {
+        "documents": [_document_payload(document) for document in documents],
+        "clusters": [
+            {
+                "id": cluster["id"],
+                "label": cluster["label"],
+                "document_count": len(cluster["document_ids"]),
+            }
+            for cluster in sorted(clusters.values(), key=lambda item: (item["label"].casefold(), item["id"]))
+        ],
+        "edges": edges,
     }
 
 
