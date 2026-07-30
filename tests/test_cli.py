@@ -49,8 +49,19 @@ class CollectionInspectionCliTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertIn(f"{self.document_id}: operations.md", output.getvalue())
         self.assertIn("pages: 1, chunks: 1, OCR pages: 0", output.getvalue())
+        self.assertIn("Next: inspect <document-id>, organize preview <document-id>, relink an unavailable source, or search.", output.getvalue())
         self.assertNotIn("The deployment owner is Ada.", output.getvalue())
         self.assertNotIn(str(self.root), output.getvalue())
+
+    def test_list_empty_collection_explains_how_to_start(self) -> None:
+        empty_database = self.root / "empty.sqlite"
+        output = io.StringIO()
+
+        with contextlib.redirect_stdout(output):
+            exit_code = main(["--database", str(empty_database), "list"])
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(output.getvalue(), "No imported documents.\nNext: import <local-file>, then run health or search.\n")
 
     def test_health_reports_collection_metadata_and_next_action_without_document_text(self) -> None:
         output = io.StringIO()
@@ -83,7 +94,7 @@ class CollectionInspectionCliTests(unittest.TestCase):
         self.assertIn("Source files unavailable: 1", output.getvalue())
         self.assertIn("Needs attention", output.getvalue())
         self.assertIn("Document 1: operations.md - source unavailable", output.getvalue())
-        self.assertIn("Next: restore the source file, or remove its stale collection record.", output.getvalue())
+        self.assertIn("relink preview <document-id> <replacement-path>", output.getvalue())
         self.assertNotIn("operations-moved.md", output.getvalue())
         self.assertNotIn(str(self.root), output.getvalue())
 
@@ -151,7 +162,43 @@ class CollectionInspectionCliTests(unittest.TestCase):
             exit_code = main(["--database", str(self.database), "inspect", "999"])
 
         self.assertEqual(exit_code, 1)
-        self.assertEqual(output.getvalue(), "No imported document with ID 999.\n")
+        self.assertEqual(
+            output.getvalue(),
+            "No imported document with ID 999.\nNext: run list to review imported documents and their IDs.\n",
+        )
+
+    def test_search_abstention_suggests_safe_next_actions(self) -> None:
+        output = io.StringIO()
+
+        with contextlib.redirect_stdout(output):
+            exit_code = main(["--database", str(self.database), "search", "What is the annual budget?"])
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn("No evidence-bound answer was available from the imported documents.", output.getvalue())
+        self.assertIn("Next: try different terms, run health for source attention, or import another local document.", output.getvalue())
+
+    def test_help_includes_a_concise_common_workflow(self) -> None:
+        output = io.StringIO()
+
+        with contextlib.redirect_stdout(output), self.assertRaises(SystemExit) as exit_context:
+            main(["--help"])
+
+        self.assertEqual(exit_context.exception.code, 0)
+        self.assertIn("Common workflow:", output.getvalue())
+        self.assertIn("Find document IDs for inspect, organize, or relink.", output.getvalue())
+
+    def test_remove_missing_document_suggests_list(self) -> None:
+        missing_path = self.root / "missing.md"
+        output = io.StringIO()
+
+        with contextlib.redirect_stdout(output):
+            exit_code = main(["--database", str(self.database), "remove", str(missing_path)])
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(
+            output.getvalue(),
+            "No matching document found.\nNext: run list to review imported documents and their IDs.\n",
+        )
 
     def test_inspect_marks_ocr_pages_for_review_without_rendering_text(self) -> None:
         pdf = self.root / "scanned.pdf"

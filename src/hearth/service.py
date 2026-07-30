@@ -79,7 +79,7 @@ class HearthService:
         return self._import_summary(self.import_document(raw_path))
 
     def remove_document(self, raw_path: str) -> bool:
-        removed = self._store.remove_document(_validated_local_file(raw_path))
+        removed = self._store.remove_document(_validated_local_path(raw_path))
         if removed:
             self._rebuild_semantic_index()
         return removed
@@ -246,12 +246,19 @@ class HearthService:
 
 
 def _validated_local_file(raw_path: str) -> Path:
-    if not raw_path or "\x00" in raw_path:
-        raise ImportError("A valid local file path is required.")
-    path = Path(raw_path).expanduser().resolve(strict=True)
+    path = _validated_local_path(raw_path)
     if not path.is_file():
         raise ImportError("Import path must be a regular file.")
     return path
+
+
+def _validated_local_path(raw_path: str) -> Path:
+    if not raw_path or "\x00" in raw_path:
+        raise ImportError("A valid local file path is required.")
+    try:
+        return Path(raw_path).expanduser().resolve(strict=False)
+    except OSError as exc:
+        raise ImportError("A valid local file path is required.") from exc
 
 
 def _source_state(path: Path) -> tuple[str, int, int]:

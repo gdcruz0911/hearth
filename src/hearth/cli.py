@@ -29,7 +29,18 @@ from .service import HearthService
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Local-only, evidence-bound document chat.")
+    parser = argparse.ArgumentParser(
+        description="Local-only, evidence-bound document chat.",
+        epilog=(
+            "Common workflow:\n"
+            "  import <local-file>  Add one note or PDF.\n"
+            "  health               Check collection attention items.\n"
+            "  search <question>    Answer from cited evidence.\n"
+            "  list                 Find document IDs for inspect, organize, or relink.\n"
+            "Run a command with --help to see its arguments."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     parser.add_argument("--database", type=Path, default=Path(".hearth/hearth.sqlite"))
     parser.add_argument(
         "--ocr-output-directory",
@@ -120,7 +131,11 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "reindex":
             _print_import_summary("Reindexed", service.reindex_with_summary(args.path))
         elif args.command == "remove":
-            print("Removed." if service.remove_document(args.path) else "No matching document found.")
+            if service.remove_document(args.path):
+                print("Removed.")
+            else:
+                print("No matching document found.")
+                print("Next: run list to review imported documents and their IDs.")
         elif args.command == "list":
             _print_documents(service.list_documents())
         elif args.command == "health":
@@ -129,6 +144,7 @@ def main(argv: list[str] | None = None) -> int:
             inspection = service.inspect_document(args.document_id)
             if inspection is None:
                 print(f"No imported document with ID {args.document_id}.")
+                print("Next: run list to review imported documents and their IDs.")
                 return 1
             _print_document_inspection(inspection)
         elif args.command == "organize":
@@ -187,12 +203,14 @@ def main(argv: list[str] | None = None) -> int:
 def _print_documents(documents: list[ImportedDocument]) -> None:
     if not documents:
         print("No imported documents.")
+        print("Next: import <local-file>, then run health or search.")
         return
     for document in documents:
         print(
             f"{document.id}: {document.name} "
             f"(pages: {document.page_count}, chunks: {document.chunk_count}, OCR pages: {document.ocr_page_count})"
         )
+    print("Next: inspect <document-id>, organize preview <document-id>, relink an unavailable source, or search.")
 
 
 def _print_import_summary(action: str, summary: ImportSummary) -> None:
@@ -218,7 +236,10 @@ def _print_collection_health(health: CollectionHealth) -> None:
         for attention in health.source_attention:
             print(f"- Document {attention.document_id}: {attention.document_name} - {attention.status}")
             if attention.status == "source unavailable":
-                print("  Next: restore the source file, or remove its stale collection record.")
+                print(
+                    "  Next: restore the source file, relink it with "
+                    "relink preview <document-id> <replacement-path>, or remove its stale collection record."
+                )
             else:
                 print("  Next: reindex the source file when you are ready to refresh its extracted content.")
     if health.ocr_page_count:
@@ -261,6 +282,7 @@ def _print_answer(answer) -> None:
     print(answer.text)
     if not answer.citations:
         print("No evidence-bound answer was available from the imported documents.")
+        print("Next: try different terms, run health for source attention, or import another local document.")
         return
     print("Sources")
     for citation in answer.citations:

@@ -142,6 +142,15 @@ class MvpWorkflowTests(unittest.TestCase):
         self.assertIn("Source files unavailable: 1", self._run("health"))
         self.assertTrue(replacement.is_file())
 
+    def test_remove_can_clear_an_unavailable_source_record(self) -> None:
+        self._run("import", str(self.note))
+        self.note.unlink()
+
+        removed = self._run("remove", str(self.note))
+
+        self.assertEqual(removed, "Removed.\n")
+        self.assertIn("Documents: 0", self._run("health"))
+
     def _run(self, *command: str) -> str:
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
