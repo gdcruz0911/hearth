@@ -14,7 +14,7 @@ Keep the checker outside the answer path until a decision record sets an explici
 
 The baseline harness covers one supported citation and one abstention using only synthetic public material.
 The MVP workflow now covers collection health, citation-first output, reindexing, and removal through the CLI.
-Expand the public corpus with expected outcomes for additional OCR warning and deletion cases before selecting a production model.
+Expand the public corpus with expected outcomes for additional OCR warning, deletion, and source-freshness cases before selecting a production model.
 Record model, retrieval, and prompt configuration alongside each evaluation run without storing private prompts or responses in Git.
 
 ## 3. Maintain the private source repository boundary
@@ -42,3 +42,9 @@ If a future feature persists conversation state, define its local storage, delet
 
 The v1 `organize` command supports one explicit same-volume move or extension-preserving rename with preview and no overwrite behavior.
 Add tags, collections, bulk operations, deletion, cross-volume moves, or undo history only with a new ADR that defines confirmation, collision, rollback, and recovery behavior.
+
+## 7. Decide whether to add a local source watcher
+
+The current `health` command diagnoses source changes only when the user runs it and never repairs them.
+Consider a local-only watcher only if regular manual health checks become inadequate.
+Any watcher must preserve explicit reindexing, avoid copying sources into a managed library, and define consent, resource use, and notification behavior in a new ADR.

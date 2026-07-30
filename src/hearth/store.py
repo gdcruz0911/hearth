@@ -3,7 +3,16 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-from .domain import CollectionHealth, Chunk, ChunkInspection, DocumentInspection, ExtractedPage, ImportedDocument, PageInspection
+from .domain import (
+    CollectionHealth,
+    Chunk,
+    ChunkInspection,
+    DocumentInspection,
+    ExtractedPage,
+    ImportedDocument,
+    PageInspection,
+    SourceAttention,
+)
 
 
 class SQLiteStore:
@@ -19,11 +28,22 @@ class SQLiteStore:
     def close(self) -> None:
         self._connection.close()
 
-    def replace_document(self, path: Path, pages: tuple[ExtractedPage, ...], chunks_by_page: dict[int, list[tuple[str, int, int]]]) -> int:
+    def replace_document(
+        self,
+        path: Path,
+        pages: tuple[ExtractedPage, ...],
+        chunks_by_page: dict[int, list[tuple[str, int, int]]],
+        source_fingerprint: str,
+        source_size: int,
+        source_mtime_ns: int,
+    ) -> int:
         with self._connection:
             self._connection.execute("DELETE FROM documents WHERE canonical_path = ?", (str(path),))
             document_id = self._connection.execute(
-                "INSERT INTO documents (canonical_path, display_name) VALUES (?, ?)", (str(path), path.name)
+                """INSERT INTO documents
+                (canonical_path, display_name, source_fingerprint, source_size, source_mtime_ns)
+                VALUES (?, ?, ?, ?, ?)""",
+                (str(path), path.name, source_fingerprint, source_size, source_mtime_ns),
             ).lastrowid
             for page in pages:
                 page_id = self._connection.execute(
@@ -65,7 +85,9 @@ class SQLiteStore:
             for row in rows
         ]
 
-    def collection_health(self, semantic_index_status: str) -> CollectionHealth:
+    def collection_health(
+        self, semantic_index_status: str, source_attention: tuple[SourceAttention, ...]
+    ) -> CollectionHealth:
         row = self._connection.execute(
             """SELECT COUNT(DISTINCT documents.id) AS document_count,
             COUNT(DISTINCT pages.id) AS page_count,
@@ -75,16 +97,34 @@ class SQLiteStore:
             LEFT JOIN pages ON pages.document_id = documents.id
             LEFT JOIN chunks ON chunks.page_id = pages.id"""
         ).fetchone()
-        paths = self._connection.execute("SELECT canonical_path FROM documents").fetchall()
-        unavailable_source_count = sum(not Path(path["canonical_path"]).is_file() for path in paths)
         return CollectionHealth(
             document_count=row["document_count"],
             page_count=row["page_count"],
             chunk_count=row["chunk_count"],
             ocr_page_count=row["ocr_page_count"],
-            unavailable_source_count=unavailable_source_count,
+            unavailable_source_count=sum(item.status == "source unavailable" for item in source_attention),
+            changed_source_count=sum(item.status == "source changed since import" for item in source_attention),
+            baseline_reindex_count=sum(item.status == "source needs baseline reindex" for item in source_attention),
             semantic_index_status=semantic_index_status,
+            source_attention=source_attention,
         )
+
+    def source_records(self) -> list[tuple[int, str, Path, str | None, int | None, int | None]]:
+        rows = self._connection.execute(
+            """SELECT id, display_name, canonical_path, source_fingerprint, source_size, source_mtime_ns
+            FROM documents ORDER BY id"""
+        ).fetchall()
+        return [
+            (
+                row["id"],
+                row["display_name"],
+                Path(row["canonical_path"]),
+                row["source_fingerprint"],
+                row["source_size"],
+                row["source_mtime_ns"],
+            )
+            for row in rows
+        ]
 
     def source_path(self, document_id: int) -> Path | None:
         row = self._connection.execute(
@@ -193,7 +233,10 @@ class SQLiteStore:
                 """CREATE TABLE IF NOT EXISTS documents (
                     id INTEGER PRIMARY KEY,
                     canonical_path TEXT NOT NULL UNIQUE,
-                    display_name TEXT NOT NULL
+                    display_name TEXT NOT NULL,
+                    source_fingerprint TEXT,
+                    source_size INTEGER,
+                    source_mtime_ns INTEGER
                 );
                 CREATE TABLE IF NOT EXISTS pages (
                     id INTEGER PRIMARY KEY,
@@ -213,3 +256,11 @@ class SQLiteStore:
                 );
                 CREATE INDEX IF NOT EXISTS chunks_page_id_idx ON chunks(page_id);"""
             )
+            document_columns = {row["name"] for row in self._connection.execute("PRAGMA table_info(documents)")}
+            for column, definition in (
+                ("source_fingerprint", "TEXT"),
+                ("source_size", "INTEGER"),
+                ("source_mtime_ns", "INTEGER"),
+            ):
+                if column not in document_columns:
+                    self._connection.execute(f"ALTER TABLE documents ADD COLUMN {column} {definition}")

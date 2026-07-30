@@ -65,6 +65,8 @@ class CollectionInspectionCliTests(unittest.TestCase):
         self.assertIn("Chunks: 1", output.getvalue())
         self.assertIn("OCR pages needing review: 0", output.getvalue())
         self.assertIn("Source files unavailable: 0", output.getvalue())
+        self.assertIn("Sources changed since import: 0", output.getvalue())
+        self.assertIn("Sources requiring baseline reindex: 0", output.getvalue())
         self.assertIn("Semantic index: not configured", output.getvalue())
         self.assertIn("Next: import a document, or search the current collection.", output.getvalue())
         self.assertNotIn("The deployment owner is Ada.", output.getvalue())
@@ -79,7 +81,9 @@ class CollectionInspectionCliTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 0)
         self.assertIn("Source files unavailable: 1", output.getvalue())
-        self.assertIn("Next: restore an unavailable source file, or remove its stale collection record.", output.getvalue())
+        self.assertIn("Needs attention", output.getvalue())
+        self.assertIn("Document 1: operations.md - source unavailable", output.getvalue())
+        self.assertIn("Next: restore the source file, or remove its stale collection record.", output.getvalue())
         self.assertNotIn("operations-moved.md", output.getvalue())
         self.assertNotIn(str(self.root), output.getvalue())
 

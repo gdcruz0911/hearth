@@ -86,6 +86,23 @@ class MvpWorkflowTests(unittest.TestCase):
         self.assertTrue(self.note.is_file())
         self.assertEqual(target.read_text(encoding="utf-8"), "Existing document.")
 
+    def test_health_flags_source_change_until_explicit_reindex(self) -> None:
+        self._run("import", str(self.note))
+        self.note.write_text("# Operations\n\nThe deployment owner is Lin.\n", encoding="utf-8")
+
+        changed_health = self._run("health")
+
+        self.assertIn("Sources changed since import: 1", changed_health)
+        self.assertIn("Document 1: evaluation-note.md - source changed since import", changed_health)
+        self.assertIn("Next: reindex the source file when you are ready to refresh its extracted content.", changed_health)
+        self.assertNotIn("The deployment owner is Lin.", changed_health)
+        self._run("reindex", str(self.note))
+
+        refreshed_health = self._run("health")
+
+        self.assertIn("Sources changed since import: 0", refreshed_health)
+        self.assertNotIn("Needs attention", refreshed_health)
+
     def _run(self, *command: str) -> str:
         output = io.StringIO()
         with contextlib.redirect_stdout(output):

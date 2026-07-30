@@ -57,7 +57,8 @@ Import a local note, query it, and run the public evaluation corpus.
 
 `list` reports imported document metadata and the ID used by `inspect`.
 `inspect` reports page, chunk, extraction, and OCR-warning metadata without rendering stored document text or canonical source paths.
-`health` reports collection counts, OCR-review needs, source-file availability, semantic-index state, and safe next actions without rendering source paths or document text.
+`health` reports collection counts, OCR-review needs, source-file availability and freshness, semantic-index state, and safe next actions without rendering source paths or document text.
+When a source changed outside Hearth, `health` asks you to run an explicit `reindex` rather than changing stored evidence automatically.
 `import` and `reindex` report extraction counts, semantic-index state, and the configured OCR artifact outcome.
 `search` prints the evidence-bound answer followed by its compact source metadata and the cited evidence text.
 `organize preview` and `organize apply` support one explicit same-volume rename or move at a time, preserving the document record and citations without overwriting files.
@@ -94,6 +95,8 @@ An optional host-side MLX benchmark is documented in [benchmarking](docs/benchma
 - OCR-derived PDFs are transient by default; explicitly retained files remain private runtime data and must be managed manually.
 - Hearth has no conversational memory.
   It answers from the currently imported collection, so removed documents and reindexed source changes are not retained as answerable evidence.
+- `health` detects changes only at an imported file's stored path.
+  An externally moved source is reported as unavailable until you restore it, remove its stale record, or reimport it.
 - There is no graphical interface, web server, cloud synchronization, or multi-user support.
 
 ## Project documentation

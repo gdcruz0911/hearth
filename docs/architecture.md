@@ -18,8 +18,8 @@ Local note or PDF
 `PopplerPdfExtractor` extracts digital PDF text one page at a time through local Poppler commands.
 `OCRmyPDFFallback` is an optional local extension that fills only pages with no native text and deletes its derived PDF after extraction unless retention is explicitly configured.
 `chunk_page` preserves page boundaries and stores character offsets for each chunk.
-`SQLiteStore` is the authoritative store for document identities, page metadata, chunks, and provenance.
-`CollectionHealth` summarizes local collection counts, unavailable source records, OCR-review needs, and derived-index state without including stored document text or canonical source paths.
+`SQLiteStore` is the authoritative store for document identities, page metadata, chunks, source fingerprints, and provenance.
+`CollectionHealth` summarizes local collection counts, OCR-review needs, source freshness attention, and derived-index state without including stored document text or canonical source paths.
 `HearthService` can preview or apply one explicit local rename or same-volume move while updating the existing document source binding and preserving chunks and citations.
 `HashingVectorIndex` is an in-memory deterministic retrieval scaffold used when no semantic index is configured.
 `FlatVectorIndex` stores derived normalized float32 vectors and chunk IDs in a versioned local index directory when a semantic index is configured.
@@ -35,8 +35,8 @@ Local note or PDF
 ## Data boundaries
 
 Original documents remain at their local source paths and are not stored as document bytes in SQLite.
-SQLite records canonical source paths, display names, pages, extraction metadata, sections, chunks, and character offsets.
-The `health` command checks source-file availability locally but returns only aggregate counts, so it does not expose those canonical paths in normal operation.
+SQLite records canonical source paths, display names, source fingerprints, source size and modification time, pages, extraction metadata, sections, chunks, and character offsets.
+The `health` command checks source-file availability and freshness locally and reports only document IDs, display names, and attention states, not canonical paths or stored document text.
 The `organize` command displays an explicitly selected source and target only in the local interactive command and never uses that output as a replacement for provenance storage.
 OCR-derived PDFs are transient private scratch artifacts by default and remain only when a user explicitly opts in to retention for inspection.
 The deterministic hashed index is derived in memory when no semantic index is configured.
@@ -53,6 +53,7 @@ The lexical evidence-sufficiency gate is defined in [ADR-0009](decisions/ADR-000
 The verbatim evidence answer contract is defined in [ADR-0010](decisions/ADR-0010-verbatim-evidence-answer-contract.md).
 The OCR artifact lifecycle is defined in [ADR-0011](decisions/ADR-0011-transient-ocr-artifact-lifecycle.md).
 Explicit local source-file organization is defined in [ADR-0012](decisions/ADR-0012-explicit-local-file-organization.md).
+Source freshness attention is defined in [ADR-0013](decisions/ADR-0013-source-freshness-attention.md).
 
 ## Related decisions
 
@@ -66,3 +67,4 @@ Explicit local source-file organization is defined in [ADR-0012](decisions/ADR-0
 - [ADR-0010: Verbatim evidence answer contract](decisions/ADR-0010-verbatim-evidence-answer-contract.md)
 - [ADR-0011: Transient OCR artifact lifecycle](decisions/ADR-0011-transient-ocr-artifact-lifecycle.md)
 - [ADR-0012: Explicit local file organization](decisions/ADR-0012-explicit-local-file-organization.md)
+- [ADR-0013: Source freshness attention](decisions/ADR-0013-source-freshness-attention.md)

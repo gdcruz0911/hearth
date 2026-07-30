@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from hearth.domain import Evidence, ExtractedPage, SourceDocument
+from hearth.domain import Evidence, ExtractedPage, ImportError, SourceDocument
 from hearth.embedding import EmbeddingSpec, FlatVectorIndex
 from hearth.extraction import PdfExtractor
 from hearth.service import HearthService
@@ -31,6 +31,12 @@ class NativePdfExtractorWithBlankPage:
                 ExtractedPage(2, "", section="Scanned"),
             ),
         )
+
+
+class MutatingPdfExtractor:
+    def extract(self, path: Path) -> SourceDocument:
+        path.write_bytes(b"changed during extraction")
+        return SourceDocument(path=path, pages=(ExtractedPage(1, "This should not be imported."),))
 
 
 class FakeOcrFallback:
@@ -150,6 +156,17 @@ class HearthServiceTests(unittest.TestCase):
         self.assertEqual(answer.status, "supported")
         self.assertIn("Lin", answer.text)
         self.assertNotIn("Ada", answer.text)
+
+    def test_import_fails_when_source_changes_during_extraction(self) -> None:
+        pdf = self.root / "changing.pdf"
+        pdf.write_bytes(b"initial")
+        self.service.close()
+        self.service = HearthService(self.database, pdf_extractor=MutatingPdfExtractor())
+
+        with self.assertRaisesRegex(ImportError, "changed during import"):
+            self.service.import_document(str(pdf))
+
+        self.assertEqual(self.service.list_documents(), [])
 
     def test_pdf_pages_keep_page_metadata(self) -> None:
         pdf = self.root / "handbook.pdf"

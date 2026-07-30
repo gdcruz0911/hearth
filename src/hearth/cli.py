@@ -196,14 +196,22 @@ def _print_collection_health(health: CollectionHealth) -> None:
     print(f"Chunks: {health.chunk_count}")
     print(f"OCR pages needing review: {health.ocr_page_count}")
     print(f"Source files unavailable: {health.unavailable_source_count}")
+    print(f"Sources changed since import: {health.changed_source_count}")
+    print(f"Sources requiring baseline reindex: {health.baseline_reindex_count}")
     print(f"Semantic index: {health.semantic_index_status}")
+    if health.source_attention:
+        print("Needs attention")
+        for attention in health.source_attention:
+            print(f"- Document {attention.document_id}: {attention.document_name} - {attention.status}")
+            if attention.status == "source unavailable":
+                print("  Next: restore the source file, or remove its stale collection record.")
+            else:
+                print("  Next: reindex the source file when you are ready to refresh its extracted content.")
     if health.ocr_page_count:
         print("Next: run list, then inspect <document-id> to review OCR provenance.")
-    if health.unavailable_source_count:
-        print("Next: restore an unavailable source file, or remove its stale collection record.")
     if health.semantic_index_status == "needs reindex":
         print("Next: reindex the affected source document before searching semantically.")
-    if not (health.ocr_page_count or health.unavailable_source_count or health.semantic_index_status == "needs reindex"):
+    if not (health.ocr_page_count or health.source_attention or health.semantic_index_status == "needs reindex"):
         print("Next: import a document, or search the current collection.")
 
 

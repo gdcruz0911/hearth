@@ -64,7 +64,17 @@ class CollectionHealth:
     chunk_count: int
     ocr_page_count: int
     unavailable_source_count: int
+    changed_source_count: int
+    baseline_reindex_count: int
     semantic_index_status: str
+    source_attention: tuple["SourceAttention", ...]
+
+
+@dataclass(frozen=True)
+class SourceAttention:
+    document_id: int
+    document_name: str
+    status: str
 
 
 @dataclass(frozen=True)

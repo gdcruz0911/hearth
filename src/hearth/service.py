@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import os
 from pathlib import Path
 
@@ -14,6 +15,7 @@ from .domain import (
     ImportedDocument,
     ImportError,
     ImportSummary,
+    SourceAttention,
 )
 from .embedding import FlatVectorIndex
 from .extraction import OCRmyPDFFallback, PageExtractor, PdfExtractor, PopplerPdfExtractor, TextNoteExtractor
@@ -59,12 +61,15 @@ class HearthService:
 
     def import_document(self, raw_path: str) -> int:
         path = _validated_local_file(raw_path)
+        source_state = _source_state(path)
         extractor = self._pdf_extractor if path.suffix.lower() == ".pdf" else self._note_extractor
         document = extractor.extract(path)
+        if _source_state(path) != source_state:
+            raise ImportError("The source file changed during import. Retry after it finishes changing.")
         chunks_by_page = {page.page_number: chunk_page(page) for page in document.pages}
         if not any(chunks_by_page.values()):
             raise ImportError("No extractable text was found in the document.")
-        document_id = self._store.replace_document(path, document.pages, chunks_by_page)
+        document_id = self._store.replace_document(path, document.pages, chunks_by_page, *source_state)
         self._rebuild_semantic_index()
         return document_id
 
@@ -96,7 +101,12 @@ class HearthService:
         semantic_index_status = "not configured"
         if self._semantic_index is not None:
             semantic_index_status = "ready" if self._semantic_index.is_current(self._store.list_chunks()) else "needs reindex"
-        return self._store.collection_health(semantic_index_status)
+        attention = []
+        for document_id, document_name, source_path, fingerprint, source_size, source_mtime_ns in self._store.source_records():
+            status = _source_attention_status(source_path, fingerprint, source_size, source_mtime_ns)
+            if status is not None:
+                attention.append(SourceAttention(document_id, document_name, status))
+        return self._store.collection_health(semantic_index_status, tuple(attention))
 
     def plan_organization(
         self, document_id: int, *, move_to: Path | None = None, rename: str | None = None
@@ -185,6 +195,38 @@ def _validated_local_file(raw_path: str) -> Path:
     if not path.is_file():
         raise ImportError("Import path must be a regular file.")
     return path
+
+
+def _source_state(path: Path) -> tuple[str, int, int]:
+    try:
+        metadata = path.stat()
+        digest = hashlib.sha256()
+        with path.open("rb") as source:
+            while block := source.read(1024 * 1024):
+                digest.update(block)
+    except OSError as exc:
+        raise ImportError("The local source file could not be read for import.") from exc
+    return digest.hexdigest(), metadata.st_size, metadata.st_mtime_ns
+
+
+def _source_attention_status(
+    path: Path, fingerprint: str | None, source_size: int | None, source_mtime_ns: int | None
+) -> str | None:
+    if not path.is_file():
+        return "source unavailable"
+    if fingerprint is None or source_size is None or source_mtime_ns is None:
+        return "source needs baseline reindex"
+    try:
+        metadata = path.stat()
+    except OSError:
+        return "source unavailable"
+    if metadata.st_size == source_size and metadata.st_mtime_ns == source_mtime_ns:
+        return None
+    try:
+        current_fingerprint, _, _ = _source_state(path)
+    except ImportError:
+        return "source unavailable"
+    return None if current_fingerprint == fingerprint else "source changed since import"
 
 
 def _rename_target(source_path: Path, rename: str) -> Path:
