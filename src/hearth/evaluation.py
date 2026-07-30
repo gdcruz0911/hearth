@@ -60,6 +60,7 @@ class ClaimSupportOutcome:
     passed: bool
     expected_supported: bool
     received_supported: bool
+    category: str | None
 
 
 def load_evaluation_corpus(path: Path) -> EvaluationCorpus:
@@ -120,16 +121,28 @@ def evaluate_claim_support_corpus(
 ) -> tuple[ClaimSupportOutcome, ...]:
     outcomes = []
     for case in corpus.cases:
-        received_supported = checker.supports(case.question, case.claim, case.evidence)
+        assessment = checker.assess(case.question, case.claim, case.evidence)
+        category = _claim_support_category(case.expected_supported, assessment.supported, assessment.response_valid)
         outcomes.append(
             ClaimSupportOutcome(
                 case_id=case.id,
-                passed=received_supported == case.expected_supported,
+                passed=category is None,
                 expected_supported=case.expected_supported,
-                received_supported=received_supported,
+                received_supported=assessment.supported,
+                category=category,
             )
         )
     return tuple(outcomes)
+
+
+def _claim_support_category(expected_supported: bool, received_supported: bool, response_valid: bool) -> str | None:
+    if not response_valid:
+        return "malformed_response"
+    if expected_supported and not received_supported:
+        return "false_rejection"
+    if not expected_supported and received_supported:
+        return "false_approval"
+    return None
 
 
 def _parse_case(value: object, index: int) -> EvaluationCase:

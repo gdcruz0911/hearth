@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from hearth.claim_support import ClaimSupportAssessment
 from hearth.evaluation import (
     EvaluationCorpusError,
     evaluate_claim_support_corpus,
@@ -16,10 +17,10 @@ from hearth.service import HearthService
 
 
 class FakeClaimSupportChecker:
-    def __init__(self, outcomes: dict[str, bool]):
+    def __init__(self, outcomes: dict[str, ClaimSupportAssessment]):
         self._outcomes = outcomes
 
-    def supports(self, question: str, claim: str, evidence: tuple[str, ...]) -> bool:
+    def assess(self, question: str, claim: str, evidence: tuple[str, ...]) -> ClaimSupportAssessment:
         return self._outcomes[claim]
 
 
@@ -102,7 +103,10 @@ class EvaluationTests(unittest.TestCase):
         fixture_root = Path(__file__).parent / "fixtures" / "public"
         corpus = load_claim_support_corpus(fixture_root / "claim-support-evaluation.json")
         checker = FakeClaimSupportChecker(
-            {case.claim: case.expected_supported for case in corpus.cases}
+            {
+                case.claim: ClaimSupportAssessment(supported=case.expected_supported, response_valid=True)
+                for case in corpus.cases
+            }
         )
 
         outcomes = evaluate_claim_support_corpus(checker, corpus)
@@ -111,12 +115,63 @@ class EvaluationTests(unittest.TestCase):
             [case.id for case in corpus.cases],
             [
                 "supported-exact-owner",
+                "supported-cross-document-explicit-facts",
                 "unsupported-near-match-extra-duty",
                 "unsupported-missing-qualifier",
                 "unsupported-cross-document-qualifier",
+                "unsupported-contradicted-time",
+                "unsupported-missing-quantity",
+                "unsupported-instruction-in-evidence",
             ],
         )
         self.assertTrue(all(outcome.passed for outcome in outcomes))
+
+    def test_claim_support_outcomes_label_failures(self) -> None:
+        self.corpus_path.write_text(
+            json.dumps(
+                {
+                    "cases": [
+                        {
+                            "id": "supported",
+                            "question": "Who owns deployment?",
+                            "claim": "Ada owns deployment.",
+                            "evidence": ["Ada owns deployment."],
+                            "expected_supported": True,
+                        },
+                        {
+                            "id": "unsupported",
+                            "question": "Who owns deployment?",
+                            "claim": "Mina owns deployment.",
+                            "evidence": ["No owner is recorded."],
+                            "expected_supported": False,
+                        },
+                        {
+                            "id": "malformed",
+                            "question": "Who owns deployment?",
+                            "claim": "No owner is recorded.",
+                            "evidence": ["No owner is recorded."],
+                            "expected_supported": False,
+                        },
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        corpus = load_claim_support_corpus(self.corpus_path)
+        checker = FakeClaimSupportChecker(
+            {
+                corpus.cases[0].claim: ClaimSupportAssessment(supported=False, response_valid=True),
+                corpus.cases[1].claim: ClaimSupportAssessment(supported=True, response_valid=True),
+                corpus.cases[2].claim: ClaimSupportAssessment(supported=False, response_valid=False),
+            }
+        )
+
+        outcomes = evaluate_claim_support_corpus(checker, corpus)
+
+        self.assertEqual(
+            [outcome.category for outcome in outcomes],
+            ["false_rejection", "false_approval", "malformed_response"],
+        )
 
     def test_public_semantic_corpus_covers_multiple_documents_and_disambiguation(self) -> None:
         fixture_root = Path(__file__).parent / "fixtures" / "public"

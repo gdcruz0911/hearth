@@ -15,7 +15,7 @@ An opt-in MLX generator adapter is implemented behind `--generator-model`.
 An opt-in MLX embedding and flat-index path is implemented behind `--embedding-model` and `--index-directory`.
 An opt-in MLX reranker is implemented behind `--reranker-model`.
 The combined generator and reranker path passed a narrow four-case public host evaluation under the current verbatim-answer contract.
-An experimental local claim-support evaluation is available behind `evaluate-claim-support`; its initial adversarial corpus did not meet a release threshold.
+An experimental local claim-support evaluation is available behind `evaluate-claim-support`; its expanded adversarial corpus still does not meet a release threshold.
 It remains experimental and is not a product default.
 
 ## Privacy boundary

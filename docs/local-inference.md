@@ -73,7 +73,8 @@ Run the separate claim-support corpus with the pre-provisioned local generator.
 
 The checker evaluates a question, proposed claim, and supplied evidence using a strict supported or unsupported JSON response.
 It is evaluation-only and never runs during `search`, changes retrieval order, or relaxes the ADR-0010 verbatim cited-evidence contract.
-On 2026-07-30, the Qwen3 8B 4-bit candidate passed one of four public adversarial cases and incorrectly supported three overclaims involving an added duty or an unsupported qualifier.
+On 2026-07-30, the Qwen3 8B 4-bit candidate passed five of eight public adversarial cases with the tightened prompt.
+It still incorrectly supported the three overclaims involving an added duty or an unsupported qualifier.
 It is therefore not suitable for a claim-validation gate or model-selection decision.
 
 ## Runtime storage

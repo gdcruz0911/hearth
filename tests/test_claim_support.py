@@ -19,12 +19,14 @@ class StructuredClaimSupportCheckerTests(unittest.TestCase):
     def test_accepts_only_strict_supported_response(self) -> None:
         generator = FakeGenerator('{"status":"supported"}')
 
-        supported = StructuredClaimSupportChecker(generator).supports(
+        assessment = StructuredClaimSupportChecker(generator).assess(
             "Who is the owner?", "The owner is Ada.", ("The owner is Ada.",)
         )
 
-        self.assertTrue(supported)
+        self.assertTrue(assessment.supported)
+        self.assertTrue(assessment.response_valid)
         self.assertIn("every factual detail, qualifier, relationship, and time constraint", generator.prompts[0])
+        self.assertIn("only, all, always, never, must", generator.prompts[0])
 
     def test_fails_closed_for_unsupported_or_malformed_response(self) -> None:
         for response in (
@@ -34,8 +36,8 @@ class StructuredClaimSupportCheckerTests(unittest.TestCase):
             "not json",
         ):
             with self.subTest(response=response):
-                self.assertFalse(
-                    StructuredClaimSupportChecker(FakeGenerator(response)).supports(
+                assessment = StructuredClaimSupportChecker(FakeGenerator(response)).assess(
                         "Who is the owner?", "The owner is Ada.", ("The owner is Ada.",)
-                    )
                 )
+                self.assertFalse(assessment.supported)
+                self.assertEqual(assessment.response_valid, response == '{"status":"unsupported"}')

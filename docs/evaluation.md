@@ -74,7 +74,7 @@ PYTHONPATH=src .venv/bin/python -m hearth.cli \
 ```
 
 The corpus supplies each question, proposed claim, and evidence directly to the checker.
-It includes an exact supported claim plus overclaims involving an extra duty, a missing exclusivity qualifier, and evidence spread across documents.
+It includes exact support, explicit cross-document support, an extra duty, missing qualifiers, a contradiction, a missing quantity, and instruction-like text inside evidence.
 The result is not used to accept, reject, or modify user answers.
 
 Run the real local OCR integration test only on a machine with Poppler and OCRmyPDF installed.
@@ -142,8 +142,8 @@ The local generator and reranker combination also passed all four cases.
 The cases verify two verbatim supported excerpts and two related unsupported questions that abstain.
 This does not establish broad generation quality, reranking quality, claim support, or a production model default.
 
-On 2026-07-30, the Qwen3 8B 4-bit candidate passed one of four cases in the experimental local claim-support corpus on the current Apple Silicon Mac.
-It incorrectly marked the three adversarial overclaims as supported.
+On 2026-07-30, the Qwen3 8B 4-bit candidate passed five of eight cases in the expanded experimental local claim-support corpus on the current Apple Silicon Mac.
+It correctly rejected a contradiction, a missing quantity, and instruction-like evidence, but incorrectly marked the three adversarial overclaims as supported.
 The checker remains evaluation-only and cannot replace or relax ADR-0010's verbatim evidence requirement.
 
 ## Future release gate

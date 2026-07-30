@@ -122,7 +122,7 @@ def main(argv: list[str] | None = None) -> int:
             for outcome in outcomes:
                 expected = "supported" if outcome.expected_supported else "unsupported"
                 received = "supported" if outcome.received_supported else "unsupported"
-                detail = "" if outcome.passed else f": expected {expected}, received {received}"
+                detail = "" if outcome.passed else f": {outcome.category}; expected {expected}, received {received}"
                 print(f"{outcome.case_id}: {'PASS' if outcome.passed else 'FAIL'}{detail}")
             passed_count = sum(outcome.passed for outcome in outcomes)
             print(f"Summary: {passed_count}/{len(outcomes)} cases passed.")

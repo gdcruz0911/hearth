@@ -5,7 +5,7 @@ It is not an accepted Architecture Decision Record and does not select implement
 
 ## 1. Improve claim support and broader reranking quality
 
-The optional local generator and reranker pass narrow public evidence and abstention checks, while the initial local claim-support checker passed only one of four adversarial public cases.
+The optional local generator and reranker pass narrow public evidence and abstention checks, while the tightened local claim-support checker passed five of eight adversarial public cases and still made three false approvals.
 Reranking only selects evidence and cannot validate generated factual wording.
 Evaluate prompt or model candidates against a larger adversarial corpus before proposing any claim-support ADR.
 Keep the checker outside the answer path until a decision record sets an explicit threshold, fallback, and rollback behavior.
