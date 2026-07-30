@@ -1,6 +1,7 @@
 # Hearth next milestones
 
-This roadmap describes known v1 limitations after the local foundation milestone.
+The v1 completion scope is recorded in [the v1 release plan](v1-release-plan.md).
+This roadmap describes the work deliberately deferred beyond that local product baseline.
 It is not an accepted Architecture Decision Record and does not select implementation options that require approval.
 
 ## 1. Improve claim support and broader reranking quality

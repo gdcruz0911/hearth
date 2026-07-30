@@ -26,6 +26,7 @@ from .evaluation import (
 )
 from .retrieval import MLXLocalReranker, RerankerError
 from .service import HearthService
+from .web import HearthWebServer
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -95,6 +96,9 @@ def main(argv: list[str] | None = None) -> int:
     relinker.add_argument("action", choices=("preview", "apply"))
     relinker.add_argument("document_id", type=int)
     relinker.add_argument("replacement_path", type=Path, help="Existing local file with identical imported contents.")
+    web = subcommands.add_parser("web", help="Run the local Hearth web interface on this Mac only.")
+    web.add_argument("--port", type=_port, default=8765, help="Loopback port to use (default: 8765).")
+    web.add_argument("--no-open", action="store_true", help="Do not open the local interface in the default browser.")
     evaluator = subcommands.add_parser("evaluate", help="Run a local synthetic or public evaluation corpus.")
     evaluator.add_argument("corpus", type=Path)
     claim_evaluator = subcommands.add_parser(
@@ -161,6 +165,18 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 plan = service.apply_relink(args.document_id, args.replacement_path)
                 _print_relink_applied(plan)
+        elif args.command == "web":
+            server = HearthWebServer(service, port=args.port)
+            print(f"Hearth is running locally at {server.url}", flush=True)
+            print("It is bound to 127.0.0.1 only. Press Ctrl+C to stop it.", flush=True)
+            if not args.no_open:
+                server.open_browser()
+            try:
+                server.serve_forever()
+            except KeyboardInterrupt:
+                print("\nHearth web interface stopped.")
+            finally:
+                server.close()
         elif args.command == "evaluate":
             outcomes = evaluate_corpus(service, load_evaluation_corpus(args.corpus))
             for outcome in outcomes:
@@ -198,6 +214,16 @@ def main(argv: list[str] | None = None) -> int:
         if service is not None:
             service.close()
     return 0
+
+
+def _port(value: str) -> int:
+    try:
+        port = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("The web port must be a number from 1 to 65535.") from exc
+    if not 1 <= port <= 65535:
+        raise argparse.ArgumentTypeError("The web port must be a number from 1 to 65535.")
+    return port
 
 
 def _print_documents(documents: list[ImportedDocument]) -> None:

@@ -10,6 +10,7 @@ Local note or PDF
   -> deterministic local retrieval scaffold or optional local flat semantic index
   -> local reranking boundary
   -> evidence-bound answer rendering
+  -> loopback-only local web interface
 ```
 
 ## Current components
@@ -22,6 +23,8 @@ Local note or PDF
 `CollectionHealth` summarizes local collection counts, OCR-review needs, source freshness attention, and derived-index state without including stored document text or canonical source paths.
 `HearthService` can preview or apply one explicit local rename or same-volume move while updating the existing document source binding and preserving chunks and citations.
 `HearthService` can preview or apply an explicit relink for an unavailable source when a user-selected replacement has the same stored SHA-256 fingerprint.
+`HearthWebServer` binds the existing service to `127.0.0.1` only, scopes requests to a random per-launch capability URL, and serves packaged first-party browser assets without a separate API process.
+`HearthWebApplication` keeps native chooser paths inside the local backend for import and document-ID actions, except when an explicit organization or relink preview displays the selected paths for review.
 `HashingVectorIndex` is an in-memory deterministic retrieval scaffold used when no semantic index is configured.
 `FlatVectorIndex` stores derived normalized float32 vectors and chunk IDs in a versioned local index directory when a semantic index is configured.
 `IdentityReranker` preserves candidate order when no local reranker is configured.
@@ -40,6 +43,8 @@ SQLite records canonical source paths, display names, source fingerprints, sourc
 The `health` command checks source-file availability and freshness locally and reports only document IDs, display names, and attention states, not canonical paths or stored document text.
 The `organize` command displays an explicitly selected source and target only in the local interactive command and never uses that output as a replacement for provenance storage.
 The `relink` command displays a previous unavailable path and user-selected replacement only in the local interactive command, then updates the source binding without moving files when their contents match.
+The local web interface uses the same service methods and does not create browser uploads, managed document copies, a second database, or a separate retrieval index.
+It renders canonical paths only inside a requested organization or relink preview.
 OCR-derived PDFs are transient private scratch artifacts by default and remain only when a user explicitly opts in to retention for inspection.
 The deterministic hashed index is derived in memory when no semantic index is configured.
 When configured, `FlatVectorIndex` stores its derived vectors and manifest in a local versioned directory that can be rebuilt from source documents and SQLite provenance.
@@ -57,6 +62,7 @@ The OCR artifact lifecycle is defined in [ADR-0011](decisions/ADR-0011-transient
 Explicit local source-file organization is defined in [ADR-0012](decisions/ADR-0012-explicit-local-file-organization.md).
 Source freshness attention is defined in [ADR-0013](decisions/ADR-0013-source-freshness-attention.md).
 Explicit source relinking is defined in [ADR-0014](decisions/ADR-0014-explicit-source-relink.md).
+The loopback local web interface is defined in [ADR-0015](decisions/ADR-0015-loopback-local-web-interface.md).
 
 ## Related decisions
 
@@ -72,3 +78,4 @@ Explicit source relinking is defined in [ADR-0014](decisions/ADR-0014-explicit-s
 - [ADR-0012: Explicit local file organization](decisions/ADR-0012-explicit-local-file-organization.md)
 - [ADR-0013: Source freshness attention](decisions/ADR-0013-source-freshness-attention.md)
 - [ADR-0014: Explicit source relink](decisions/ADR-0014-explicit-source-relink.md)
+- [ADR-0015: Loopback local web interface](decisions/ADR-0015-loopback-local-web-interface.md)

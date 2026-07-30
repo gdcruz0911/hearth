@@ -19,3 +19,4 @@ Each record is a standalone Markdown file with graph-indexable frontmatter.
 | [ADR-0012](ADR-0012-explicit-local-file-organization.md) | Explicit local file organization | accepted | 2026-07-30 | - |
 | [ADR-0013](ADR-0013-source-freshness-attention.md) | Source freshness attention | accepted | 2026-07-30 | - |
 | [ADR-0014](ADR-0014-explicit-source-relink.md) | Explicit source relink | accepted | 2026-07-30 | - |
+| [ADR-0015](ADR-0015-loopback-local-web-interface.md) | Loopback local web interface | accepted | 2026-07-30 | - |

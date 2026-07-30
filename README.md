@@ -53,6 +53,7 @@ Import a local note, query it, and run the public evaluation corpus.
 .venv/bin/python -m hearth.cli --database .hearth/hearth.sqlite inspect 1
 .venv/bin/python -m hearth.cli --database .hearth/hearth.sqlite organize preview 1 --rename archive-notes.md
 .venv/bin/python -m hearth.cli --database .hearth/hearth.sqlite relink preview 1 /new/location/note.md
+.venv/bin/python -m hearth.cli --database .hearth/hearth.sqlite web
 .venv/bin/python -m hearth.cli --database .hearth/hearth.sqlite evaluate tests/fixtures/public/baseline-evaluation.json
 ```
 
@@ -66,6 +67,14 @@ When a source changed outside Hearth, `health` asks you to run an explicit `rein
 `relink preview` and `relink apply` recover an unavailable source binding only when the exact local replacement you select matches the stored source fingerprint.
 Relinking does not search your filesystem or move, copy, delete, re-extract, or reindex a file.
 Bulk actions, deletion, and cross-volume moves are intentionally unsupported in v1.
+
+## Local web interface
+
+`web` opens a visual local interface on `127.0.0.1` and prints a random per-launch local URL.
+Use `web --no-open` when you want to copy that URL into a browser manually.
+The UI uses a native macOS chooser to import an original file in place, so it does not create a browser-upload copy or managed library.
+It provides health, metadata-only inspection, evidence-bound search, and preview-then-apply controls for rename, move, reindex, relink, and collection-record removal.
+Removing a collection record never deletes its source file.
 
 OCR fallback uses `--ocr-output-directory` as private local scratch space and deletes each derived OCR PDF after text extraction by default.
 To retain an OCR-enhanced PDF for manual local inspection, pass `--retain-ocr-output` with that directory.
@@ -100,7 +109,8 @@ An optional host-side MLX benchmark is documented in [benchmarking](docs/benchma
   It answers from the currently imported collection, so removed documents and reindexed source changes are not retained as answerable evidence.
 - `health` detects changes only at an imported file's stored path.
   An externally moved unchanged source is reported as unavailable until you restore it, remove its stale record, reimport it, or explicitly relink it to a fingerprint-matching replacement.
-- There is no graphical interface, web server, cloud synchronization, or multi-user support.
+- The web interface is local-only and single-user.
+  It has no cloud synchronization, account system, LAN binding, public deployment, or multi-user support.
 
 ## Project documentation
 
@@ -111,4 +121,5 @@ An optional host-side MLX benchmark is documented in [benchmarking](docs/benchma
 - [PDF and OCR](docs/pdf-and-ocr.md)
 - [Evaluation](docs/evaluation.md)
 - [Architecture Decision Records](docs/decisions/README.md)
+- [v1 release plan](docs/v1-release-plan.md)
 - [Next milestones](docs/next-milestones.md)

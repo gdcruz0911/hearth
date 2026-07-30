@@ -84,12 +84,43 @@ class HearthService:
             self._rebuild_semantic_index()
         return removed
 
+    def plan_remove_document(self, document_id: int) -> ImportedDocument:
+        """Confirm one record exists before an explicit local-record removal."""
+        inspection = self.inspect_document(document_id)
+        if inspection is None:
+            raise ImportError(f"No imported document with ID {document_id}.")
+        return inspection.document
+
+    def remove_document_by_id(self, document_id: int) -> bool:
+        """Remove one collection record by ID without deleting its source file."""
+        self.plan_remove_document(document_id)
+        removed = self._store.remove_document_by_id(document_id)
+        if removed:
+            self._rebuild_semantic_index()
+        return removed
+
     def reindex_document(self, raw_path: str) -> int:
         """Re-extract and replace all derived chunks for one local document."""
         return self.import_document(raw_path)
 
     def reindex_with_summary(self, raw_path: str) -> ImportSummary:
         return self._import_summary(self.reindex_document(raw_path))
+
+    def plan_reindex_document(self, document_id: int) -> ImportedDocument:
+        """Confirm the current source is available before an explicit reindex."""
+        inspection = self.inspect_document(document_id)
+        source_path = self._store.source_path(document_id)
+        if inspection is None or source_path is None:
+            raise ImportError(f"No imported document with ID {document_id}.")
+        _validated_local_file(str(source_path))
+        return inspection.document
+
+    def reindex_document_by_id(self, document_id: int) -> ImportSummary:
+        """Reindex a selected record while keeping its private path inside the service boundary."""
+        self.plan_reindex_document(document_id)
+        source_path = self._store.source_path(document_id)
+        assert source_path is not None
+        return self.reindex_with_summary(str(source_path))
 
     def list_documents(self) -> list[ImportedDocument]:
         """Return collection metadata without document text or canonical source paths."""

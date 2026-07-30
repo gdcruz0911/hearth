@@ -20,7 +20,7 @@ class SQLiteStore:
 
     def __init__(self, database_path: Path):
         database_path.parent.mkdir(parents=True, exist_ok=True)
-        self._connection = sqlite3.connect(database_path)
+        self._connection = sqlite3.connect(database_path, check_same_thread=False)
         self._connection.row_factory = sqlite3.Row
         self._connection.execute("PRAGMA foreign_keys = ON")
         self._create_schema()
@@ -61,6 +61,12 @@ class SQLiteStore:
     def remove_document(self, path: Path) -> bool:
         with self._connection:
             result = self._connection.execute("DELETE FROM documents WHERE canonical_path = ?", (str(path),))
+        return result.rowcount == 1
+
+    def remove_document_by_id(self, document_id: int) -> bool:
+        """Remove one local collection record without touching its source file."""
+        with self._connection:
+            result = self._connection.execute("DELETE FROM documents WHERE id = ?", (document_id,))
         return result.rowcount == 1
 
     def list_documents(self) -> list[ImportedDocument]:

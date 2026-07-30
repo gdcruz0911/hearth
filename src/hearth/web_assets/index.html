@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light">
+    <title>Hearth</title>
+    <link rel="stylesheet" href="assets/app.css">
+    <script defer src="assets/app.js"></script>
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">Local-first document chat</p>
+          <h1>Hearth</h1>
+        </div>
+        <button id="import-button" class="button button-primary" type="button">Import a local file</button>
+      </header>
+
+      <p id="status-message" class="status" role="status" aria-live="polite">Loading your local collection.</p>
+
+      <section class="intro-grid" aria-label="Collection overview">
+        <div class="intro-copy">
+          <p class="eyebrow">Your private knowledge base</p>
+          <h2>Ask from the documents you have chosen.</h2>
+          <p>Hearth runs only on this Mac. It keeps original files in place, shows evidence for every supported answer, and asks before changing a file or collection record.</p>
+        </div>
+        <dl id="health-summary" class="health-summary"></dl>
+      </section>
+
+      <section class="ask-panel" aria-labelledby="ask-heading">
+        <div>
+          <p class="eyebrow">Evidence-bound search</p>
+          <h2 id="ask-heading">What would you like to find?</h2>
+        </div>
+        <form id="search-form">
+          <label class="sr-only" for="question">Question</label>
+          <input id="question" name="question" autocomplete="off" placeholder="Ask about your imported documents" required>
+          <button class="button button-primary" type="submit">Ask Hearth</button>
+        </form>
+        <div id="answer-panel" class="answer-panel" hidden></div>
+      </section>
+
+      <section class="workspace" aria-label="Collection workspace">
+        <div class="collection-panel">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">Collection</p>
+              <h2>Documents</h2>
+            </div>
+            <span id="document-count" class="count"></span>
+          </div>
+          <div id="attention-panel" class="attention-panel" hidden></div>
+          <div id="document-list" class="document-list"></div>
+        </div>
+
+        <aside id="detail-panel" class="detail-panel" aria-live="polite">
+          <p class="empty-state">Choose a document to inspect its local provenance and available actions.</p>
+        </aside>
+      </section>
+    </main>
+  </body>
+</html>
