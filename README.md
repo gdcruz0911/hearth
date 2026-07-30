@@ -15,6 +15,7 @@ An opt-in MLX generator adapter is implemented behind `--generator-model`.
 An opt-in MLX embedding and flat-index path is implemented behind `--embedding-model` and `--index-directory`.
 An opt-in MLX reranker is implemented behind `--reranker-model`.
 The combined generator and reranker path passed a narrow four-case public host evaluation under the current verbatim-answer contract.
+An experimental local claim-support evaluation is available behind `evaluate-claim-support`; its initial adversarial corpus did not meet a release threshold.
 It remains experimental and is not a product default.
 
 ## Privacy boundary
@@ -79,6 +80,7 @@ An optional host-side MLX benchmark is documented in [benchmarking](docs/benchma
 - The default retrieval path uses a deterministic hashed-vector scaffold.
 - The optional local semantic embedding index is not yet a production-qualified default.
 - The optional local reranker is experimental and has not been selected as a default.
+- The experimental local claim-support checker is evaluation-only and does not relax the verbatim cited-evidence requirement.
 - Generated answers require an explicitly configured local model and remain experimental despite the current narrow citation and abstention evaluation.
 - Generated factual text must be a verbatim cited evidence span, so valid paraphrases and multi-source synthesis can abstain.
 - OCR quality depends on the source scan and can be poor for handwriting, complex layouts, tables, formulas, and low-quality images.

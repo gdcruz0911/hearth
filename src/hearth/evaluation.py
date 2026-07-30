@@ -4,6 +4,7 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
+from .claim_support import ClaimSupportChecker
 from .service import HearthService
 
 
@@ -33,10 +34,32 @@ class EvaluationCorpus:
 
 
 @dataclass(frozen=True)
+class ClaimSupportCase:
+    id: str
+    question: str
+    claim: str
+    evidence: tuple[str, ...]
+    expected_supported: bool
+
+
+@dataclass(frozen=True)
+class ClaimSupportCorpus:
+    cases: tuple[ClaimSupportCase, ...]
+
+
+@dataclass(frozen=True)
 class EvaluationOutcome:
     case_id: str
     passed: bool
     errors: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class ClaimSupportOutcome:
+    case_id: str
+    passed: bool
+    expected_supported: bool
+    received_supported: bool
 
 
 def load_evaluation_corpus(path: Path) -> EvaluationCorpus:
@@ -71,6 +94,44 @@ def evaluate_corpus(service: HearthService, corpus: EvaluationCorpus) -> tuple[E
     return tuple(_evaluate_case(service, case) for case in corpus.cases)
 
 
+def load_claim_support_corpus(path: Path) -> ClaimSupportCorpus:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise EvaluationCorpusError("Claim-support corpus file does not exist.") from exc
+    except UnicodeDecodeError as exc:
+        raise EvaluationCorpusError("Claim-support corpus must be UTF-8 encoded.") from exc
+    except json.JSONDecodeError as exc:
+        raise EvaluationCorpusError("Claim-support corpus is not valid JSON.") from exc
+    if not isinstance(payload, dict):
+        raise EvaluationCorpusError("Claim-support corpus must be a JSON object.")
+    raw_cases = payload.get("cases")
+    if not isinstance(raw_cases, list) or not raw_cases:
+        raise EvaluationCorpusError("Claim-support corpus requires at least one case.")
+    cases = tuple(_parse_claim_support_case(item, index) for index, item in enumerate(raw_cases, start=1))
+    case_ids = [case.id for case in cases]
+    if len(case_ids) != len(set(case_ids)):
+        raise EvaluationCorpusError("Claim-support case IDs must be unique.")
+    return ClaimSupportCorpus(cases)
+
+
+def evaluate_claim_support_corpus(
+    checker: ClaimSupportChecker, corpus: ClaimSupportCorpus
+) -> tuple[ClaimSupportOutcome, ...]:
+    outcomes = []
+    for case in corpus.cases:
+        received_supported = checker.supports(case.question, case.claim, case.evidence)
+        outcomes.append(
+            ClaimSupportOutcome(
+                case_id=case.id,
+                passed=received_supported == case.expected_supported,
+                expected_supported=case.expected_supported,
+                received_supported=received_supported,
+            )
+        )
+    return tuple(outcomes)
+
+
 def _parse_case(value: object, index: int) -> EvaluationCase:
     if not isinstance(value, dict):
         raise EvaluationCorpusError(f"Evaluation case {index} must be a JSON object.")
@@ -88,6 +149,19 @@ def _parse_case(value: object, index: int) -> EvaluationCase:
     if expected_status == "abstained" and citations:
         raise EvaluationCorpusError(f"Abstained evaluation case {index} cannot define expected citations.")
     return EvaluationCase(case_id, question, expected_status, citations)
+
+
+def _parse_claim_support_case(value: object, index: int) -> ClaimSupportCase:
+    if not isinstance(value, dict):
+        raise EvaluationCorpusError(f"Claim-support case {index} must be a JSON object.")
+    case_id = _required_string(value, "id", index)
+    question = _required_string(value, "question", index)
+    claim = _required_string(value, "claim", index)
+    evidence = _required_string_list(value, "evidence")
+    expected_supported = value.get("expected_supported")
+    if not isinstance(expected_supported, bool):
+        raise EvaluationCorpusError(f"Claim-support case {index} expected_supported must be a boolean.")
+    return ClaimSupportCase(case_id, question, claim, tuple(evidence), expected_supported)
 
 
 def _parse_expected_citation(value: object, case_index: int) -> ExpectedCitation:

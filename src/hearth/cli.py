@@ -4,9 +4,16 @@ import argparse
 from pathlib import Path
 
 from .answering import LocalInferenceError, MLXLocalGenerator, StructuredGeneratorAnswerer
+from .claim_support import StructuredClaimSupportChecker
 from .domain import DocumentInspection, ImportedDocument, ImportError
 from .embedding import EmbeddingError, FlatVectorIndex, IndexError, MLXEmbedder
-from .evaluation import EvaluationCorpusError, evaluate_corpus, load_evaluation_corpus
+from .evaluation import (
+    EvaluationCorpusError,
+    evaluate_claim_support_corpus,
+    evaluate_corpus,
+    load_claim_support_corpus,
+    load_evaluation_corpus,
+)
 from .retrieval import MLXLocalReranker, RerankerError
 from .service import HearthService
 
@@ -27,7 +34,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--generator-model",
         type=Path,
-        help="Pre-provisioned local MLX model directory. Enables generated evidence-bound answers.",
+        help="Pre-provisioned local MLX model directory. Enables generated answers and claim-support evaluation.",
     )
     parser.add_argument(
         "--embedding-model",
@@ -58,18 +65,21 @@ def main(argv: list[str] | None = None) -> int:
     inspector.add_argument("document_id", type=int)
     evaluator = subcommands.add_parser("evaluate", help="Run a local synthetic or public evaluation corpus.")
     evaluator.add_argument("corpus", type=Path)
+    claim_evaluator = subcommands.add_parser(
+        "evaluate-claim-support", help="Run an experimental local claim-support corpus."
+    )
+    claim_evaluator.add_argument("corpus", type=Path)
     args = parser.parse_args(argv)
     if (args.embedding_model is None) != (args.index_directory is None):
         parser.error("--embedding-model and --index-directory must be provided together.")
     if args.retain_ocr_output and args.ocr_output_directory is None:
         parser.error("--retain-ocr-output requires --ocr-output-directory.")
+    if args.command == "evaluate-claim-support" and args.generator_model is None:
+        parser.error("evaluate-claim-support requires --generator-model.")
     service: HearthService | None = None
     try:
-        answerer = (
-            StructuredGeneratorAnswerer(MLXLocalGenerator(args.generator_model))
-            if args.generator_model is not None
-            else None
-        )
+        generator = MLXLocalGenerator(args.generator_model) if args.generator_model is not None else None
+        answerer = StructuredGeneratorAnswerer(generator) if generator is not None else None
         semantic_index = (
             FlatVectorIndex(args.index_directory, MLXEmbedder(args.embedding_model))
             if args.embedding_model is not None
@@ -102,6 +112,17 @@ def main(argv: list[str] | None = None) -> int:
             outcomes = evaluate_corpus(service, load_evaluation_corpus(args.corpus))
             for outcome in outcomes:
                 detail = "" if outcome.passed else f": {'; '.join(outcome.errors)}"
+                print(f"{outcome.case_id}: {'PASS' if outcome.passed else 'FAIL'}{detail}")
+            passed_count = sum(outcome.passed for outcome in outcomes)
+            print(f"Summary: {passed_count}/{len(outcomes)} cases passed.")
+            return 0 if passed_count == len(outcomes) else 1
+        elif args.command == "evaluate-claim-support":
+            checker = StructuredClaimSupportChecker(generator)
+            outcomes = evaluate_claim_support_corpus(checker, load_claim_support_corpus(args.corpus))
+            for outcome in outcomes:
+                expected = "supported" if outcome.expected_supported else "unsupported"
+                received = "supported" if outcome.received_supported else "unsupported"
+                detail = "" if outcome.passed else f": expected {expected}, received {received}"
                 print(f"{outcome.case_id}: {'PASS' if outcome.passed else 'FAIL'}{detail}")
             passed_count = sum(outcome.passed for outcome in outcomes)
             print(f"Summary: {passed_count}/{len(outcomes)} cases passed.")

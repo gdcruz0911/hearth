@@ -3,12 +3,12 @@
 This roadmap describes known v1 limitations after the local foundation milestone.
 It is not an accepted Architecture Decision Record and does not select implementation options that require approval.
 
-## 1. Evaluate claim support and broader reranking quality
+## 1. Improve claim support and broader reranking quality
 
-The optional local generator and reranker pass narrow public evidence and abstention checks.
+The optional local generator and reranker pass narrow public evidence and abstention checks, while the initial local claim-support checker passed only one of four adversarial public cases.
 Reranking only selects evidence and cannot validate generated factual wording.
-Evaluate a local claim-support checker separately from reranking before changing the ADR-0010 verbatim-answer contract.
-Expand public or synthetic cases for misleading near-matches, source qualifiers, and cross-document evidence before proposing a claim-support ADR.
+Evaluate prompt or model candidates against a larger adversarial corpus before proposing any claim-support ADR.
+Keep the checker outside the answer path until a decision record sets an explicit threshold, fallback, and rollback behavior.
 
 ## 2. Create the local evaluation corpus and release gate
 

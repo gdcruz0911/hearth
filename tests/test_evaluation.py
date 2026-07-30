@@ -5,8 +5,22 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from hearth.evaluation import EvaluationCorpusError, evaluate_corpus, load_evaluation_corpus
+from hearth.evaluation import (
+    EvaluationCorpusError,
+    evaluate_claim_support_corpus,
+    evaluate_corpus,
+    load_claim_support_corpus,
+    load_evaluation_corpus,
+)
 from hearth.service import HearthService
+
+
+class FakeClaimSupportChecker:
+    def __init__(self, outcomes: dict[str, bool]):
+        self._outcomes = outcomes
+
+    def supports(self, question: str, claim: str, evidence: tuple[str, ...]) -> bool:
+        return self._outcomes[claim]
 
 
 class EvaluationTests(unittest.TestCase):
@@ -83,6 +97,26 @@ class EvaluationTests(unittest.TestCase):
             ],
         )
         self.assertEqual(corpus.cases[2].expected_status, "abstained")
+
+    def test_claim_support_corpus_covers_adversarial_cases(self) -> None:
+        fixture_root = Path(__file__).parent / "fixtures" / "public"
+        corpus = load_claim_support_corpus(fixture_root / "claim-support-evaluation.json")
+        checker = FakeClaimSupportChecker(
+            {case.claim: case.expected_supported for case in corpus.cases}
+        )
+
+        outcomes = evaluate_claim_support_corpus(checker, corpus)
+
+        self.assertEqual(
+            [case.id for case in corpus.cases],
+            [
+                "supported-exact-owner",
+                "unsupported-near-match-extra-duty",
+                "unsupported-missing-qualifier",
+                "unsupported-cross-document-qualifier",
+            ],
+        )
+        self.assertTrue(all(outcome.passed for outcome in outcomes))
 
     def test_public_semantic_corpus_covers_multiple_documents_and_disambiguation(self) -> None:
         fixture_root = Path(__file__).parent / "fixtures" / "public"

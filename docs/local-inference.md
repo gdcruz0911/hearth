@@ -63,6 +63,19 @@ It only reorders retrieved candidates and does not validate generated claims or 
 On 2026-07-30, the local reranker ranked a relevant synthetic archive passage above an unrelated passage on the current Apple Silicon Mac.
 This is a narrow behavior check, not a selection decision or broader relevance evaluation.
 
+## Experimental claim-support evaluation
+
+Run the separate claim-support corpus with the pre-provisioned local generator.
+
+```bash
+.venv/bin/python -m hearth.cli --generator-model /path/to/local/model evaluate-claim-support tests/fixtures/public/claim-support-evaluation.json
+```
+
+The checker evaluates a question, proposed claim, and supplied evidence using a strict supported or unsupported JSON response.
+It is evaluation-only and never runs during `search`, changes retrieval order, or relaxes the ADR-0010 verbatim cited-evidence contract.
+On 2026-07-30, the Qwen3 8B 4-bit candidate passed one of four public adversarial cases and incorrectly supported three overclaims involving an added duty or an unsupported qualifier.
+It is therefore not suitable for a claim-validation gate or model-selection decision.
+
 ## Runtime storage
 
 The current model root is `~/Library/Application Support/Hearth/models/`, where `~` means the current macOS user’s home directory.

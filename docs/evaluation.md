@@ -65,6 +65,18 @@ PYTHONPATH=src .venv/bin/python -m hearth.cli \
 
 After a structured-generator contract change, rerun every host-side generator corpus before relying on previously recorded generator results.
 
+Run the experimental local claim-support corpus separately from document retrieval and answer generation.
+
+```bash
+PYTHONPATH=src .venv/bin/python -m hearth.cli \
+  --generator-model /path/to/local/generator-model \
+  evaluate-claim-support tests/fixtures/public/claim-support-evaluation.json
+```
+
+The corpus supplies each question, proposed claim, and evidence directly to the checker.
+It includes an exact supported claim plus overclaims involving an extra duty, a missing exclusivity qualifier, and evidence spread across documents.
+The result is not used to accept, reject, or modify user answers.
+
 Run the real local OCR integration test only on a machine with Poppler and OCRmyPDF installed.
 
 ```bash
@@ -90,6 +102,7 @@ The multi-document semantic corpus verifies source disambiguation, exact citatio
 The opt-in OCR integration test uses a synthetic image-only PDF and verifies local OCR citation metadata, record replacement after reindexing, default temporary-output deletion, explicit output retention, and one surviving inspected document.
 Structured-generator tests reject a paraphrase even when it has an approved citation ID and accept only normalized verbatim evidence spans.
 Reranker tests reject invalid scores, preserve deterministic tie order, and verify one real local relevance ordering.
+Claim-support tests reject malformed model output and cover a separate public corpus of exact and adversarial claim-evidence pairs.
 
 ## Recorded public result
 
@@ -129,7 +142,12 @@ The local generator and reranker combination also passed all four cases.
 The cases verify two verbatim supported excerpts and two related unsupported questions that abstain.
 This does not establish broad generation quality, reranking quality, claim support, or a production model default.
 
+On 2026-07-30, the Qwen3 8B 4-bit candidate passed one of four cases in the experimental local claim-support corpus on the current Apple Silicon Mac.
+It incorrectly marked the three adversarial overclaims as supported.
+The checker remains evaluation-only and cannot replace or relax ADR-0010's verbatim evidence requirement.
+
 ## Future release gate
 
 Before selecting a local model configuration, extend the corpus with public or synthetic cases for OCR warnings, removal, reindexing, citation validity, and unsupported questions.
+Do not promote a claim-support checker until it meets an explicit adversarial-corpus threshold defined by a new ADR.
 Record model, retrieval, chunking, and prompt configuration alongside results without storing private prompts or responses in Git.

@@ -1,0 +1,32 @@
+{
+  "cases": [
+    {
+      "id": "supported-exact-owner",
+      "question": "Who is the deployment owner?",
+      "claim": "The deployment owner is Ada.",
+      "evidence": ["The deployment owner is Ada."],
+      "expected_supported": true
+    },
+    {
+      "id": "unsupported-near-match-extra-duty",
+      "question": "Who approves releases?",
+      "claim": "Ada owns deployments and approves all releases.",
+      "evidence": ["The deployment owner is Ada."],
+      "expected_supported": false
+    },
+    {
+      "id": "unsupported-missing-qualifier",
+      "question": "Where are archive documents stored?",
+      "claim": "Archive documents are stored only in local encrypted storage.",
+      "evidence": ["Archive documents are stored in local encrypted storage."],
+      "expected_supported": false
+    },
+    {
+      "id": "unsupported-cross-document-qualifier",
+      "question": "Where is the encrypted archive stored?",
+      "claim": "The archive is stored only locally.",
+      "evidence": ["The archive uses encryption at rest.", "The archive is stored locally."],
+      "expected_supported": false
+    }
+  ]
+}

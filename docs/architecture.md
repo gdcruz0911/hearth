@@ -26,6 +26,7 @@ Local note or PDF
 `EvidenceAnswerer` returns retrieved evidence directly when no generator is configured.
 `StructuredGeneratorAnswerer` accepts only strict JSON from an opt-in local generator, resolves citation metadata from the approved evidence bundle, and rejects generated factual text that is not a normalized contiguous span of a cited quote.
 `MLXLocalGenerator` loads a pre-provisioned local model directory and does not accept a model repository identifier.
+`StructuredClaimSupportChecker` is an evaluation-only local adapter that scores a supplied claim against supplied evidence and is not connected to the answer path.
 `validate_answer` rejects a non-abstained answer whose citations are absent or reference chunks outside the approved evidence bundle.
 `has_lexical_support` adds the ADR-0009 fail-closed check that a supported answer's cited evidence shares a meaningful term with the question.
 
