@@ -4,7 +4,7 @@ from pathlib import Path
 
 from .answering import Answerer, EvidenceAnswerer, validate_answer
 from .chunking import chunk_page
-from .domain import Answer, DocumentInspection, ImportedDocument, ImportError
+from .domain import Answer, CollectionHealth, DocumentInspection, ImportedDocument, ImportError, ImportSummary
 from .embedding import FlatVectorIndex
 from .extraction import OCRmyPDFFallback, PageExtractor, PdfExtractor, PopplerPdfExtractor, TextNoteExtractor
 from .retrieval import HashingVectorIndex, IdentityReranker, Reranker, has_lexical_support
@@ -42,6 +42,7 @@ class HearthService:
         self._reranker = reranker or IdentityReranker()
         self._answerer = answerer or EvidenceAnswerer()
         self._semantic_index = semantic_index
+        self._retain_ocr_output = retain_ocr_output
 
     def close(self) -> None:
         self._store.close()
@@ -57,6 +58,9 @@ class HearthService:
         self._rebuild_semantic_index()
         return document_id
 
+    def import_with_summary(self, raw_path: str) -> ImportSummary:
+        return self._import_summary(self.import_document(raw_path))
+
     def remove_document(self, raw_path: str) -> bool:
         removed = self._store.remove_document(_validated_local_file(raw_path))
         if removed:
@@ -67,6 +71,9 @@ class HearthService:
         """Re-extract and replace all derived chunks for one local document."""
         return self.import_document(raw_path)
 
+    def reindex_with_summary(self, raw_path: str) -> ImportSummary:
+        return self._import_summary(self.reindex_document(raw_path))
+
     def list_documents(self) -> list[ImportedDocument]:
         """Return collection metadata without document text or canonical source paths."""
         return self._store.list_documents()
@@ -74,6 +81,12 @@ class HearthService:
     def inspect_document(self, document_id: int) -> DocumentInspection | None:
         """Return one document's page and chunk provenance without document text."""
         return self._store.inspect_document(document_id)
+
+    def collection_health(self) -> CollectionHealth:
+        semantic_index_status = "not configured"
+        if self._semantic_index is not None:
+            semantic_index_status = "ready" if self._semantic_index.is_current(self._store.list_chunks()) else "needs reindex"
+        return self._store.collection_health(semantic_index_status)
 
     def answer(self, question: str) -> Answer:
         if not question.strip():
@@ -95,6 +108,22 @@ class HearthService:
     def _rebuild_semantic_index(self) -> None:
         if self._semantic_index is not None:
             self._semantic_index.rebuild(self._store.list_chunks())
+
+    def _import_summary(self, document_id: int) -> ImportSummary:
+        inspection = self.inspect_document(document_id)
+        if inspection is None:
+            raise RuntimeError("Imported document could not be inspected.")
+        if inspection.document.ocr_page_count == 0:
+            ocr_artifact_status = "not used"
+        elif self._retain_ocr_output:
+            ocr_artifact_status = "retained locally for inspection"
+        else:
+            ocr_artifact_status = "temporary output deleted after extraction"
+        return ImportSummary(
+            document=inspection.document,
+            semantic_index_status=self.collection_health().semantic_index_status,
+            ocr_artifact_status=ocr_artifact_status,
+        )
 
 
 def _validated_local_file(raw_path: str) -> Path:

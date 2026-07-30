@@ -19,6 +19,7 @@ Local note or PDF
 `OCRmyPDFFallback` is an optional local extension that fills only pages with no native text and deletes its derived PDF after extraction unless retention is explicitly configured.
 `chunk_page` preserves page boundaries and stores character offsets for each chunk.
 `SQLiteStore` is the authoritative store for document identities, page metadata, chunks, and provenance.
+`CollectionHealth` summarizes local collection counts, unavailable source records, OCR-review needs, and derived-index state without including stored document text or canonical source paths.
 `HashingVectorIndex` is an in-memory deterministic retrieval scaffold used when no semantic index is configured.
 `FlatVectorIndex` stores derived normalized float32 vectors and chunk IDs in a versioned local index directory when a semantic index is configured.
 `IdentityReranker` preserves candidate order when no local reranker is configured.
@@ -34,6 +35,7 @@ Local note or PDF
 
 Original documents remain at their local source paths and are not stored as document bytes in SQLite.
 SQLite records canonical source paths, display names, pages, extraction metadata, sections, chunks, and character offsets.
+The `health` command checks source-file availability locally but returns only aggregate counts, so it does not expose those canonical paths in normal operation.
 OCR-derived PDFs are transient private scratch artifacts by default and remain only when a user explicitly opts in to retention for inspection.
 The deterministic hashed index is derived in memory when no semantic index is configured.
 When configured, `FlatVectorIndex` stores its derived vectors and manifest in a local versioned directory that can be rebuilt from source documents and SQLite provenance.

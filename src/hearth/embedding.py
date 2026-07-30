@@ -163,6 +163,14 @@ class FlatVectorIndex:
             results.append(Evidence(chunk=chunks_by_id[chunk_id], score=score))
         return sorted(results, key=lambda item: (-item.score, item.chunk.id))[:limit]
 
+    def is_current(self, chunks: list[Chunk]) -> bool:
+        """Returns whether the active derived index matches the current local chunks."""
+        try:
+            self._load_manifest(chunks)
+        except IndexCompatibilityError:
+            return False
+        return True
+
     def _manifest(self, version: str, chunks: list[Chunk]) -> dict[str, object]:
         spec = self._embedder.spec
         return {

@@ -52,6 +52,81 @@ class CollectionInspectionCliTests(unittest.TestCase):
         self.assertNotIn("The deployment owner is Ada.", output.getvalue())
         self.assertNotIn(str(self.root), output.getvalue())
 
+    def test_health_reports_collection_metadata_and_next_action_without_document_text(self) -> None:
+        output = io.StringIO()
+
+        with contextlib.redirect_stdout(output):
+            exit_code = main(["--database", str(self.database), "health"])
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn("Collection health", output.getvalue())
+        self.assertIn("Documents: 1", output.getvalue())
+        self.assertIn("Pages: 1", output.getvalue())
+        self.assertIn("Chunks: 1", output.getvalue())
+        self.assertIn("OCR pages needing review: 0", output.getvalue())
+        self.assertIn("Source files unavailable: 0", output.getvalue())
+        self.assertIn("Semantic index: not configured", output.getvalue())
+        self.assertIn("Next: import a document, or search the current collection.", output.getvalue())
+        self.assertNotIn("The deployment owner is Ada.", output.getvalue())
+        self.assertNotIn(str(self.root), output.getvalue())
+
+    def test_health_reports_unavailable_source_without_rendering_its_path(self) -> None:
+        self.note.rename(self.root / "operations-moved.md")
+        output = io.StringIO()
+
+        with contextlib.redirect_stdout(output):
+            exit_code = main(["--database", str(self.database), "health"])
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn("Source files unavailable: 1", output.getvalue())
+        self.assertIn("Next: restore an unavailable source file, or remove its stale collection record.", output.getvalue())
+        self.assertNotIn("operations-moved.md", output.getvalue())
+        self.assertNotIn(str(self.root), output.getvalue())
+
+    def test_import_reports_extraction_and_derived_artifact_status(self) -> None:
+        second_note = self.root / "security.md"
+        second_note.write_text("# Security\n\nThe archive is local.\n", encoding="utf-8")
+        output = io.StringIO()
+
+        with contextlib.redirect_stdout(output):
+            exit_code = main(["--database", str(self.database), "import", str(second_note)])
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn("Imported document", output.getvalue())
+        self.assertIn("security.md", output.getvalue())
+        self.assertIn("Extracted: 1 pages, 1 chunks, 0 OCR pages.", output.getvalue())
+        self.assertIn("Semantic index: not configured.", output.getvalue())
+        self.assertIn("OCR artifacts: not used.", output.getvalue())
+
+    def test_search_uses_citation_first_output(self) -> None:
+        output = io.StringIO()
+
+        with contextlib.redirect_stdout(output):
+            exit_code = main(["--database", str(self.database), "search", "Who is the deployment owner?"])
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn("Answer\n# Operations", output.getvalue())
+        self.assertIn("The deployment owner is Ada.", output.getvalue())
+        self.assertIn("Sources\n- operations.md, page 1, section Operations", output.getvalue())
+        self.assertIn("Evidence: # Operations", output.getvalue())
+        self.assertIn("The deployment owner is Ada.", output.getvalue())
+
+    def test_search_marks_ocr_citations_for_review(self) -> None:
+        pdf = self.root / "scanned.pdf"
+        pdf.write_bytes(b"placeholder")
+        service = HearthService(self.database, pdf_extractor=OcrPdfExtractor())
+        service.import_document(str(pdf))
+        service.close()
+        output = io.StringIO()
+
+        with contextlib.redirect_stdout(output):
+            exit_code = main(["--database", str(self.database), "search", "What archive metadata is available?"])
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn("Sources", output.getvalue())
+        self.assertIn("scanned.pdf, page 1", output.getvalue())
+        self.assertIn("OCR warning: verify against the original document (confidence: 0.92).", output.getvalue())
+
     def test_inspect_reports_page_and_chunk_metadata_without_document_text(self) -> None:
         output = io.StringIO()
 

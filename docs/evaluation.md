@@ -100,6 +100,7 @@ The semantic-index regression test verifies that unrelated retrieved evidence ca
 The opt-in local MLX semantic integration test verifies real reindex replacement, deletion, and fail-closed manifest mismatch handling with synthetic temporary content.
 The multi-document semantic corpus verifies source disambiguation, exact citation provenance, and unrelated-question abstention.
 The opt-in OCR integration test uses a synthetic image-only PDF and verifies local OCR citation metadata, record replacement after reindexing, default temporary-output deletion, explicit output retention, and one surviving inspected document.
+The MVP workflow test exercises import, metadata-only health, citation-first search output, reindexing, removal, and an empty-collection health result through the CLI using a public fixture copied into temporary local runtime storage.
 Structured-generator tests reject a paraphrase even when it has an approved citation ID and accept only normalized verbatim evidence spans.
 Reranker tests reject invalid scores, preserve deterministic tie order, and verify one real local relevance ordering.
 Claim-support tests reject malformed model output and cover a separate public corpus of exact and adversarial claim-evidence pairs.

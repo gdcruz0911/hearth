@@ -74,3 +74,12 @@ class FlatVectorIndexTests(unittest.TestCase):
     def test_search_requires_an_active_index(self) -> None:
         with self.assertRaisesRegex(IndexCompatibilityError, "No local semantic index is active"):
             self.index.search("query", [_chunk(1, "first")])
+
+    def test_is_current_reports_missing_or_mismatched_active_index(self) -> None:
+        first_chunk = _chunk(1, "first")
+        self.assertFalse(self.index.is_current([first_chunk]))
+
+        self.index.rebuild([first_chunk])
+
+        self.assertTrue(self.index.is_current([first_chunk]))
+        self.assertFalse(self.index.is_current([_chunk(2, "second")]))

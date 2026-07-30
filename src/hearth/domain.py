@@ -47,6 +47,23 @@ class ImportedDocument:
 
 
 @dataclass(frozen=True)
+class ImportSummary:
+    document: ImportedDocument
+    semantic_index_status: str
+    ocr_artifact_status: str
+
+
+@dataclass(frozen=True)
+class CollectionHealth:
+    document_count: int
+    page_count: int
+    chunk_count: int
+    ocr_page_count: int
+    unavailable_source_count: int
+    semantic_index_status: str
+
+
+@dataclass(frozen=True)
 class ChunkInspection:
     id: int
     char_start: int

@@ -5,7 +5,7 @@ from pathlib import Path
 
 from .answering import LocalInferenceError, MLXLocalGenerator, StructuredGeneratorAnswerer
 from .claim_support import StructuredClaimSupportChecker
-from .domain import DocumentInspection, ImportedDocument, ImportError
+from .domain import CollectionHealth, DocumentInspection, ImportedDocument, ImportError, ImportSummary
 from .embedding import EmbeddingError, FlatVectorIndex, IndexError, MLXEmbedder
 from .evaluation import (
     EvaluationCorpusError,
@@ -61,6 +61,7 @@ def main(argv: list[str] | None = None) -> int:
     remover = subcommands.add_parser("remove", help="Remove a document and its derived records.")
     remover.add_argument("path")
     subcommands.add_parser("list", help="List imported documents without document text or source paths.")
+    subcommands.add_parser("health", help="Summarize private collection health without document text or source paths.")
     inspector = subcommands.add_parser("inspect", help="Inspect one document's local provenance metadata.")
     inspector.add_argument("document_id", type=int)
     evaluator = subcommands.add_parser("evaluate", help="Run a local synthetic or public evaluation corpus.")
@@ -95,13 +96,15 @@ def main(argv: list[str] | None = None) -> int:
             retain_ocr_output=args.retain_ocr_output,
         )
         if args.command == "import":
-            print(f"Imported document {service.import_document(args.path)}.")
+            _print_import_summary("Imported", service.import_with_summary(args.path))
         elif args.command == "reindex":
-            print(f"Reindexed document {service.reindex_document(args.path)}.")
+            _print_import_summary("Reindexed", service.reindex_with_summary(args.path))
         elif args.command == "remove":
             print("Removed." if service.remove_document(args.path) else "No matching document found.")
         elif args.command == "list":
             _print_documents(service.list_documents())
+        elif args.command == "health":
+            _print_collection_health(service.collection_health())
         elif args.command == "inspect":
             inspection = service.inspect_document(args.document_id)
             if inspection is None:
@@ -127,21 +130,9 @@ def main(argv: list[str] | None = None) -> int:
             passed_count = sum(outcome.passed for outcome in outcomes)
             print(f"Summary: {passed_count}/{len(outcomes)} cases passed.")
             return 0 if passed_count == len(outcomes) else 1
-        else:
+        elif args.command == "search":
             answer = service.answer(args.question)
-            print(answer.text)
-            for citation in answer.citations:
-                section = f", section {citation.section}" if citation.section else ""
-                extraction = f", extraction {citation.extraction_method}"
-                confidence = (
-                    f", OCR confidence {citation.ocr_confidence:.2f}"
-                    if citation.ocr_confidence is not None
-                    else ""
-                )
-                print(
-                    f"[{citation.document_name}, page {citation.page_number}{section}, "
-                    f"chunk {citation.chunk_id}{extraction}{confidence}] {citation.quote}"
-                )
+            _print_answer(answer)
     except (
         EmbeddingError,
         EvaluationCorpusError,
@@ -166,6 +157,51 @@ def _print_documents(documents: list[ImportedDocument]) -> None:
             f"{document.id}: {document.name} "
             f"(pages: {document.page_count}, chunks: {document.chunk_count}, OCR pages: {document.ocr_page_count})"
         )
+
+
+def _print_import_summary(action: str, summary: ImportSummary) -> None:
+    document = summary.document
+    print(f"{action} document {document.id}: {document.name}")
+    print(f"Extracted: {document.page_count} pages, {document.chunk_count} chunks, {document.ocr_page_count} OCR pages.")
+    print(f"Semantic index: {summary.semantic_index_status}.")
+    print(f"OCR artifacts: {summary.ocr_artifact_status}.")
+
+
+def _print_collection_health(health: CollectionHealth) -> None:
+    print("Collection health")
+    print(f"Documents: {health.document_count}")
+    print(f"Pages: {health.page_count}")
+    print(f"Chunks: {health.chunk_count}")
+    print(f"OCR pages needing review: {health.ocr_page_count}")
+    print(f"Source files unavailable: {health.unavailable_source_count}")
+    print(f"Semantic index: {health.semantic_index_status}")
+    if health.ocr_page_count:
+        print("Next: run list, then inspect <document-id> to review OCR provenance.")
+    if health.unavailable_source_count:
+        print("Next: restore an unavailable source file, or remove its stale collection record.")
+    if health.semantic_index_status == "needs reindex":
+        print("Next: reindex the affected source document before searching semantically.")
+    if not (health.ocr_page_count or health.unavailable_source_count or health.semantic_index_status == "needs reindex"):
+        print("Next: import a document, or search the current collection.")
+
+
+def _print_answer(answer) -> None:
+    print("Answer")
+    print(answer.text)
+    if not answer.citations:
+        print("No evidence-bound answer was available from the imported documents.")
+        return
+    print("Sources")
+    for citation in answer.citations:
+        source = f"- {citation.document_name}, page {citation.page_number}"
+        if citation.section:
+            source += f", section {citation.section}"
+        source += f", chunk {citation.chunk_id}, {citation.extraction_method}"
+        print(source)
+        if citation.extraction_method == "ocr":
+            confidence = f"{citation.ocr_confidence:.2f}" if citation.ocr_confidence is not None else "unavailable"
+            print(f"  OCR warning: verify against the original document (confidence: {confidence}).")
+        print(f"  Evidence: {citation.quote}")
 
 
 def _print_document_inspection(inspection: DocumentInspection) -> None:

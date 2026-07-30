@@ -13,7 +13,8 @@ Keep the checker outside the answer path until a decision record sets an explici
 ## 2. Create the local evaluation corpus and release gate
 
 The baseline harness covers one supported citation and one abstention using only synthetic public material.
-Expand it with expected outcomes for OCR warnings, deletion, and reindexing before selecting a production model.
+The MVP workflow now covers collection health, citation-first output, reindexing, and removal through the CLI.
+Expand the public corpus with expected outcomes for additional OCR warning and deletion cases before selecting a production model.
 Record model, retrieval, and prompt configuration alongside each evaluation run without storing private prompts or responses in Git.
 
 ## 3. Maintain the private source repository boundary

@@ -3,7 +3,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-from .domain import Chunk, ChunkInspection, DocumentInspection, ExtractedPage, ImportedDocument, PageInspection
+from .domain import CollectionHealth, Chunk, ChunkInspection, DocumentInspection, ExtractedPage, ImportedDocument, PageInspection
 
 
 class SQLiteStore:
@@ -64,6 +64,27 @@ class SQLiteStore:
             )
             for row in rows
         ]
+
+    def collection_health(self, semantic_index_status: str) -> CollectionHealth:
+        row = self._connection.execute(
+            """SELECT COUNT(DISTINCT documents.id) AS document_count,
+            COUNT(DISTINCT pages.id) AS page_count,
+            COUNT(chunks.id) AS chunk_count,
+            COUNT(DISTINCT CASE WHEN pages.extraction_method = 'ocr' THEN pages.id END) AS ocr_page_count
+            FROM documents
+            LEFT JOIN pages ON pages.document_id = documents.id
+            LEFT JOIN chunks ON chunks.page_id = pages.id"""
+        ).fetchone()
+        paths = self._connection.execute("SELECT canonical_path FROM documents").fetchall()
+        unavailable_source_count = sum(not Path(path["canonical_path"]).is_file() for path in paths)
+        return CollectionHealth(
+            document_count=row["document_count"],
+            page_count=row["page_count"],
+            chunk_count=row["chunk_count"],
+            ocr_page_count=row["ocr_page_count"],
+            unavailable_source_count=unavailable_source_count,
+            semantic_index_status=semantic_index_status,
+        )
 
     def inspect_document(self, document_id: int) -> DocumentInspection | None:
         document_row = self._connection.execute(
