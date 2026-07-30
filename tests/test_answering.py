@@ -92,6 +92,9 @@ class StructuredGeneratorAnswererTests(unittest.TestCase):
             '{"status":"supported","answer":"Ada","citation_chunk_ids":[99]}',
             '{"status":"supported","answer":"Ada","citation_chunk_ids":[11,11]}',
             '{"status":"supported","answer":"Ada","citation_chunk_ids":[true]}',
+            '{"status":"supported","answer":"Ada","citation_chunk_ids":"11"}',
+            '{"status":"supported","answer":"Ada","citation_chunk_ids":[]}',
+            '{"status":"supported","answer":[],"citation_chunk_ids":[11]}',
             '{"status":"supported","answer":"Ada","citation_chunk_ids":[11],"extra":true}',
             '{"status":"supported","status":"abstained","answer":"Ada","citation_chunk_ids":[11]}',
         )

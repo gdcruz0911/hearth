@@ -75,9 +75,14 @@ class EvaluationTests(unittest.TestCase):
 
         self.assertEqual(
             [case.id for case in corpus.cases],
-            ["supported-deployment-owner", "abstained-owner-phone-number"],
+            [
+                "supported-deployment-owner",
+                "supported-archive-location",
+                "abstained-owner-phone-number",
+                "abstained-owner-review-date",
+            ],
         )
-        self.assertEqual(corpus.cases[1].expected_status, "abstained")
+        self.assertEqual(corpus.cases[2].expected_status, "abstained")
 
     def test_public_semantic_corpus_covers_multiple_documents_and_disambiguation(self) -> None:
         fixture_root = Path(__file__).parent / "fixtures" / "public"

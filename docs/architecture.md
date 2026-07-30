@@ -21,7 +21,8 @@ Local note or PDF
 `SQLiteStore` is the authoritative store for document identities, page metadata, chunks, and provenance.
 `HashingVectorIndex` is an in-memory deterministic retrieval scaffold used when no semantic index is configured.
 `FlatVectorIndex` stores derived normalized float32 vectors and chunk IDs in a versioned local index directory when a semantic index is configured.
-`IdentityReranker` preserves candidate order until a local reranker is integrated.
+`IdentityReranker` preserves candidate order when no local reranker is configured.
+`MLXLocalReranker` scores already-retrieved query-document pairs locally and reorders the evidence bundle without changing citation or claim-validation rules.
 `EvidenceAnswerer` returns retrieved evidence directly when no generator is configured.
 `StructuredGeneratorAnswerer` accepts only strict JSON from an opt-in local generator, resolves citation metadata from the approved evidence bundle, and rejects generated factual text that is not a normalized contiguous span of a cited quote.
 `MLXLocalGenerator` loads a pre-provisioned local model directory and does not accept a model repository identifier.

@@ -7,6 +7,7 @@ from .answering import LocalInferenceError, MLXLocalGenerator, StructuredGenerat
 from .domain import DocumentInspection, ImportedDocument, ImportError
 from .embedding import EmbeddingError, FlatVectorIndex, IndexError, MLXEmbedder
 from .evaluation import EvaluationCorpusError, evaluate_corpus, load_evaluation_corpus
+from .retrieval import MLXLocalReranker, RerankerError
 from .service import HearthService
 
 
@@ -37,6 +38,11 @@ def main(argv: list[str] | None = None) -> int:
         "--index-directory",
         type=Path,
         help="Private local directory for the derived semantic index. Requires --embedding-model.",
+    )
+    parser.add_argument(
+        "--reranker-model",
+        type=Path,
+        help="Pre-provisioned local MLX reranker directory. Enables reranking retrieved evidence.",
     )
     subcommands = parser.add_subparsers(dest="command", required=True)
     importer = subcommands.add_parser("import", help="Import a local note or configured PDF.")
@@ -69,9 +75,11 @@ def main(argv: list[str] | None = None) -> int:
             if args.embedding_model is not None
             else None
         )
+        reranker = MLXLocalReranker(args.reranker_model) if args.reranker_model is not None else None
         service = HearthService(
             args.database,
             answerer=answerer,
+            reranker=reranker,
             semantic_index=semantic_index,
             ocr_output_directory=args.ocr_output_directory,
             retain_ocr_output=args.retain_ocr_output,
@@ -113,7 +121,14 @@ def main(argv: list[str] | None = None) -> int:
                     f"[{citation.document_name}, page {citation.page_number}{section}, "
                     f"chunk {citation.chunk_id}{extraction}{confidence}] {citation.quote}"
                 )
-    except (EmbeddingError, EvaluationCorpusError, ImportError, IndexError, LocalInferenceError) as exc:
+    except (
+        EmbeddingError,
+        EvaluationCorpusError,
+        ImportError,
+        IndexError,
+        LocalInferenceError,
+        RerankerError,
+    ) as exc:
         parser.error(str(exc))
     finally:
         if service is not None:

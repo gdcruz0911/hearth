@@ -14,8 +14,26 @@
       ]
     },
     {
+      "id": "supported-archive-location",
+      "question": "Where is the archive location?",
+      "expected_status": "supported",
+      "expected_citations": [
+        {
+          "document_name": "evaluation-note.md",
+          "page_number": 1,
+          "quote_contains": "local encrypted storage"
+        }
+      ]
+    },
+    {
       "id": "abstained-owner-phone-number",
       "question": "What is the deployment owner's phone number?",
+      "expected_status": "abstained",
+      "expected_citations": []
+    },
+    {
+      "id": "abstained-owner-review-date",
+      "question": "What is the deployment owner's review date?",
       "expected_status": "abstained",
       "expected_citations": []
     }

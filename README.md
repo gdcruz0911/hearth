@@ -13,8 +13,9 @@ The default answer path returns retrieved source text with citations instead of 
 The local MLX runtime and three candidate models are provisioned separately for host-side evaluation.
 An opt-in MLX generator adapter is implemented behind `--generator-model`.
 An opt-in MLX embedding and flat-index path is implemented behind `--embedding-model` and `--index-directory`.
-The combined path passed a narrow public host evaluation before the current verbatim-answer contract and must be rerun before it can be relied on.
-MLX reranking is not implemented yet.
+An opt-in MLX reranker is implemented behind `--reranker-model`.
+The combined generator and reranker path passed a narrow four-case public host evaluation under the current verbatim-answer contract.
+It remains experimental and is not a product default.
 
 ## Privacy boundary
 
@@ -77,7 +78,7 @@ An optional host-side MLX benchmark is documented in [benchmarking](docs/benchma
 
 - The default retrieval path uses a deterministic hashed-vector scaffold.
 - The optional local semantic embedding index is not yet a production-qualified default.
-- Reranking is not implemented.
+- The optional local reranker is experimental and has not been selected as a default.
 - Generated answers require an explicitly configured local model and remain experimental despite the current narrow citation and abstention evaluation.
 - Generated factual text must be a verbatim cited evidence span, so valid paraphrases and multi-source synthesis can abstain.
 - OCR quality depends on the source scan and can be poor for handwriting, complex layouts, tables, formulas, and low-quality images.

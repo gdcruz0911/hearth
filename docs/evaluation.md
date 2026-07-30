@@ -89,6 +89,7 @@ The opt-in local MLX semantic integration test verifies real reindex replacement
 The multi-document semantic corpus verifies source disambiguation, exact citation provenance, and unrelated-question abstention.
 The opt-in OCR integration test uses a synthetic image-only PDF and verifies local OCR citation metadata, record replacement after reindexing, default temporary-output deletion, explicit output retention, and one surviving inspected document.
 Structured-generator tests reject a paraphrase even when it has an approved citation ID and accept only normalized verbatim evidence spans.
+Reranker tests reject invalid scores, preserve deterministic tie order, and verify one real local relevance ordering.
 
 ## Recorded public result
 
@@ -122,6 +123,11 @@ It verifies page-isolated native extraction, collection metadata, and page-speci
 On 2026-07-30, the Qwen3 Embedding 0.6B 4-bit MLX candidate passed the local semantic lifecycle integration test on the current Apple Silicon Mac.
 It verifies real reindex replacement, deletion abstention, and fail-closed manifest mismatch handling with synthetic temporary content.
 It does not establish production-default suitability, broader retrieval quality, or a model-selection decision.
+
+On 2026-07-30, the Qwen3 8B 4-bit generator candidate passed the expanded four-case public generator corpus on the current Apple Silicon Mac.
+The local generator and reranker combination also passed all four cases.
+The cases verify two verbatim supported excerpts and two related unsupported questions that abstain.
+This does not establish broad generation quality, reranking quality, claim support, or a production model default.
 
 ## Future release gate
 

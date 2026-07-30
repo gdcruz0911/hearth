@@ -3,11 +3,12 @@
 This roadmap describes known v1 limitations after the local foundation milestone.
 It is not an accepted Architecture Decision Record and does not select implementation options that require approval.
 
-## 1. Integrate local reranking and generation
+## 1. Evaluate claim support and broader reranking quality
 
-Evaluate the local generator adapter against citations and abstention after the successful host-side performance benchmark.
-Expand the public or synthetic corpus to cover malformed output, unsupported questions, and source-bound generated answers.
-Evaluate whether a local reranker or claim-support checker should replace or supplement the conservative lexical evidence-sufficiency gate from ADR-0009.
+The optional local generator and reranker pass narrow public evidence and abstention checks.
+Reranking only selects evidence and cannot validate generated factual wording.
+Evaluate a local claim-support checker separately from reranking before changing the ADR-0010 verbatim-answer contract.
+Expand public or synthetic cases for misleading near-matches, source qualifiers, and cross-document evidence before proposing a claim-support ADR.
 
 ## 2. Create the local evaluation corpus and release gate
 

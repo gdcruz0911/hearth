@@ -6,7 +6,7 @@ MLX is installed as an optional local runtime for host-side benchmarking on this
 Hearth includes an opt-in MLX generator adapter for document chat when a pre-provisioned local model directory is explicitly configured.
 The deterministic retrieval and direct-evidence answer path remain the default implementation.
 An opt-in MLX embedding and flat-index path is implemented.
-MLX reranking is not implemented.
+An opt-in MLX reranker is implemented behind `--reranker-model`.
 
 ## Candidate models
 
@@ -49,6 +49,19 @@ Pass a pre-provisioned local embedding model directory and a private index direc
 The flat index stores only derived vectors and chunk IDs outside SQLite.
 It validates model fingerprint, dimension, normalization, chunking version, and ordered chunk IDs before search.
 It rebuilds on document import, removal, and reindexing rather than silently using stale vectors.
+
+## Experimental reranking
+
+Pass a pre-provisioned local reranker directory to score the retrieved candidates locally before Hearth selects its evidence bundle.
+
+```bash
+.venv/bin/python -m hearth.cli --reranker-model /path/to/local/reranker --database .hearth/hearth.sqlite search "your question"
+```
+
+The Qwen reranker scores each query-document pair as local yes/no relevance and deterministically breaks score ties by chunk ID.
+It only reorders retrieved candidates and does not validate generated claims or bypass citation validation.
+On 2026-07-30, the local reranker ranked a relevant synthetic archive passage above an unrelated passage on the current Apple Silicon Mac.
+This is a narrow behavior check, not a selection decision or broader relevance evaluation.
 
 ## Runtime storage
 
