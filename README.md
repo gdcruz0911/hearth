@@ -51,6 +51,7 @@ Import a local note, query it, and run the public evaluation corpus.
 .venv/bin/python -m hearth.cli --database .hearth/hearth.sqlite search "your question"
 .venv/bin/python -m hearth.cli --database .hearth/hearth.sqlite list
 .venv/bin/python -m hearth.cli --database .hearth/hearth.sqlite inspect 1
+.venv/bin/python -m hearth.cli --database .hearth/hearth.sqlite organize preview 1 --rename archive-notes.md
 .venv/bin/python -m hearth.cli --database .hearth/hearth.sqlite evaluate tests/fixtures/public/baseline-evaluation.json
 ```
 
@@ -59,6 +60,8 @@ Import a local note, query it, and run the public evaluation corpus.
 `health` reports collection counts, OCR-review needs, source-file availability, semantic-index state, and safe next actions without rendering source paths or document text.
 `import` and `reindex` report extraction counts, semantic-index state, and the configured OCR artifact outcome.
 `search` prints the evidence-bound answer followed by its compact source metadata and the cited evidence text.
+`organize preview` and `organize apply` support one explicit same-volume rename or move at a time, preserving the document record and citations without overwriting files.
+Bulk actions, deletion, and cross-volume moves are intentionally unsupported in v1.
 
 OCR fallback uses `--ocr-output-directory` as private local scratch space and deletes each derived OCR PDF after text extraction by default.
 To retain an OCR-enhanced PDF for manual local inspection, pass `--retain-ocr-output` with that directory.

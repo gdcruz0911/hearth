@@ -25,6 +25,8 @@ Keep any explicitly retained OCR output and local databases outside version cont
 Review `git status` and the staged diff before every commit.
 Use only synthetic or public data in tests and version-controlled evaluation corpora.
 Treat any file containing canonical source paths as private runtime data because paths can reveal user names and directory structure.
+The explicit `organize` command may display the source and target path you selected in your local terminal so you can confirm the operation.
+It does not transmit those paths or add them to version-controlled output.
 
 ## Release verification
 

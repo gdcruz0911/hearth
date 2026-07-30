@@ -37,3 +37,8 @@ Evaluate a local claim-support checker separately from reranking because better 
 Any future claim-support mechanism must supersede or supplement ADR-0010 through a new ADR with explicit evaluation thresholds and rollback behavior.
 Hearth currently has no conversational memory and answers only from the currently imported collection.
 If a future feature persists conversation state, define its local storage, deletion, retention, and citation boundaries in a new ADR.
+
+## 6. Extend the local organization workflow carefully
+
+The v1 `organize` command supports one explicit same-volume move or extension-preserving rename with preview and no overwrite behavior.
+Add tags, collections, bulk operations, deletion, cross-volume moves, or undo history only with a new ADR that defines confirmation, collision, rollback, and recovery behavior.

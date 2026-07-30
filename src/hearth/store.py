@@ -86,6 +86,26 @@ class SQLiteStore:
             semantic_index_status=semantic_index_status,
         )
 
+    def source_path(self, document_id: int) -> Path | None:
+        row = self._connection.execute(
+            "SELECT canonical_path FROM documents WHERE id = ?", (document_id,)
+        ).fetchone()
+        return Path(row["canonical_path"]) if row is not None else None
+
+    def relocate_document(self, document_id: int, source_path: Path, target_path: Path) -> None:
+        try:
+            with self._connection:
+                result = self._connection.execute(
+                    """UPDATE documents
+                    SET canonical_path = ?, display_name = ?
+                    WHERE id = ? AND canonical_path = ?""",
+                    (str(target_path), target_path.name, document_id, str(source_path)),
+                )
+        except sqlite3.IntegrityError as exc:
+            raise ValueError("Another collection record already uses the target path.") from exc
+        if result.rowcount != 1:
+            raise ValueError("The document source binding changed before the organization action completed.")
+
     def inspect_document(self, document_id: int) -> DocumentInspection | None:
         document_row = self._connection.execute(
             """SELECT documents.id, documents.display_name, COUNT(DISTINCT pages.id) AS page_count,

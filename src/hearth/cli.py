@@ -5,7 +5,15 @@ from pathlib import Path
 
 from .answering import LocalInferenceError, MLXLocalGenerator, StructuredGeneratorAnswerer
 from .claim_support import StructuredClaimSupportChecker
-from .domain import CollectionHealth, DocumentInspection, ImportedDocument, ImportError, ImportSummary
+from .domain import (
+    CollectionHealth,
+    DocumentInspection,
+    FileOrganizationError,
+    FileOrganizationPlan,
+    ImportedDocument,
+    ImportError,
+    ImportSummary,
+)
 from .embedding import EmbeddingError, FlatVectorIndex, IndexError, MLXEmbedder
 from .evaluation import (
     EvaluationCorpusError,
@@ -64,6 +72,12 @@ def main(argv: list[str] | None = None) -> int:
     subcommands.add_parser("health", help="Summarize private collection health without document text or source paths.")
     inspector = subcommands.add_parser("inspect", help="Inspect one document's local provenance metadata.")
     inspector.add_argument("document_id", type=int)
+    organizer = subcommands.add_parser("organize", help="Preview or apply one explicit local file move or rename.")
+    organizer.add_argument("action", choices=("preview", "apply"))
+    organizer.add_argument("document_id", type=int)
+    organization_target = organizer.add_mutually_exclusive_group(required=True)
+    organization_target.add_argument("--move-to", type=Path, help="Existing local directory to receive the file.")
+    organization_target.add_argument("--rename", help="New file name that preserves the existing extension.")
     evaluator = subcommands.add_parser("evaluate", help="Run a local synthetic or public evaluation corpus.")
     evaluator.add_argument("corpus", type=Path)
     claim_evaluator = subcommands.add_parser(
@@ -111,6 +125,13 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"No imported document with ID {args.document_id}.")
                 return 1
             _print_document_inspection(inspection)
+        elif args.command == "organize":
+            plan = service.plan_organization(args.document_id, move_to=args.move_to, rename=args.rename)
+            if args.action == "preview":
+                _print_organization_preview(plan)
+            else:
+                plan = service.apply_organization(args.document_id, move_to=args.move_to, rename=args.rename)
+                _print_organization_applied(plan)
         elif args.command == "evaluate":
             outcomes = evaluate_corpus(service, load_evaluation_corpus(args.corpus))
             for outcome in outcomes:
@@ -136,6 +157,7 @@ def main(argv: list[str] | None = None) -> int:
     except (
         EmbeddingError,
         EvaluationCorpusError,
+        FileOrganizationError,
         ImportError,
         IndexError,
         LocalInferenceError,
@@ -183,6 +205,18 @@ def _print_collection_health(health: CollectionHealth) -> None:
         print("Next: reindex the affected source document before searching semantically.")
     if not (health.ocr_page_count or health.unavailable_source_count or health.semantic_index_status == "needs reindex"):
         print("Next: import a document, or search the current collection.")
+
+
+def _print_organization_preview(plan: FileOrganizationPlan) -> None:
+    print(f"Preview: {plan.operation} document {plan.document.id}: {plan.document.name}")
+    print(f"Source: {plan.source_path}")
+    print(f"Target: {plan.target_path}")
+    print("No changes made. Run the same command with organize apply to proceed.")
+
+
+def _print_organization_applied(plan: FileOrganizationPlan) -> None:
+    print(f"Applied: {plan.operation} document {plan.document.id}: {plan.source_path.name} -> {plan.target_path.name}")
+    print("Source binding updated. Existing extracted text and citation chunk IDs were preserved.")
 
 
 def _print_answer(answer) -> None:

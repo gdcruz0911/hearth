@@ -8,6 +8,10 @@ class ImportError(ValueError):
     """Raised when a local document cannot safely be imported."""
 
 
+class FileOrganizationError(ValueError):
+    """Raised when an explicit local file organization action cannot be completed safely."""
+
+
 @dataclass(frozen=True)
 class ExtractedPage:
     page_number: int
@@ -61,6 +65,14 @@ class CollectionHealth:
     ocr_page_count: int
     unavailable_source_count: int
     semantic_index_status: str
+
+
+@dataclass(frozen=True)
+class FileOrganizationPlan:
+    document: ImportedDocument
+    operation: str
+    source_path: Path
+    target_path: Path
 
 
 @dataclass(frozen=True)
