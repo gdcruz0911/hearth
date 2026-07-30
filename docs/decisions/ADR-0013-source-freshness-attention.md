@@ -67,6 +67,7 @@ Hearth reports the state and leaves repair explicit.
 Collection health can distinguish a stale extraction from an unavailable file without copying original files into a managed library.
 Existing collections require a one-time explicit reindex of each source to establish the first fingerprint.
 An external move is reported as unavailable at its stored path rather than being searched for elsewhere on disk.
+An explicitly selected matching replacement can later be rebound through ADR-0014.
 
 The fingerprint and file metadata are local runtime provenance data.
 They are not transmitted, printed with source paths, or intended for version control.

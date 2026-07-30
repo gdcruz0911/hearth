@@ -12,6 +12,10 @@ class FileOrganizationError(ValueError):
     """Raised when an explicit local file organization action cannot be completed safely."""
 
 
+class SourceRelinkError(ValueError):
+    """Raised when an explicit local source relink cannot be completed safely."""
+
+
 @dataclass(frozen=True)
 class ExtractedPage:
     page_number: int
@@ -83,6 +87,13 @@ class FileOrganizationPlan:
     operation: str
     source_path: Path
     target_path: Path
+
+
+@dataclass(frozen=True)
+class SourceRelinkPlan:
+    document: ImportedDocument
+    previous_source_path: Path
+    replacement_source_path: Path
 
 
 @dataclass(frozen=True)

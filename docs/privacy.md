@@ -29,6 +29,8 @@ Treat any file containing canonical source paths as private runtime data because
 Source fingerprints and file metadata are also private runtime provenance data and must remain outside version control.
 The explicit `organize` command may display the source and target path you selected in your local terminal so you can confirm the operation.
 It does not transmit those paths or add them to version-controlled output.
+The explicit `relink` command may display an unavailable source path and replacement path you selected in your local terminal.
+It validates the replacement locally and does not scan unrelated directories or modify either file.
 The `health` command reports source attention by document ID and display name without printing canonical paths or stored document text.
 
 ## Release verification

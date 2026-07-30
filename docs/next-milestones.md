@@ -41,6 +41,7 @@ If a future feature persists conversation state, define its local storage, delet
 ## 6. Extend the local organization workflow carefully
 
 The v1 `organize` command supports one explicit same-volume move or extension-preserving rename with preview and no overwrite behavior.
+The v1 `relink` command supports one explicit fingerprint-verified rebinding of an unavailable source without moving or reindexing it.
 Add tags, collections, bulk operations, deletion, cross-volume moves, or undo history only with a new ADR that defines confirmation, collision, rollback, and recovery behavior.
 
 ## 7. Decide whether to add a local source watcher

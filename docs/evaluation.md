@@ -93,14 +93,14 @@ Each abstained case must define no expected citations.
 
 ## Current coverage
 
-The unit suite covers exact note citations, native PDF page boundaries and citations, unsupported-question abstention, OCR fallback behavior, removal, explicit reindexing, source-change attention, legacy source-fingerprint migration, semantic-index rebuilding after OCR reindexing, and structured-generator response validation.
+The unit suite covers exact note citations, native PDF page boundaries and citations, unsupported-question abstention, OCR fallback behavior, removal, explicit reindexing, source-change attention, fingerprint-verified source relinking, legacy source-fingerprint migration, semantic-index rebuilding after OCR reindexing, and structured-generator response validation.
 The baseline evaluation corpus verifies one supported citation and one abstention through the deterministic scaffold.
 The generator-specific corpus verifies a supported citation and an abstention when related source text is retrieved but does not contain the requested attribute.
 The semantic-index regression test verifies that unrelated retrieved evidence causes abstention while question-term-supported evidence remains answerable.
 The opt-in local MLX semantic integration test verifies real reindex replacement, deletion, and fail-closed manifest mismatch handling with synthetic temporary content.
 The multi-document semantic corpus verifies source disambiguation, exact citation provenance, and unrelated-question abstention.
 The opt-in OCR integration test uses a synthetic image-only PDF and verifies local OCR citation metadata, record replacement after reindexing, default temporary-output deletion, explicit output retention, and one surviving inspected document.
-The MVP workflow test exercises import, metadata-only health, source-change attention, citation-first search output, reindexing, removal, and an empty-collection health result through the CLI using a public fixture copied into temporary local runtime storage.
+The MVP workflow test exercises import, metadata-only health, source-change attention, fingerprint-verified relinking, citation-first search output, reindexing, removal, and an empty-collection health result through the CLI using a public fixture copied into temporary local runtime storage.
 Structured-generator tests reject a paraphrase even when it has an approved citation ID and accept only normalized verbatim evidence spans.
 Reranker tests reject invalid scores, preserve deterministic tie order, and verify one real local relevance ordering.
 Claim-support tests reject malformed model output and cover a separate public corpus of exact and adversarial claim-evidence pairs.

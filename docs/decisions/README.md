@@ -18,3 +18,4 @@ Each record is a standalone Markdown file with graph-indexable frontmatter.
 | [ADR-0011](ADR-0011-transient-ocr-artifact-lifecycle.md) | Transient OCR artifact lifecycle | accepted | 2026-07-29 | - |
 | [ADR-0012](ADR-0012-explicit-local-file-organization.md) | Explicit local file organization | accepted | 2026-07-30 | - |
 | [ADR-0013](ADR-0013-source-freshness-attention.md) | Source freshness attention | accepted | 2026-07-30 | - |
+| [ADR-0014](ADR-0014-explicit-source-relink.md) | Explicit source relink | accepted | 2026-07-30 | - |

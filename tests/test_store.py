@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from hearth.domain import SourceRelinkError
 from hearth.service import HearthService
 from hearth.store import SQLiteStore
 
@@ -47,6 +48,35 @@ class SQLiteStoreMigrationTests(unittest.TestCase):
         service.import_document(str(source))
 
         self.assertEqual(service.collection_health().baseline_reindex_count, 0)
+
+    def test_relink_requires_a_fingerprint_for_a_legacy_source(self) -> None:
+        temporary_directory = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary_directory.cleanup)
+        database = Path(temporary_directory.name) / "hearth.sqlite"
+        source = Path(temporary_directory.name) / "legacy.md"
+        source.write_text("Legacy source.", encoding="utf-8")
+        replacement = Path(temporary_directory.name) / "replacement.md"
+        replacement.write_text("Legacy source.", encoding="utf-8")
+        connection = sqlite3.connect(database)
+        connection.execute(
+            """CREATE TABLE documents (
+            id INTEGER PRIMARY KEY,
+            canonical_path TEXT NOT NULL UNIQUE,
+            display_name TEXT NOT NULL
+            )"""
+        )
+        connection.execute(
+            "INSERT INTO documents (canonical_path, display_name) VALUES (?, ?)", (str(source.resolve()), source.name)
+        )
+        connection.commit()
+        connection.close()
+        source.unlink()
+
+        service = HearthService(database)
+        self.addCleanup(service.close)
+
+        with self.assertRaisesRegex(SourceRelinkError, "needs a baseline reindex"):
+            service.plan_relink(1, replacement)
 
 
 if __name__ == "__main__":

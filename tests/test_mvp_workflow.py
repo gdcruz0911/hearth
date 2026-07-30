@@ -103,6 +103,45 @@ class MvpWorkflowTests(unittest.TestCase):
         self.assertIn("Sources changed since import: 0", refreshed_health)
         self.assertNotIn("Needs attention", refreshed_health)
 
+    def test_relink_preserves_citations_for_an_externally_moved_matching_source(self) -> None:
+        self._run("import", str(self.note))
+        replacement = self.root / "relocated-note.md"
+        self.note.rename(replacement)
+
+        unavailable_health = self._run("health")
+        preview = self._run("relink", "preview", "1", str(replacement))
+
+        self.assertIn("Source files unavailable: 1", unavailable_health)
+        self.assertIn("Preview: relink document 1: evaluation-note.md", preview)
+        self.assertIn(f"Previous source (unavailable): {self.note.resolve()}", preview)
+        self.assertIn(f"Replacement source: {replacement.resolve()}", preview)
+        self.assertIn("No changes made.", preview)
+        self.assertTrue(replacement.is_file())
+
+        applied = self._run("relink", "apply", "1", str(replacement))
+        relinked_health = self._run("health")
+        answer = self._run("search", "Where is the archive location?")
+
+        self.assertIn("Applied: relink document 1: evaluation-note.md -> relocated-note.md", applied)
+        self.assertIn("Existing extracted text, citation chunk IDs, and semantic index were preserved.", applied)
+        self.assertIn("Source files unavailable: 0", relinked_health)
+        self.assertIn("Sources\n- relocated-note.md, page 1, section Operations", answer)
+
+    def test_relink_refuses_a_replacement_with_different_contents(self) -> None:
+        self._run("import", str(self.note))
+        replacement = self.root / "different-note.md"
+        replacement.write_text("# Different\n\nThis is not the imported document.\n", encoding="utf-8")
+        self.note.unlink()
+        error = io.StringIO()
+
+        with contextlib.redirect_stderr(error), self.assertRaises(SystemExit) as exit_context:
+            main(["--database", str(self.database), "relink", "apply", "1", str(replacement)])
+
+        self.assertEqual(exit_context.exception.code, 2)
+        self.assertIn("does not match the imported source fingerprint", error.getvalue())
+        self.assertIn("Source files unavailable: 1", self._run("health"))
+        self.assertTrue(replacement.is_file())
+
     def _run(self, *command: str) -> str:
         output = io.StringIO()
         with contextlib.redirect_stdout(output):

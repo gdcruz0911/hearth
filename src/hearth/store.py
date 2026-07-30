@@ -132,6 +132,12 @@ class SQLiteStore:
         ).fetchone()
         return Path(row["canonical_path"]) if row is not None else None
 
+    def source_fingerprint(self, document_id: int) -> str | None:
+        row = self._connection.execute(
+            "SELECT source_fingerprint FROM documents WHERE id = ?", (document_id,)
+        ).fetchone()
+        return None if row is None else row["source_fingerprint"]
+
     def relocate_document(self, document_id: int, source_path: Path, target_path: Path) -> None:
         try:
             with self._connection:
@@ -145,6 +151,38 @@ class SQLiteStore:
             raise ValueError("Another collection record already uses the target path.") from exc
         if result.rowcount != 1:
             raise ValueError("The document source binding changed before the organization action completed.")
+
+    def relink_document(
+        self,
+        document_id: int,
+        previous_source_path: Path,
+        replacement_source_path: Path,
+        source_fingerprint: str,
+        source_size: int,
+        source_mtime_ns: int,
+    ) -> None:
+        try:
+            with self._connection:
+                result = self._connection.execute(
+                    """UPDATE documents
+                    SET canonical_path = ?, display_name = ?, source_fingerprint = ?,
+                    source_size = ?, source_mtime_ns = ?
+                    WHERE id = ? AND canonical_path = ? AND source_fingerprint = ?""",
+                    (
+                        str(replacement_source_path),
+                        replacement_source_path.name,
+                        source_fingerprint,
+                        source_size,
+                        source_mtime_ns,
+                        document_id,
+                        str(previous_source_path),
+                        source_fingerprint,
+                    ),
+                )
+        except sqlite3.IntegrityError as exc:
+            raise ValueError("Another collection record already uses the replacement source path.") from exc
+        if result.rowcount != 1:
+            raise ValueError("The document source binding changed before the relink action completed.")
 
     def inspect_document(self, document_id: int) -> DocumentInspection | None:
         document_row = self._connection.execute(

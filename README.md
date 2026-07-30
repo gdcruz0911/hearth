@@ -52,6 +52,7 @@ Import a local note, query it, and run the public evaluation corpus.
 .venv/bin/python -m hearth.cli --database .hearth/hearth.sqlite list
 .venv/bin/python -m hearth.cli --database .hearth/hearth.sqlite inspect 1
 .venv/bin/python -m hearth.cli --database .hearth/hearth.sqlite organize preview 1 --rename archive-notes.md
+.venv/bin/python -m hearth.cli --database .hearth/hearth.sqlite relink preview 1 /new/location/note.md
 .venv/bin/python -m hearth.cli --database .hearth/hearth.sqlite evaluate tests/fixtures/public/baseline-evaluation.json
 ```
 
@@ -62,6 +63,8 @@ When a source changed outside Hearth, `health` asks you to run an explicit `rein
 `import` and `reindex` report extraction counts, semantic-index state, and the configured OCR artifact outcome.
 `search` prints the evidence-bound answer followed by its compact source metadata and the cited evidence text.
 `organize preview` and `organize apply` support one explicit same-volume rename or move at a time, preserving the document record and citations without overwriting files.
+`relink preview` and `relink apply` recover an unavailable source binding only when the exact local replacement you select matches the stored source fingerprint.
+Relinking does not search your filesystem or move, copy, delete, re-extract, or reindex a file.
 Bulk actions, deletion, and cross-volume moves are intentionally unsupported in v1.
 
 OCR fallback uses `--ocr-output-directory` as private local scratch space and deletes each derived OCR PDF after text extraction by default.
@@ -96,7 +99,7 @@ An optional host-side MLX benchmark is documented in [benchmarking](docs/benchma
 - Hearth has no conversational memory.
   It answers from the currently imported collection, so removed documents and reindexed source changes are not retained as answerable evidence.
 - `health` detects changes only at an imported file's stored path.
-  An externally moved source is reported as unavailable until you restore it, remove its stale record, or reimport it.
+  An externally moved unchanged source is reported as unavailable until you restore it, remove its stale record, reimport it, or explicitly relink it to a fingerprint-matching replacement.
 - There is no graphical interface, web server, cloud synchronization, or multi-user support.
 
 ## Project documentation

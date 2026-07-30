@@ -16,6 +16,8 @@ from .domain import (
     ImportError,
     ImportSummary,
     SourceAttention,
+    SourceRelinkError,
+    SourceRelinkPlan,
 )
 from .embedding import FlatVectorIndex
 from .extraction import OCRmyPDFFallback, PageExtractor, PdfExtractor, PopplerPdfExtractor, TextNoteExtractor
@@ -150,6 +152,31 @@ class HearthService:
             raise FileOrganizationError("Hearth restored the file because its source binding could not be updated.") from exc
         return plan
 
+    def plan_relink(self, document_id: int, replacement_source_path: Path) -> SourceRelinkPlan:
+        plan, _ = self._relink_plan(document_id, replacement_source_path)
+        return plan
+
+    def apply_relink(self, document_id: int, replacement_source_path: Path) -> SourceRelinkPlan:
+        plan, source_fingerprint = self._relink_plan(document_id, replacement_source_path)
+        try:
+            replacement_state = _source_state(plan.replacement_source_path)
+        except ImportError as exc:
+            raise SourceRelinkError("The replacement source file could not be read.") from exc
+        if replacement_state[0] != source_fingerprint:
+            raise SourceRelinkError("The replacement source changed while relinking. Retry after it finishes changing.")
+        try:
+            self._store.relink_document(
+                document_id,
+                plan.previous_source_path,
+                plan.replacement_source_path,
+                source_fingerprint,
+                replacement_state[1],
+                replacement_state[2],
+            )
+        except ValueError as exc:
+            raise SourceRelinkError(str(exc)) from exc
+        return plan
+
     def answer(self, question: str) -> Answer:
         if not question.strip():
             return Answer.abstain()
@@ -185,6 +212,36 @@ class HearthService:
             document=inspection.document,
             semantic_index_status=self.collection_health().semantic_index_status,
             ocr_artifact_status=ocr_artifact_status,
+        )
+
+    def _relink_plan(self, document_id: int, replacement_source_path: Path) -> tuple[SourceRelinkPlan, str]:
+        inspection = self.inspect_document(document_id)
+        previous_source_path = self._store.source_path(document_id)
+        source_fingerprint = self._store.source_fingerprint(document_id)
+        if inspection is None or previous_source_path is None:
+            raise SourceRelinkError(f"No imported document with ID {document_id}.")
+        if previous_source_path.is_file():
+            raise SourceRelinkError("The imported source file is still available. Relink is only for an unavailable source.")
+        if source_fingerprint is None:
+            raise SourceRelinkError(
+                "This source needs a baseline reindex before it can be relinked. Restore it, then run reindex."
+            )
+        try:
+            replacement_path = _validated_local_file(str(replacement_source_path))
+            replacement_fingerprint, _, _ = _source_state(replacement_path)
+        except ImportError as exc:
+            raise SourceRelinkError("Choose a readable local replacement file.") from exc
+        if replacement_fingerprint != source_fingerprint:
+            raise SourceRelinkError(
+                "The replacement source does not match the imported source fingerprint. Reindex it to refresh extracted content."
+            )
+        return (
+            SourceRelinkPlan(
+                document=inspection.document,
+                previous_source_path=previous_source_path,
+                replacement_source_path=replacement_path,
+            ),
+            source_fingerprint,
         )
 
 

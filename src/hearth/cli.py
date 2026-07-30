@@ -13,6 +13,8 @@ from .domain import (
     ImportedDocument,
     ImportError,
     ImportSummary,
+    SourceRelinkError,
+    SourceRelinkPlan,
 )
 from .embedding import EmbeddingError, FlatVectorIndex, IndexError, MLXEmbedder
 from .evaluation import (
@@ -78,6 +80,10 @@ def main(argv: list[str] | None = None) -> int:
     organization_target = organizer.add_mutually_exclusive_group(required=True)
     organization_target.add_argument("--move-to", type=Path, help="Existing local directory to receive the file.")
     organization_target.add_argument("--rename", help="New file name that preserves the existing extension.")
+    relinker = subcommands.add_parser("relink", help="Preview or apply an explicit source binding for an unavailable document.")
+    relinker.add_argument("action", choices=("preview", "apply"))
+    relinker.add_argument("document_id", type=int)
+    relinker.add_argument("replacement_path", type=Path, help="Existing local file with identical imported contents.")
     evaluator = subcommands.add_parser("evaluate", help="Run a local synthetic or public evaluation corpus.")
     evaluator.add_argument("corpus", type=Path)
     claim_evaluator = subcommands.add_parser(
@@ -132,6 +138,13 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 plan = service.apply_organization(args.document_id, move_to=args.move_to, rename=args.rename)
                 _print_organization_applied(plan)
+        elif args.command == "relink":
+            plan = service.plan_relink(args.document_id, args.replacement_path)
+            if args.action == "preview":
+                _print_relink_preview(plan)
+            else:
+                plan = service.apply_relink(args.document_id, args.replacement_path)
+                _print_relink_applied(plan)
         elif args.command == "evaluate":
             outcomes = evaluate_corpus(service, load_evaluation_corpus(args.corpus))
             for outcome in outcomes:
@@ -162,6 +175,7 @@ def main(argv: list[str] | None = None) -> int:
         IndexError,
         LocalInferenceError,
         RerankerError,
+        SourceRelinkError,
     ) as exc:
         parser.error(str(exc))
     finally:
@@ -225,6 +239,21 @@ def _print_organization_preview(plan: FileOrganizationPlan) -> None:
 def _print_organization_applied(plan: FileOrganizationPlan) -> None:
     print(f"Applied: {plan.operation} document {plan.document.id}: {plan.source_path.name} -> {plan.target_path.name}")
     print("Source binding updated. Existing extracted text and citation chunk IDs were preserved.")
+
+
+def _print_relink_preview(plan: SourceRelinkPlan) -> None:
+    print(f"Preview: relink document {plan.document.id}: {plan.document.name}")
+    print(f"Previous source (unavailable): {plan.previous_source_path}")
+    print(f"Replacement source: {plan.replacement_source_path}")
+    print("No changes made. Run the same command with relink apply to proceed.")
+
+
+def _print_relink_applied(plan: SourceRelinkPlan) -> None:
+    print(
+        f"Applied: relink document {plan.document.id}: "
+        f"{plan.previous_source_path.name} -> {plan.replacement_source_path.name}"
+    )
+    print("Source binding updated. Existing extracted text, citation chunk IDs, and semantic index were preserved.")
 
 
 def _print_answer(answer) -> None:
