@@ -81,7 +81,7 @@ Each abstained case must define no expected citations.
 
 ## Current coverage
 
-The unit suite covers exact note citations, unsupported-question abstention, PDF page metadata, OCR fallback behavior, removal, reindexing, semantic-index rebuilding after OCR reindexing, and structured-generator response validation.
+The unit suite covers exact note citations, native PDF page boundaries and citations, unsupported-question abstention, OCR fallback behavior, removal, reindexing, semantic-index rebuilding after OCR reindexing, and structured-generator response validation.
 The baseline evaluation corpus verifies one supported citation and one abstention through the deterministic scaffold.
 The generator-specific corpus verifies a supported citation and an abstention when related source text is retrieved but does not contain the requested attribute.
 The semantic-index regression test verifies that unrelated retrieved evidence causes abstention while question-term-supported evidence remains answerable.
@@ -114,6 +114,9 @@ It does not evaluate generated answers or establish a production model default.
 
 On 2026-07-29, the local Poppler and OCRmyPDF image-only-PDF integration test passed after reindexing the public fixture.
 It verifies that reindexing keeps one collection record, preserves OCR page provenance, returns a cited answer from the reindexed content, deletes temporary derived PDFs by default, and retains one only when explicitly configured.
+
+On 2026-07-30, the local Poppler native-text PDF integration test passed against a public two-page fixture.
+It verifies page-isolated native extraction, collection metadata, and page-specific citations for two distinct questions.
 
 ## Future release gate
 
