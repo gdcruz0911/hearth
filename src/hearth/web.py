@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import hmac
 import json
+import resource
 import secrets
 import subprocess
+import sys
 import threading
 import time
 import webbrowser
@@ -15,15 +17,22 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+from .embedding import IndexBuildCancelled
 from .domain import (
     Answer,
     CollectionHealth,
+    Chunk,
+    DocumentRelationship,
     DocumentInspection,
     FileOrganizationError,
     FileOrganizationPlan,
     ImportError,
     ImportSummary,
     ImportedDocument,
+    SourceImportPlan,
+    SourceImportResult,
+    SourceCandidate,
+    SourceRoot,
     SourceRelinkError,
     SourceRelinkPlan,
 )
@@ -34,6 +43,7 @@ _ASSET_DIRECTORY = Path(__file__).with_name("web_assets")
 _MAX_REQUEST_BODY_BYTES = 64 * 1024
 _PREVIEW_LIFETIME_SECONDS = 5 * 60
 _CONNECTION_TIMEOUT_SECONDS = 5
+_MAP_RELATIONSHIP_LIMIT = 120
 
 
 class NativeChooserCancelled(ValueError):
@@ -53,6 +63,25 @@ class _PendingAction:
 
 
 @dataclass(frozen=True)
+class _PendingSourceImport:
+    plan: SourceImportPlan
+    created_at: float
+
+
+@dataclass
+class _SemanticIndexJob:
+    total: int
+    completed: int
+    status: str
+    cancellation_requested: threading.Event
+    started_at: float
+    cpu_started_at: float
+    phase: str = "preparing local model"
+    semantic_index_status: str | None = None
+    error: str | None = None
+
+
+@dataclass(frozen=True)
 class _WebResponse:
     status: HTTPStatus
     content_type: str
@@ -68,12 +97,17 @@ class HearthWebApplication:
         capability_token: str,
         choose_file: Callable[[], Path] = None,
         choose_directory: Callable[[], Path] = None,
+        source_roots: tuple[Path, ...] = (),
     ):
         self._service = service
         self._capability_token = capability_token
         self._choose_file = choose_file or choose_local_file
         self._choose_directory = choose_directory or choose_local_directory
+        self._source_roots = source_roots
         self._pending_actions: dict[str, _PendingAction] = {}
+        self._pending_source_imports: dict[str, _PendingSourceImport] = {}
+        self._semantic_index_job: _SemanticIndexJob | None = None
+        self._semantic_index_job_lock = threading.Lock()
 
     @property
     def base_path(self) -> str:
@@ -112,6 +146,26 @@ class HearthWebApplication:
             return self._json_response({"documents": [_document_payload(item) for item in self._service.list_documents()]})
         if relative_path == "api/map":
             return self._json_response(_collection_map_payload(self._service))
+        if relative_path == "api/sources":
+            return self._json_response({"roots": [_source_root_payload(item) for item in self._service.source_roots(self._source_roots)]})
+        if relative_path == "api/semantic-index":
+            return self._json_response({"job": self._semantic_index_job_payload()})
+        if relative_path.startswith("api/relationships/"):
+            left_document_id, right_document_id = _relationship_document_ids(
+                relative_path.removeprefix("api/relationships/")
+            )
+            relationship = next(
+                (
+                    item
+                    for item in self._service.document_relationships(limit=_MAP_RELATIONSHIP_LIMIT)
+                    if (item.left_chunk.document_id, item.right_chunk.document_id)
+                    == (left_document_id, right_document_id)
+                ),
+                None,
+            )
+            if relationship is None:
+                return self._json_error(HTTPStatus.NOT_FOUND, "No current semantic relationship has those sources.")
+            return self._json_response({"relationship": _relationship_payload(relationship)})
         if relative_path.startswith("api/documents/"):
             document_id = _document_id(relative_path.removeprefix("api/documents/"))
             inspection = self._service.inspect_document(document_id)
@@ -124,6 +178,17 @@ class HearthWebApplication:
         if relative_path == "api/import":
             summary = self._service.import_with_summary(str(self._choose_file()))
             return self._json_response({"import": _summary_payload(summary)})
+        if relative_path == "api/sources/preview":
+            return self._source_import_preview()
+        if relative_path == "api/semantic-index/preview":
+            return self._semantic_index_preview()
+        if relative_path == "api/semantic-index/cancel":
+            return self._json_response({"job": self._cancel_semantic_index_rebuild()})
+        if relative_path.startswith("api/source-previews/") and relative_path.endswith("/apply"):
+            preview_id = relative_path.removeprefix("api/source-previews/").removesuffix("/apply")
+            if not preview_id or "/" in preview_id:
+                return self._not_found()
+            return self._apply_source_import(preview_id)
         if relative_path == "api/search":
             payload = _json_body(body)
             question = payload.get("question")
@@ -201,6 +266,16 @@ class HearthWebApplication:
                 HTTPStatus.CONFLICT,
                 "This preview is no longer available. Preview the action again before applying it.",
             )
+        if pending.action == "semantic-index":
+            return self._json_response(
+                {
+                    "applied": {
+                        "action": "semantic-index",
+                        "job": self._start_semantic_index_rebuild(),
+                        "message": "Hearth started a local semantic-index rebuild. You can keep using the interface while it runs.",
+                    }
+                }
+            )
         if pending.action == "reindex":
             summary = self._service.reindex_document_by_id(pending.document_id)
             return self._json_response({"applied": {"action": "reindex", "import": _summary_payload(summary)}})
@@ -227,6 +302,146 @@ class HearthWebApplication:
             return self._json_response({"applied": {"action": "relink", **_relink_plan_payload(plan)}})
         return self._not_found()
 
+    def _semantic_index_preview(self) -> _WebResponse:
+        self._discard_expired_previews()
+        health = self._service.collection_health()
+        if health.semantic_index_status == "not configured":
+            raise WebRequestError("Start Hearth with a local embedding model and index directory before building the semantic map.")
+        with self._semantic_index_job_lock:
+            if self._semantic_index_job is not None and self._semantic_index_job.status in {"running", "cancelling"}:
+                raise WebRequestError("A local semantic-index rebuild is already running.")
+        preview = self._create_preview("semantic-index", 0, {})
+        return self._json_response(
+            {
+                "preview": {
+                    **preview,
+                    "message": (
+                        f"Hearth will rebuild local embeddings from {health.chunk_count} evidence units. "
+                        "Original files will not be read or changed beyond the existing imported evidence."
+                    ),
+                }
+            }
+        )
+
+    def cancel_semantic_index_rebuild(self) -> None:
+        """Ask an active local rebuild to stop at its next small batch boundary."""
+        with self._semantic_index_job_lock:
+            if self._semantic_index_job is not None and self._semantic_index_job.status in {"running", "cancelling"}:
+                self._semantic_index_job.cancellation_requested.set()
+                self._semantic_index_job.status = "cancelling"
+
+    def _start_semantic_index_rebuild(self) -> dict[str, Any]:
+        health = self._service.collection_health()
+        with self._semantic_index_job_lock:
+            if self._semantic_index_job is not None and self._semantic_index_job.status in {"running", "cancelling"}:
+                raise WebRequestError("A local semantic-index rebuild is already running.")
+            job = _SemanticIndexJob(
+                total=health.chunk_count,
+                completed=0,
+                status="running",
+                cancellation_requested=threading.Event(),
+                started_at=time.monotonic(),
+                cpu_started_at=time.process_time(),
+            )
+            self._semantic_index_job = job
+        thread = threading.Thread(target=self._run_semantic_index_rebuild, args=(job,), daemon=True)
+        thread.start()
+        return self._semantic_index_job_payload()
+
+    def _run_semantic_index_rebuild(self, job: _SemanticIndexJob) -> None:
+        def on_progress(completed: int, total: int) -> None:
+            with self._semantic_index_job_lock:
+                if self._semantic_index_job is job:
+                    job.completed = completed
+                    job.total = total
+                    job.phase = "finalizing derived index" if completed >= total else "embedding evidence"
+
+        try:
+            semantic_index_status = self._service.rebuild_semantic_index(
+                on_progress=on_progress,
+                is_cancelled=job.cancellation_requested.is_set,
+            )
+        except IndexBuildCancelled:
+            with self._semantic_index_job_lock:
+                if self._semantic_index_job is job:
+                    job.status = "cancelled"
+                    job.phase = "cancelled"
+        except Exception:
+            with self._semantic_index_job_lock:
+                if self._semantic_index_job is job:
+                    job.status = "failed"
+                    job.phase = "failed"
+                    job.error = "The local semantic-index rebuild stopped before completion."
+        else:
+            with self._semantic_index_job_lock:
+                if self._semantic_index_job is job:
+                    job.completed = job.total
+                    job.status = "completed"
+                    job.phase = "ready"
+                    job.semantic_index_status = semantic_index_status
+
+    def _cancel_semantic_index_rebuild(self) -> dict[str, Any]:
+        with self._semantic_index_job_lock:
+            job = self._semantic_index_job
+            if job is None or job.status not in {"running", "cancelling"}:
+                raise WebRequestError("No local semantic-index rebuild is running.")
+            job.cancellation_requested.set()
+            job.status = "cancelling"
+            job.phase = "stopping after the current batch"
+        return self._semantic_index_job_payload()
+
+    def _semantic_index_job_payload(self) -> dict[str, Any]:
+        with self._semantic_index_job_lock:
+            job = self._semantic_index_job
+            if job is None:
+                return {"status": "idle", "completed": 0, "total": 0}
+            elapsed_seconds = max(time.monotonic() - job.started_at, 0.0)
+            cpu_seconds = max(time.process_time() - job.cpu_started_at, 0.0)
+            throughput_per_minute = (job.completed / elapsed_seconds * 60) if elapsed_seconds and job.completed else 0.0
+            return {
+                "status": job.status,
+                "completed": job.completed,
+                "total": job.total,
+                "phase": job.phase,
+                "semantic_index_status": job.semantic_index_status,
+                "error": job.error,
+                "benchmark": {
+                    "elapsed_seconds": round(elapsed_seconds, 2),
+                    "cpu_seconds": round(cpu_seconds, 2),
+                    "peak_resident_memory_bytes": _process_peak_resident_memory_bytes(),
+                    "evidence_units_per_minute": round(throughput_per_minute, 1),
+                },
+            }
+
+    def _source_import_preview(self) -> _WebResponse:
+        self._discard_expired_previews()
+        plan = self._service.plan_source_import(self._source_roots)
+        preview_id = secrets.token_urlsafe(18)
+        self._pending_source_imports[preview_id] = _PendingSourceImport(plan, time.monotonic())
+        return self._json_response(
+            {
+                "preview": {
+                    "id": preview_id,
+                    "action": "import sources",
+                    "roots": [_source_root_payload(item) for item in plan.roots],
+                    "candidates": [_source_candidate_payload(item) for item in plan.candidates[:20]],
+                    "candidate_count": len(plan.candidates),
+                    "additional_candidate_count": max(len(plan.candidates) - 20, 0),
+                    "message": "No files have been imported. Review the eligible files, then approve this exact scan.",
+                }
+            }
+        )
+
+    def _apply_source_import(self, preview_id: str) -> _WebResponse:
+        self._discard_expired_previews()
+        pending = self._pending_source_imports.pop(preview_id, None)
+        if pending is None:
+            return self._json_error(
+                HTTPStatus.CONFLICT,
+                "This source preview is no longer available. Scan the connected folders again before importing.",
+            )
+        return self._json_response({"applied": {"action": "import sources", **_source_import_result_payload(self._service.import_source_plan(pending.plan))}})
+
     def _create_preview(self, action: str, document_id: int, arguments: Mapping[str, str]) -> dict[str, str]:
         preview_id = secrets.token_urlsafe(18)
         self._pending_actions[preview_id] = _PendingAction(action, document_id, arguments, time.monotonic())
@@ -237,6 +452,9 @@ class HearthWebApplication:
         for preview_id, pending in tuple(self._pending_actions.items()):
             if pending.created_at < cutoff:
                 del self._pending_actions[preview_id]
+        for preview_id, pending in tuple(self._pending_source_imports.items()):
+            if pending.created_at < cutoff:
+                del self._pending_source_imports[preview_id]
 
     def _asset(self, name: str, content_type: str) -> _WebResponse:
         try:
@@ -275,10 +493,11 @@ class HearthWebServer:
         port: int,
         choose_file: Callable[[], Path] = None,
         choose_directory: Callable[[], Path] = None,
+        source_roots: tuple[Path, ...] = (),
         browser_opener: Callable[[str], bool] = webbrowser.open,
     ):
         token = secrets.token_urlsafe(32)
-        self._application = HearthWebApplication(service, token, choose_file, choose_directory)
+        self._application = HearthWebApplication(service, token, choose_file, choose_directory, source_roots)
         self._browser_opener = browser_opener
         self._http_server = _LoopbackHTTPServer(("127.0.0.1", port), _handler_type(self._application))
         self._http_server.timeout = 0.5
@@ -299,6 +518,7 @@ class HearthWebServer:
             self._serving.clear()
 
     def close(self) -> None:
+        self._application.cancel_semantic_index_rebuild()
         if self._serving.is_set():
             self._http_server.shutdown()
         self._http_server.server_close()
@@ -424,6 +644,12 @@ def _json_body(body: bytes) -> Mapping[str, Any]:
     return value
 
 
+def _process_peak_resident_memory_bytes() -> int:
+    """Return the peak resident size for the local Hearth process in bytes."""
+    maximum = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    return int(maximum if sys.platform == "darwin" else maximum * 1024)
+
+
 def _document_id(raw_value: str) -> int:
     try:
         document_id = int(raw_value)
@@ -432,6 +658,16 @@ def _document_id(raw_value: str) -> int:
     if document_id < 1:
         raise WebRequestError("The document ID is invalid.")
     return document_id
+
+
+def _relationship_document_ids(raw_value: str) -> tuple[int, int]:
+    parts = raw_value.split("/")
+    if len(parts) != 2:
+        raise WebRequestError("The relationship source IDs are invalid.")
+    left_document_id, right_document_id = (_document_id(part) for part in parts)
+    if left_document_id >= right_document_id:
+        raise WebRequestError("The relationship source IDs are invalid.")
+    return left_document_id, right_document_id
 
 
 def _document_payload(document: ImportedDocument) -> dict[str, Any]:
@@ -449,6 +685,31 @@ def _summary_payload(summary: ImportSummary) -> dict[str, Any]:
         "document": _document_payload(summary.document),
         "semantic_index_status": summary.semantic_index_status,
         "ocr_artifact_status": summary.ocr_artifact_status,
+    }
+
+
+def _source_root_payload(root: SourceRoot) -> dict[str, Any]:
+    return {
+        "name": root.name,
+        "status": root.status,
+        "candidate_count": root.candidate_count,
+        "imported_count": root.imported_count,
+    }
+
+
+def _source_candidate_payload(candidate: SourceCandidate) -> dict[str, str]:
+    return {"name": candidate.path.name, "source_root": candidate.source_root}
+
+
+def _source_import_result_payload(result: SourceImportResult) -> dict[str, Any]:
+    return {
+        "imported": [_summary_payload(item) for item in result.imported],
+        "failures": [{"name": item.name, "message": item.message} for item in result.failures],
+        "message": (
+            f"Imported {len(result.imported)} files."
+            if not result.failures
+            else f"Imported {len(result.imported)} files. {len(result.failures)} files need review."
+        ),
     }
 
 
@@ -478,6 +739,7 @@ def _collection_map_payload(service: HearthService) -> dict[str, Any]:
     """
 
     documents = service.list_documents()
+    semantic_relationships = service.document_relationships(limit=_MAP_RELATIONSHIP_LIMIT)
     clusters: dict[str, dict[str, Any]] = {}
     edges: list[dict[str, Any]] = []
 
@@ -511,6 +773,34 @@ def _collection_map_payload(service: HearthService) -> dict[str, Any]:
             for cluster in sorted(clusters.values(), key=lambda item: (item["label"].casefold(), item["id"]))
         ],
         "edges": edges,
+        "semantic_edges": [
+            {
+                "left_document_id": relationship.left_chunk.document_id,
+                "right_document_id": relationship.right_chunk.document_id,
+                "score": round(relationship.score, 4),
+            }
+            for relationship in semantic_relationships
+        ],
+    }
+
+
+def _relationship_payload(relationship: DocumentRelationship) -> dict[str, Any]:
+    return {
+        "left_document": {"id": relationship.left_chunk.document_id, "name": relationship.left_chunk.document_name},
+        "right_document": {"id": relationship.right_chunk.document_id, "name": relationship.right_chunk.document_name},
+        "score": round(relationship.score, 4),
+        "evidence": [_relationship_evidence_payload(relationship.left_chunk), _relationship_evidence_payload(relationship.right_chunk)],
+    }
+
+
+def _relationship_evidence_payload(chunk: Chunk) -> dict[str, Any]:
+    return {
+        "document_id": chunk.document_id,
+        "document_name": chunk.document_name,
+        "page_number": chunk.page_number,
+        "section": chunk.section,
+        "chunk_id": chunk.id,
+        "quote": chunk.text,
     }
 
 

@@ -4,12 +4,50 @@ import http.client
 import json
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from hearth.domain import DocumentRelationship
+from hearth.embedding import IndexBuildCancelled
 from hearth.service import HearthService
 from hearth.web import HearthWebServer
+
+
+class FakeRelationshipIndex:
+    def __init__(self) -> None:
+        self.rebuild_count = 0
+
+    def rebuild(self, chunks, *, on_progress=None, is_cancelled=None) -> None:
+        self.rebuild_count += 1
+        if on_progress is not None:
+            on_progress(len(chunks), len(chunks))
+
+    def is_current(self, chunks) -> bool:
+        return True
+
+    def search(self, question: str, chunks, limit: int = 20):
+        return []
+
+    def document_relationships(self, chunks, limit: int = 12, minimum_score: float = 0.72):
+        return [DocumentRelationship(chunks[0], chunks[1], 0.91)] if len(chunks) == 2 else []
+
+
+class BlockingRelationshipIndex(FakeRelationshipIndex):
+    def __init__(self) -> None:
+        super().__init__()
+        self.block_rebuild = False
+        self.started = threading.Event()
+
+    def rebuild(self, chunks, *, on_progress=None, is_cancelled=None) -> None:
+        if not self.block_rebuild:
+            super().rebuild(chunks, on_progress=on_progress, is_cancelled=is_cancelled)
+            return
+        self.started.set()
+        while is_cancelled is None or not is_cancelled():
+            time.sleep(0.01)
+        raise IndexBuildCancelled("cancelled in test")
 
 
 class HearthWebServerTests(unittest.TestCase):
@@ -46,7 +84,7 @@ class HearthWebServerTests(unittest.TestCase):
         bad_host_response, _ = self._request("GET", self._path(), host="example.test")
 
         self.assertEqual(root_response.status, 200)
-        self.assertIn(b"Your private knowledge base", root_body)
+        self.assertIn(b"Hearth", root_body)
         self.assertEqual(missing_token_response.status, 404)
         self.assertEqual(bad_host_response.status, 400)
         self.assertEqual(root_response.getheader("Cache-Control"), "no-store")
@@ -69,7 +107,105 @@ class HearthWebServerTests(unittest.TestCase):
         rendered = json.dumps({"import": imported, "documents": documents, "inspection": inspection})
         self.assertNotIn(str(self.note), rendered)
         self.assertNotIn("The deployment owner is Ada.", rendered)
+
+    def test_semantic_map_relationship_is_explainable_only_on_request(self) -> None:
+        self.server.close()
+        self.thread.join(timeout=2)
+        self.service.close()
+        self.service = HearthService(self.database, semantic_index=FakeRelationshipIndex())
+        self.server = HearthWebServer(
+            self.service,
+            port=0,
+            choose_file=lambda: self.selected_file,
+            choose_directory=lambda: self.selected_directory,
+            browser_opener=self.opened_urls.append,
+        )
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+        self._json_request("GET", "api/health")
+        self._json_request("POST", "api/import")
+        second_note = self.root / "handoff.md"
+        second_note.write_text("The handoff owner is Lin.", encoding="utf-8")
+        self.selected_file = second_note
+        self._json_request("POST", "api/import")
+
+        collection_map = self._json_request("GET", "api/map")
+        relationship = self._json_request("GET", "api/relationships/1/2")["relationship"]
+
+        self.assertEqual(collection_map["semantic_edges"], [{"left_document_id": 1, "right_document_id": 2, "score": 0.91}])
+        self.assertNotIn("Ada", json.dumps(collection_map))
+        self.assertEqual(relationship["score"], 0.91)
+        self.assertEqual(len(relationship["evidence"]), 2)
+        self.assertIn("Ada", relationship["evidence"][0]["quote"])
         self.assertTrue(self.note.is_file())
+
+    def test_semantic_index_rebuild_requires_a_separate_apply(self) -> None:
+        self.server.close()
+        self.thread.join(timeout=2)
+        self.service.close()
+        index = FakeRelationshipIndex()
+        self.service = HearthService(self.database, semantic_index=index)
+        self.server = HearthWebServer(
+            self.service,
+            port=0,
+            choose_file=lambda: self.selected_file,
+            choose_directory=lambda: self.selected_directory,
+            browser_opener=self.opened_urls.append,
+        )
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+        self._json_request("GET", "api/health")
+        self._json_request("POST", "api/import")
+        before_preview = index.rebuild_count
+
+        preview = self._json_request("POST", "api/semantic-index/preview")["preview"]
+
+        self.assertEqual(index.rebuild_count, before_preview)
+        self.assertEqual(preview["action"], "semantic-index")
+        self.assertNotIn(str(self.note), json.dumps(preview))
+
+        applied = self._json_request("POST", f"api/previews/{preview['id']}/apply")["applied"]
+        job = self._wait_for_semantic_job({"completed"})
+
+        self.assertEqual(applied["action"], "semantic-index")
+        self.assertIn(applied["job"]["status"], {"running", "completed"})
+        self.assertEqual(job["semantic_index_status"], "ready")
+        self.assertEqual(job["phase"], "ready")
+        self.assertGreaterEqual(job["benchmark"]["elapsed_seconds"], 0)
+        self.assertGreaterEqual(job["benchmark"]["peak_resident_memory_bytes"], 1)
+        self.assertEqual(index.rebuild_count, before_preview + 1)
+
+    def test_semantic_index_rebuild_can_be_cancelled_without_blocking_the_web_server(self) -> None:
+        self.server.close()
+        self.thread.join(timeout=2)
+        self.service.close()
+        index = BlockingRelationshipIndex()
+        self.service = HearthService(self.database, semantic_index=index)
+        self.server = HearthWebServer(
+            self.service,
+            port=0,
+            choose_file=lambda: self.selected_file,
+            choose_directory=lambda: self.selected_directory,
+            browser_opener=self.opened_urls.append,
+        )
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+        self._json_request("GET", "api/health")
+        self._json_request("POST", "api/import")
+        index.block_rebuild = True
+        preview = self._json_request("POST", "api/semantic-index/preview")["preview"]
+
+        applied = self._json_request("POST", f"api/previews/{preview['id']}/apply")["applied"]
+
+        self.assertEqual(applied["job"]["status"], "running")
+        self.assertTrue(index.started.wait(timeout=1))
+        self.assertEqual(self._json_request("GET", "api/health")["document_count"], 1)
+        cancelling = self._json_request("POST", "api/semantic-index/cancel")["job"]
+        cancelled = self._wait_for_semantic_job({"cancelled"})
+
+        self.assertEqual(cancelling["status"], "cancelling")
+        self.assertEqual(cancelled["completed"], 0)
+
 
     def test_collection_map_groups_documents_by_shared_section_without_source_content(self) -> None:
         self._json_request("POST", "api/import")
@@ -95,6 +231,41 @@ class HearthWebServerTests(unittest.TestCase):
         rendered = json.dumps(collection_map)
         self.assertNotIn(str(self.note), rendered)
         self.assertNotIn("The deployment owner is Ada.", rendered)
+
+    def test_connected_folder_preview_requires_a_separate_apply_before_importing(self) -> None:
+        source_root = self.root / "Desktop"
+        source_root.mkdir()
+        source_note = source_root / "brief.md"
+        source_note.write_text("# Brief\n\nThe delivery is on Friday.\n", encoding="utf-8")
+        self.server.close()
+        self.thread.join(timeout=2)
+        self.server = HearthWebServer(
+            self.service,
+            port=0,
+            choose_file=lambda: self.selected_file,
+            choose_directory=lambda: self.selected_directory,
+            source_roots=(source_root,),
+            browser_opener=self.opened_urls.append,
+        )
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+        self._json_request("GET", "api/health")
+
+        roots = self._json_request("GET", "api/sources")
+        preview = self._json_request("POST", "api/sources/preview")["preview"]
+        self.assertEqual(
+            roots["roots"],
+            [{"name": "Desktop", "status": "ready", "candidate_count": 0, "imported_count": 0}],
+        )
+        self.assertEqual(preview["candidate_count"], 1)
+        self.assertEqual(preview["candidates"], [{"name": "brief.md", "source_root": "Desktop"}])
+        self.assertEqual(self._json_request("GET", "api/documents")["documents"], [])
+        self.assertNotIn(str(source_root), json.dumps(preview))
+
+        applied = self._json_request("POST", f"api/source-previews/{preview['id']}/apply")["applied"]
+        self.assertEqual(applied["action"], "import sources")
+        self.assertEqual([item["document"]["name"] for item in applied["imported"]], ["brief.md"])
+        self.assertEqual(self._json_request("GET", "api/documents")["documents"][0]["name"], "brief.md")
 
     def test_previewed_rename_requires_one_apply_and_preserves_search(self) -> None:
         self._json_request("POST", "api/import")
@@ -192,6 +363,15 @@ class HearthWebServerTests(unittest.TestCase):
         response, body = self._request(method, self._path(endpoint), payload)
         self.assertEqual(response.status, 200, body.decode("utf-8"))
         return json.loads(body)
+
+    def _wait_for_semantic_job(self, statuses: set[str]) -> dict[str, object]:
+        deadline = time.monotonic() + 1
+        while time.monotonic() < deadline:
+            job = self._json_request("GET", "api/semantic-index")["job"]
+            if job["status"] in statuses:
+                return job
+            time.sleep(0.01)
+        self.fail("The local semantic-index job did not reach the expected state.")
 
 
 if __name__ == "__main__":
