@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+from collections.abc import Callable
 from pathlib import Path
 
 from .answering import Answerer, EvidenceAnswerer, validate_answer
@@ -9,15 +10,21 @@ from .chunking import chunk_page
 from .domain import (
     Answer,
     CollectionHealth,
+    DocumentRelationship,
     DocumentInspection,
     FileOrganizationError,
     FileOrganizationPlan,
     ImportedDocument,
     ImportError,
     ImportSummary,
+    SourceCandidate,
     SourceAttention,
+    SourceImportFailure,
+    SourceImportPlan,
+    SourceImportResult,
     SourceRelinkError,
     SourceRelinkPlan,
+    SourceRoot,
 )
 from .embedding import FlatVectorIndex
 from .extraction import OCRmyPDFFallback, PageExtractor, PdfExtractor, PopplerPdfExtractor, TextNoteExtractor
@@ -35,9 +42,12 @@ class HearthService:
         semantic_index: FlatVectorIndex | None = None,
         ocr_output_directory: Path | None = None,
         retain_ocr_output: bool = False,
+        relationship_minimum_score: float = 0.72,
     ):
         if retain_ocr_output and ocr_output_directory is None:
             raise ValueError("retain_ocr_output requires ocr_output_directory.")
+        if not 0 <= relationship_minimum_score <= 1:
+            raise ValueError("relationship_minimum_score must be between zero and one.")
         self._store = SQLiteStore(database_path)
         self._note_extractor = TextNoteExtractor()
         native_pdf_extractor = PopplerPdfExtractor()
@@ -57,11 +67,15 @@ class HearthService:
         self._answerer = answerer or EvidenceAnswerer()
         self._semantic_index = semantic_index
         self._retain_ocr_output = retain_ocr_output
+        self._relationship_minimum_score = relationship_minimum_score
 
     def close(self) -> None:
         self._store.close()
 
     def import_document(self, raw_path: str) -> int:
+        return self._import_document(raw_path, rebuild_index=True)
+
+    def _import_document(self, raw_path: str, *, rebuild_index: bool) -> int:
         path = _validated_local_file(raw_path)
         source_state = _source_state(path)
         extractor = self._pdf_extractor if path.suffix.lower() == ".pdf" else self._note_extractor
@@ -72,7 +86,8 @@ class HearthService:
         if not any(chunks_by_page.values()):
             raise ImportError("No extractable text was found in the document.")
         document_id = self._store.replace_document(path, document.pages, chunks_by_page, *source_state)
-        self._rebuild_semantic_index()
+        if rebuild_index:
+            self._rebuild_semantic_index()
         return document_id
 
     def import_with_summary(self, raw_path: str) -> ImportSummary:
@@ -126,6 +141,62 @@ class HearthService:
         """Return collection metadata without document text or canonical source paths."""
         return self._store.list_documents()
 
+    def source_roots(self, source_roots: tuple[Path, ...]) -> tuple[SourceRoot, ...]:
+        """Return connected-root availability without discovering or reading candidate files."""
+        return tuple(
+            SourceRoot(
+                name=_source_root_name(root),
+                path=root,
+                status="ready" if root.is_dir() else "unavailable",
+                candidate_count=0,
+                imported_count=0,
+            )
+            for root in _unique_source_roots(source_roots)
+        )
+
+    def plan_source_import(self, source_roots: tuple[Path, ...]) -> SourceImportPlan:
+        """Discover supported files only under profile-approved roots without reading their contents."""
+        roots = _unique_source_roots(source_roots)
+        imported_paths = {source_path for _, _, source_path, _, _, _ in self._store.source_records()}
+        discovered_paths: set[Path] = set()
+        root_statuses: list[SourceRoot] = []
+        candidates: list[SourceCandidate] = []
+        for root in roots:
+            if not root.is_dir():
+                root_statuses.append(SourceRoot(_source_root_name(root), root, "unavailable", 0, 0))
+                continue
+            root_candidates = _discover_source_candidates(root, imported_paths | discovered_paths)
+            candidates.extend(root_candidates)
+            discovered_paths.update(candidate.path for candidate in root_candidates)
+            root_statuses.append(
+                SourceRoot(
+                    _source_root_name(root),
+                    root,
+                    "ready",
+                    len(root_candidates),
+                    sum(path.is_relative_to(root) for path in imported_paths),
+                )
+            )
+        return SourceImportPlan(tuple(root_statuses), tuple(candidates))
+
+    def import_source_plan(self, plan: SourceImportPlan) -> SourceImportResult:
+        """Import an approved discovery plan, rebuilding derived vectors once after the batch."""
+        roots = tuple(root.path for root in plan.roots if root.status == "ready")
+        imported_document_ids: list[int] = []
+        failures: list[SourceImportFailure] = []
+        for candidate in plan.candidates:
+            try:
+                candidate_path = _validated_source_candidate(candidate.path, roots)
+                imported_document_ids.append(self._import_document(str(candidate_path), rebuild_index=False))
+            except ImportError as exc:
+                failures.append(SourceImportFailure(candidate.path.name, str(exc)))
+        if imported_document_ids:
+            self._rebuild_semantic_index()
+        return SourceImportResult(
+            imported=tuple(self._import_summary(document_id) for document_id in imported_document_ids),
+            failures=tuple(failures),
+        )
+
     def inspect_document(self, document_id: int) -> DocumentInspection | None:
         """Return one document's page and chunk provenance without document text."""
         return self._store.inspect_document(document_id)
@@ -135,8 +206,11 @@ class HearthService:
         if self._semantic_index is not None:
             semantic_index_status = "ready" if self._semantic_index.is_current(self._store.list_chunks()) else "needs reindex"
         attention = []
+        stale_chunking = self._store.stale_chunking_document_ids()
         for document_id, document_name, source_path, fingerprint, source_size, source_mtime_ns in self._store.source_records():
             status = _source_attention_status(source_path, fingerprint, source_size, source_mtime_ns)
+            if status is None and document_id in stale_chunking:
+                status = "chunking outdated"
             if status is not None:
                 attention.append(SourceAttention(document_id, document_name, status))
         return self._store.collection_health(semantic_index_status, tuple(attention))
@@ -225,6 +299,29 @@ class HearthService:
             return Answer.abstain()
         return answer
 
+    def document_relationships(self, *, limit: int = 12) -> list[DocumentRelationship]:
+        """Return only relationships substantiated by the active local semantic index."""
+        chunks = self._store.list_chunks()
+        if self._semantic_index is None or not self._semantic_index.is_current(chunks):
+            return []
+        return self._semantic_index.document_relationships(
+            chunks, limit=limit, minimum_score=self._relationship_minimum_score
+        )
+
+    def rebuild_semantic_index(
+        self,
+        *,
+        on_progress: Callable[[int, int], None] | None = None,
+        is_cancelled: Callable[[], bool] | None = None,
+    ) -> str:
+        """Rebuild derived vectors from existing local evidence without changing source files."""
+        if self._semantic_index is None:
+            raise ImportError("Configure a local embedding model and index directory before building a semantic map.")
+        self._semantic_index.rebuild(
+            self._store.list_chunks(), on_progress=on_progress, is_cancelled=is_cancelled
+        )
+        return self.collection_health().semantic_index_status
+
     def _rebuild_semantic_index(self) -> None:
         if self._semantic_index is not None:
             self._semantic_index.rebuild(self._store.list_chunks())
@@ -290,6 +387,56 @@ def _validated_local_path(raw_path: str) -> Path:
         return Path(raw_path).expanduser().resolve(strict=False)
     except OSError as exc:
         raise ImportError("A valid local file path is required.") from exc
+
+
+def _unique_source_roots(source_roots: tuple[Path, ...]) -> tuple[Path, ...]:
+    roots: list[Path] = []
+    for root in source_roots:
+        try:
+            resolved = root.expanduser().resolve(strict=False)
+        except OSError as exc:
+            raise ImportError("A connected source root has an invalid local path.") from exc
+        if resolved not in roots:
+            roots.append(resolved)
+    return tuple(roots)
+
+
+def _source_root_name(root: Path) -> str:
+    return root.name or str(root)
+
+
+def _discover_source_candidates(root: Path, imported_paths: set[Path]) -> list[SourceCandidate]:
+    candidates: list[SourceCandidate] = []
+    supported_suffixes = TextNoteExtractor.supported_suffixes | {".pdf"}
+    ignored_directories = {"node_modules", "__pycache__", ".hearth"}
+    for directory, directory_names, file_names in os.walk(root, topdown=True, followlinks=False):
+        directory_names[:] = [
+            name
+            for name in directory_names
+            if not name.startswith(".") and name not in ignored_directories
+        ]
+        for file_name in sorted(file_names):
+            if file_name.startswith(".") or Path(file_name).suffix.lower() not in supported_suffixes:
+                continue
+            candidate = Path(directory) / file_name
+            if candidate.is_symlink():
+                continue
+            try:
+                candidate = candidate.resolve(strict=True)
+            except OSError:
+                continue
+            if not candidate.is_relative_to(root) or candidate in imported_paths:
+                continue
+            if candidate.is_file():
+                candidates.append(SourceCandidate(candidate, _source_root_name(root)))
+    return sorted(candidates, key=lambda item: (item.source_root.casefold(), str(item.path).casefold()))
+
+
+def _validated_source_candidate(candidate: Path, roots: tuple[Path, ...]) -> Path:
+    path = _validated_local_file(str(candidate))
+    if not roots or not any(path.is_relative_to(root) for root in roots):
+        raise ImportError("The reviewed source is no longer inside a connected folder. Preview again.")
+    return path
 
 
 def _source_state(path: Path) -> tuple[str, int, int]:

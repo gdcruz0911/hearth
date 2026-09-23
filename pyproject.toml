@@ -7,6 +7,7 @@ name = "hearth"
 version = "0.1.0"
 description = "Local-first, evidence-bound document chat foundation."
 requires-python = ">=3.11"
+dependencies = ["numpy>=1.26,<3"]
 
 [project.optional-dependencies]
 local-inference = ["mlx-lm>=0.31.3,<0.32"]

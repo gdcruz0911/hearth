@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 
 from hearth.domain import Chunk
-from hearth.embedding import EmbeddingSpec, FlatVectorIndex, IndexCompatibilityError
+from hearth.embedding import EmbeddingSpec, FlatVectorIndex, IndexBuildCancelled, IndexCompatibilityError
 
 
 class FakeEmbedder:
@@ -26,6 +26,10 @@ class FakeEmbedder:
 
 def _chunk(chunk_id: int, text: str) -> Chunk:
     return Chunk(chunk_id, 1, "fixture.md", 1, "Fixture", text, 0, len(text), "native", None)
+
+
+def _document_chunk(chunk_id: int, document_id: int, text: str) -> Chunk:
+    return Chunk(chunk_id, document_id, f"fixture-{document_id}.md", 1, "Fixture", text, 0, len(text), "native", None)
 
 
 class FlatVectorIndexTests(unittest.TestCase):
@@ -83,3 +87,151 @@ class FlatVectorIndexTests(unittest.TestCase):
 
         self.assertTrue(self.index.is_current([first_chunk]))
         self.assertFalse(self.index.is_current([_chunk(2, "second")]))
+
+    def test_document_relationships_use_document_centroids_then_return_chunk_evidence(self) -> None:
+        chunks = [
+            _document_chunk(1, 1, "first"),
+            _document_chunk(2, 2, "second"),
+            _document_chunk(3, 3, "other"),
+        ]
+        self.index.rebuild(chunks)
+
+        relationships = self.index.document_relationships(chunks, limit=1, minimum_score=0.7)
+
+        self.assertEqual(len(relationships), 1)
+        self.assertEqual(
+            (relationships[0].left_chunk.document_id, relationships[0].right_chunk.document_id),
+            (1, 2),
+        )
+        self.assertAlmostEqual(relationships[0].score, 1.0)
+
+    def test_document_relationships_distribute_links_across_sources(self) -> None:
+        self.embedder._vectors.update(
+            {
+                "third": [1.0, 0.0],
+                "fourth": [0.0, 1.0],
+            }
+        )
+        chunks = [
+            _document_chunk(1, 1, "first"),
+            _document_chunk(2, 2, "second"),
+            _document_chunk(3, 3, "third"),
+            _document_chunk(4, 4, "fourth"),
+        ]
+        self.index.rebuild(chunks)
+
+        relationships = self.index.document_relationships(chunks, limit=2, minimum_score=0.7)
+
+        self.assertEqual(
+            {(item.left_chunk.document_id, item.right_chunk.document_id) for item in relationships},
+            {(1, 2), (1, 3)},
+        )
+
+    def test_cancelled_rebuild_keeps_the_previous_active_index(self) -> None:
+        first_chunk = _chunk(1, "first")
+        replacement_chunks = [first_chunk, _chunk(2, "second")]
+        self.index.rebuild([first_chunk])
+        self.index._BUILD_BATCH_SIZE = 1
+        progress: list[int] = []
+
+        with self.assertRaises(IndexBuildCancelled):
+            self.index.rebuild(
+                replacement_chunks,
+                on_progress=lambda completed, total: progress.append(completed),
+                is_cancelled=lambda: any(completed >= 1 for completed in progress),
+            )
+
+        self.assertEqual(progress, [0, 1])
+        self.assertTrue(self.index.is_current([first_chunk]))
+        self.assertFalse(self.index.is_current(replacement_chunks))
+
+
+class ThreeDimensionalEmbedder(FakeEmbedder):
+    spec = EmbeddingSpec(
+        model_name="synthetic-3d-model",
+        model_fingerprint="synthetic-3d-fingerprint",
+        dimension=3,
+        pooling="last-token",
+        normalization="l2",
+    )
+
+
+class ChunkLevelRelationshipTests(unittest.TestCase):
+    """ADR-0017: edges come from chunk similarity, not document centroids."""
+
+    def setUp(self) -> None:
+        self.temporary_directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary_directory.cleanup)
+        self.index_directory = Path(self.temporary_directory.name) / "index"
+
+    def _index(self, vectors: dict[str, list[float]]) -> FlatVectorIndex:
+        return FlatVectorIndex(self.index_directory, ThreeDimensionalEmbedder(vectors))
+
+    def test_documents_sharing_one_section_are_linked(self) -> None:
+        # Each document has one chunk on a shared topic and two on its own.
+        # Their centroids are far apart, so the previous centroid gate dropped
+        # this pair before ever comparing the chunks that actually match.
+        index = self._index(
+            {
+                "shared-left": [1.0, 0.0, 0.0],
+                "shared-right": [1.0, 0.0, 0.0],
+                "left-a": [0.0, 1.0, 0.0],
+                "left-b": [0.0, 1.0, 0.0],
+                "right-a": [0.0, 0.0, 1.0],
+                "right-b": [0.0, 0.0, 1.0],
+            }
+        )
+        chunks = [
+            _document_chunk(1, 1, "shared-left"),
+            _document_chunk(2, 1, "left-a"),
+            _document_chunk(3, 1, "left-b"),
+            _document_chunk(4, 2, "shared-right"),
+            _document_chunk(5, 2, "right-a"),
+            _document_chunk(6, 2, "right-b"),
+        ]
+        index.rebuild(chunks)
+
+        # Premise: the centroids these documents would produce score far below the
+        # minimum, so a centroid gate could not admit this edge at any threshold.
+        centroid_similarity = (1 / 5) ** 0.5 * (1 / 5) ** 0.5
+        self.assertLess(centroid_similarity, 0.7)
+
+        relationships = index.document_relationships(chunks, limit=12, minimum_score=0.7)
+
+        self.assertEqual(len(relationships), 1)
+        relationship = relationships[0]
+        self.assertEqual(
+            (relationship.left_chunk.document_id, relationship.right_chunk.document_id), (1, 2)
+        )
+        # The edge carries the chunks that explain it, not an averaged score.
+        self.assertEqual((relationship.left_chunk.id, relationship.right_chunk.id), (1, 4))
+        self.assertAlmostEqual(relationship.score, 1.0, places=5)
+
+    def test_unrelated_documents_are_not_linked(self) -> None:
+        index = self._index({"left": [1.0, 0.0, 0.0], "right": [0.0, 1.0, 0.0]})
+        chunks = [_document_chunk(1, 1, "left"), _document_chunk(2, 2, "right")]
+        index.rebuild(chunks)
+
+        self.assertEqual(index.document_relationships(chunks, limit=12, minimum_score=0.7), [])
+
+    def test_a_hub_document_does_not_connect_to_everything(self) -> None:
+        # One document holds a chunk close to every other document's topic.
+        # A one-sided threshold would link it to all of them.
+        vectors = {"hub-a": [1.0, 0.0, 0.0], "hub-b": [0.0, 1.0, 0.0], "hub-c": [0.0, 0.0, 1.0]}
+        chunks = [_document_chunk(index, 1, name) for index, name in enumerate(vectors, start=1)]
+        for offset, (name, vector) in enumerate(list(vectors.items())):
+            satellite = f"satellite-{offset}"
+            vectors[satellite] = vector
+            chunks.append(_document_chunk(10 + offset, 2 + offset, satellite))
+        index = self._index(vectors)
+        index.rebuild(chunks)
+
+        relationships = index.document_relationships(chunks, limit=12, minimum_score=0.7)
+        hub_edges = [
+            item
+            for item in relationships
+            if 1 in (item.left_chunk.document_id, item.right_chunk.document_id)
+        ]
+        self.assertLessEqual(len(hub_edges), 3)
+        for item in relationships:
+            self.assertGreaterEqual(item.score, 0.7)

@@ -20,3 +20,8 @@ Each record is a standalone Markdown file with graph-indexable frontmatter.
 | [ADR-0013](ADR-0013-source-freshness-attention.md) | Source freshness attention | accepted | 2026-07-30 | - |
 | [ADR-0014](ADR-0014-explicit-source-relink.md) | Explicit source relink | accepted | 2026-07-30 | - |
 | [ADR-0015](ADR-0015-loopback-local-web-interface.md) | Loopback local web interface | accepted | 2026-07-30 | - |
+| [ADR-0016](ADR-0016-explicit-connected-source-roots.md) | Explicit connected source roots | accepted | 2026-07-30 | - |
+| [ADR-0017](ADR-0017-numpy-and-chunk-level-relationships.md) | NumPy dependency and chunk-level document relationships | accepted | 2026-09-21 | - |
+| [ADR-0018](ADR-0018-structure-aware-chunking-and-migration.md) | Structure-aware chunking and chunk version migration | accepted | 2026-09-21 | - |
+| [ADR-0019](ADR-0019-semantic-retrieval-as-default.md) | Semantic retrieval as the default path | accepted | 2026-09-21 | - |
+| [ADR-0020](ADR-0020-model-provisioning-network-boundary.md) | Model provisioning network boundary | accepted | 2026-09-21 | - |

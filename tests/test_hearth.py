@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -60,8 +61,10 @@ class FakeSemanticIndex:
     def __init__(self) -> None:
         self.rebuild_chunk_ids: list[tuple[int, ...]] = []
 
-    def rebuild(self, chunks) -> None:
+    def rebuild(self, chunks, *, on_progress=None, is_cancelled=None) -> None:
         self.rebuild_chunk_ids.append(tuple(chunk.id for chunk in chunks))
+        if on_progress is not None:
+            on_progress(len(chunks), len(chunks))
 
     def search(self, question: str, chunks, limit: int = 20):
         return []
@@ -263,6 +266,28 @@ class HearthServiceTests(unittest.TestCase):
         self.assertFalse(hasattr(inspection, "text"))
         self.assertFalse(hasattr(inspection.pages[0].chunks[0], "text"))
 
+    def test_connected_source_roots_preview_supported_files_then_imports_the_approved_plan(self) -> None:
+        desktop = self.root / "Desktop"
+        documents = self.root / "Documents"
+        downloads = self.root / "Downloads"
+        for folder in (desktop, documents, downloads):
+            folder.mkdir()
+        first_note = desktop / "project.md"
+        first_note.write_text("# Project\n\nThe project owner is Ada.\n", encoding="utf-8")
+        second_note = documents / "readme.txt"
+        second_note.write_text("The review is scheduled for Friday.\n", encoding="utf-8")
+        (downloads / "photo.jpg").write_bytes(b"not a supported source")
+        (desktop / ".private.md").write_text("This file is not scanned.\n", encoding="utf-8")
+
+        plan = self.service.plan_source_import((desktop, documents, downloads))
+        result = self.service.import_source_plan(plan)
+
+        self.assertEqual([root.name for root in plan.roots], ["Desktop", "Documents", "Downloads"])
+        self.assertEqual([candidate.path.name for candidate in plan.candidates], ["project.md", "readme.txt"])
+        self.assertEqual([summary.document.name for summary in result.imported], ["project.md", "readme.txt"])
+        self.assertEqual(result.failures, ())
+        self.assertEqual([document.name for document in self.service.list_documents()], ["project.md", "readme.txt"])
+
     def test_collection_inspection_marks_ocr_pages_for_review(self) -> None:
         pdf = self.root / "scanned.pdf"
         pdf.write_bytes(b"placeholder")
@@ -324,6 +349,84 @@ class HearthServiceTests(unittest.TestCase):
         self.assertEqual(active_manifest["chunk_ids"], [])
         self.assertEqual(len(remaining_versions), 1)
 
+    def test_flat_semantic_index_exposes_explainable_cross_document_relationships(self) -> None:
+        operations_text = "The deployment review includes a rollback plan."
+        procurement_text = "The release review requires a rollback plan from suppliers."
+        operations = self.root / "operations.md"
+        procurement = self.root / "procurement.md"
+        operations.write_text(operations_text, encoding="utf-8")
+        procurement.write_text(procurement_text, encoding="utf-8")
+        index = FlatVectorIndex(
+            self.root / "semantic-index",
+            FakeFlatEmbedder(
+                {
+                    operations_text: [1.0, 0.0],
+                    procurement_text: [0.9, 0.435889894],
+                }
+            ),
+        )
+        self.service.close()
+        self.service = HearthService(self.database, semantic_index=index)
+
+        operations_id = self.service.import_document(str(operations))
+        procurement_id = self.service.import_document(str(procurement))
+        relationships = self.service.document_relationships()
+
+        self.assertEqual(len(relationships), 1)
+        relationship = relationships[0]
+        self.assertEqual((relationship.left_chunk.document_id, relationship.right_chunk.document_id), (operations_id, procurement_id))
+        self.assertGreaterEqual(relationship.score, 0.89)
+        self.assertIn("rollback plan", relationship.left_chunk.text)
+        self.assertIn("rollback plan", relationship.right_chunk.text)
+
+        self.service.close()
+        self.service = HearthService(self.database, semantic_index=index, relationship_minimum_score=0.95)
+        self.assertEqual(self.service.document_relationships(), [])
+
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StaleChunkingAttentionTests(unittest.TestCase):
+    """ADR-0018: a chunking change is reported per document, never silently applied."""
+
+    def setUp(self) -> None:
+        self.temporary_directory = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary_directory.name)
+        self.database = self.root / "hearth.sqlite"
+        self.source = self.root / "note.md"
+        self.source.write_text("# Title\n\nAlpha beta gamma. Delta epsilon.\n", encoding="utf-8")
+        self.service = HearthService(self.database)
+        self.service.import_document(str(self.source))
+
+    def tearDown(self) -> None:
+        self.service.close()
+        self.temporary_directory.cleanup()
+
+    def _mark_legacy(self) -> None:
+        connection = sqlite3.connect(self.database)
+        connection.execute("UPDATE documents SET chunking_version = NULL")
+        connection.commit()
+        connection.close()
+
+    def test_fresh_import_is_not_stale(self):
+        health = self.service.collection_health()
+        self.assertEqual(health.stale_chunking_count, 0)
+        self.assertEqual(health.source_attention, ())
+
+    def test_legacy_document_is_reported_and_reindex_clears_it(self):
+        self._mark_legacy()
+        health = self.service.collection_health()
+        self.assertEqual(health.stale_chunking_count, 1)
+        self.assertEqual([item.status for item in health.source_attention], ["chunking outdated"])
+
+        self.service.reindex_document(str(self.source))
+        self.assertEqual(self.service.collection_health().stale_chunking_count, 0)
+
+    def test_unavailable_source_outranks_stale_chunking(self):
+        # A missing source cannot be reindexed, so that is the actionable status.
+        self._mark_legacy()
+        self.source.unlink()
+        statuses = [item.status for item in self.service.collection_health().source_attention]
+        self.assertEqual(statuses, ["source unavailable"])

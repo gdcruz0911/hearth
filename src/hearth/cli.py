@@ -13,6 +13,8 @@ from .domain import (
     ImportedDocument,
     ImportError,
     ImportSummary,
+    SourceImportPlan,
+    SourceImportResult,
     SourceRelinkError,
     SourceRelinkPlan,
 )
@@ -25,6 +27,13 @@ from .evaluation import (
     load_evaluation_corpus,
 )
 from .retrieval import MLXLocalReranker, RerankerError
+from .runtime import (
+    RuntimeProfile,
+    RuntimeProfileError,
+    default_source_roots,
+    load_runtime_profile,
+    write_runtime_profile,
+)
 from .service import HearthService
 from .web import HearthWebServer
 
@@ -42,7 +51,14 @@ def main(argv: list[str] | None = None) -> int:
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("--database", type=Path, default=Path(".hearth/hearth.sqlite"))
+    parser.add_argument("--profile", type=Path, help="Private JSON runtime profile. Explicit options override it.")
+    parser.add_argument("--database", type=Path, help="Private SQLite provenance database.")
+    parser.add_argument(
+        "--source-root",
+        type=Path,
+        action="append",
+        help="Connected local folder to scan after explicit preview and approval. May be repeated.",
+    )
     parser.add_argument(
         "--ocr-output-directory",
         type=Path,
@@ -73,6 +89,11 @@ def main(argv: list[str] | None = None) -> int:
         type=Path,
         help="Pre-provisioned local MLX reranker directory. Enables reranking retrieved evidence.",
     )
+    parser.add_argument(
+        "--relationship-minimum-score",
+        type=_relationship_minimum_score,
+        help="Minimum cosine similarity for a semantic map relationship, from 0 to 1.",
+    )
     subcommands = parser.add_subparsers(dest="command", required=True)
     importer = subcommands.add_parser("import", help="Import a local note or configured PDF.")
     importer.add_argument("path")
@@ -96,6 +117,8 @@ def main(argv: list[str] | None = None) -> int:
     relinker.add_argument("action", choices=("preview", "apply"))
     relinker.add_argument("document_id", type=int)
     relinker.add_argument("replacement_path", type=Path, help="Existing local file with identical imported contents.")
+    sources = subcommands.add_parser("sources", help="Preview or import supported files from connected local folders.")
+    sources.add_argument("action", choices=("preview", "import"))
     web = subcommands.add_parser("web", help="Run the local Hearth web interface on this Mac only.")
     web.add_argument("--port", type=_port, default=8765, help="Loopback port to use (default: 8765).")
     web.add_argument("--no-open", action="store_true", help="Do not open the local interface in the default browser.")
@@ -105,7 +128,66 @@ def main(argv: list[str] | None = None) -> int:
         "evaluate-claim-support", help="Run an experimental local claim-support corpus."
     )
     claim_evaluator.add_argument("corpus", type=Path)
+    profile = subcommands.add_parser("profile", help="Create one private runtime profile for repeatable Hearth commands.")
+    profile_commands = profile.add_subparsers(dest="profile_command", required=True)
+    profile_create = profile_commands.add_parser("create", help="Create a new profile without overwriting an existing file.")
+    profile_create.add_argument("path", type=Path)
+    profile_create.add_argument("--database", type=Path, required=True)
+    profile_create.add_argument("--embedding-model", type=Path)
+    profile_create.add_argument("--index-directory", type=Path)
+    profile_create.add_argument("--generator-model", type=Path)
+    profile_create.add_argument("--reranker-model", type=Path)
+    profile_create.add_argument("--ocr-output-directory", type=Path)
+    profile_create.add_argument("--retain-ocr-output", action="store_true")
+    profile_create.add_argument("--relationship-minimum-score", type=_relationship_minimum_score, default=0.72)
+    profile_create.add_argument(
+        "--source-root",
+        type=Path,
+        action="append",
+        help="Connected local folder. Defaults to Desktop, Documents, and Downloads when omitted.",
+    )
     args = parser.parse_args(argv)
+    if args.command == "profile":
+        if (args.embedding_model is None) != (args.index_directory is None):
+            parser.error("--embedding-model and --index-directory must be provided together.")
+        if args.retain_ocr_output and args.ocr_output_directory is None:
+            parser.error("--retain-ocr-output requires --ocr-output-directory.")
+        try:
+            profile_path = write_runtime_profile(
+                args.path,
+                RuntimeProfile(
+                    database=args.database,
+                    embedding_model=args.embedding_model,
+                    index_directory=args.index_directory,
+                    generator_model=args.generator_model,
+                    reranker_model=args.reranker_model,
+                    ocr_output_directory=args.ocr_output_directory,
+                    retain_ocr_output=args.retain_ocr_output,
+                    relationship_minimum_score=args.relationship_minimum_score,
+                    source_roots=tuple(args.source_root) if args.source_root else default_source_roots(),
+                ),
+            )
+        except RuntimeProfileError as exc:
+            parser.error(str(exc))
+        print(f"Created private runtime profile: {profile_path}")
+        return 0
+    try:
+        profile = load_runtime_profile(args.profile) if args.profile is not None else RuntimeProfile()
+    except RuntimeProfileError as exc:
+        parser.error(str(exc))
+    args.database = args.database or profile.database or Path(".hearth/hearth.sqlite")
+    args.source_roots = tuple(args.source_root) if args.source_root else profile.source_roots
+    args.embedding_model = args.embedding_model or profile.embedding_model
+    args.index_directory = args.index_directory or profile.index_directory
+    args.generator_model = args.generator_model or profile.generator_model
+    args.reranker_model = args.reranker_model or profile.reranker_model
+    args.ocr_output_directory = args.ocr_output_directory or profile.ocr_output_directory
+    args.retain_ocr_output = args.retain_ocr_output or profile.retain_ocr_output
+    args.relationship_minimum_score = (
+        args.relationship_minimum_score
+        if args.relationship_minimum_score is not None
+        else profile.relationship_minimum_score
+    )
     if (args.embedding_model is None) != (args.index_directory is None):
         parser.error("--embedding-model and --index-directory must be provided together.")
     if args.retain_ocr_output and args.ocr_output_directory is None:
@@ -129,6 +211,7 @@ def main(argv: list[str] | None = None) -> int:
             semantic_index=semantic_index,
             ocr_output_directory=args.ocr_output_directory,
             retain_ocr_output=args.retain_ocr_output,
+            relationship_minimum_score=args.relationship_minimum_score,
         )
         if args.command == "import":
             _print_import_summary("Imported", service.import_with_summary(args.path))
@@ -165,8 +248,14 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 plan = service.apply_relink(args.document_id, args.replacement_path)
                 _print_relink_applied(plan)
+        elif args.command == "sources":
+            plan = service.plan_source_import(args.source_roots)
+            if args.action == "preview":
+                _print_source_import_plan(plan)
+            else:
+                _print_source_import_result(service.import_source_plan(plan))
         elif args.command == "web":
-            server = HearthWebServer(service, port=args.port)
+            server = HearthWebServer(service, port=args.port, source_roots=args.source_roots)
             print(f"Hearth is running locally at {server.url}", flush=True)
             print("It is bound to 127.0.0.1 only. Press Ctrl+C to stop it.", flush=True)
             if not args.no_open:
@@ -207,6 +296,7 @@ def main(argv: list[str] | None = None) -> int:
         IndexError,
         LocalInferenceError,
         RerankerError,
+        RuntimeProfileError,
         SourceRelinkError,
     ) as exc:
         parser.error(str(exc))
@@ -224,6 +314,16 @@ def _port(value: str) -> int:
     if not 1 <= port <= 65535:
         raise argparse.ArgumentTypeError("The web port must be a number from 1 to 65535.")
     return port
+
+
+def _relationship_minimum_score(value: str) -> float:
+    try:
+        score = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("Relationship minimum score must be a number from 0 to 1.") from exc
+    if not 0 <= score <= 1:
+        raise argparse.ArgumentTypeError("Relationship minimum score must be a number from 0 to 1.")
+    return score
 
 
 def _print_documents(documents: list[ImportedDocument]) -> None:
@@ -247,6 +347,35 @@ def _print_import_summary(action: str, summary: ImportSummary) -> None:
     print(f"OCR artifacts: {summary.ocr_artifact_status}.")
 
 
+def _print_source_import_plan(plan: SourceImportPlan) -> None:
+    print("Connected folders")
+    for root in plan.roots:
+        if root.status == "ready":
+            print(f"- {root.name}: {root.candidate_count} new supported files, {root.imported_count} already imported.")
+        else:
+            print(f"- {root.name}: unavailable.")
+    if not plan.candidates:
+        print("No new supported files are ready to import.")
+        return
+    print(f"Ready to import: {len(plan.candidates)} files.")
+    for candidate in plan.candidates[:20]:
+        print(f"- {candidate.path.name} ({candidate.source_root})")
+    if len(plan.candidates) > 20:
+        print(f"- {len(plan.candidates) - 20} additional files")
+    print("Next: run sources import to index the currently eligible files.")
+
+
+def _print_source_import_result(result: SourceImportResult) -> None:
+    print(f"Imported: {len(result.imported)} files.")
+    if result.failures:
+        print(f"Needs review: {len(result.failures)} files could not be imported.")
+        for failure in result.failures[:20]:
+            print(f"- {failure.name}: {failure.message}")
+        if len(result.failures) > 20:
+            print(f"- {len(result.failures) - 20} additional files")
+    print("Next: run health, open web, or preview sources again.")
+
+
 def _print_collection_health(health: CollectionHealth) -> None:
     print("Collection health")
     print(f"Documents: {health.document_count}")
@@ -256,6 +385,7 @@ def _print_collection_health(health: CollectionHealth) -> None:
     print(f"Source files unavailable: {health.unavailable_source_count}")
     print(f"Sources changed since import: {health.changed_source_count}")
     print(f"Sources requiring baseline reindex: {health.baseline_reindex_count}")
+    print(f"Sources chunked by an older version: {health.stale_chunking_count}")
     print(f"Semantic index: {health.semantic_index_status}")
     if health.source_attention:
         print("Needs attention")
@@ -265,6 +395,11 @@ def _print_collection_health(health: CollectionHealth) -> None:
                 print(
                     "  Next: restore the source file, relink it with "
                     "relink preview <document-id> <replacement-path>, or remove its stale collection record."
+                )
+            elif attention.status == "chunking outdated":
+                print(
+                    "  Next: reindex this document so its chunks match the current chunker. "
+                    "Search and the semantic map stay usable until you do."
                 )
             else:
                 print("  Next: reindex the source file when you are ready to refresh its extracted content.")

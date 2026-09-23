@@ -113,6 +113,57 @@ class CollectionInspectionCliTests(unittest.TestCase):
         self.assertIn("Semantic index: not configured.", output.getvalue())
         self.assertIn("OCR artifacts: not used.", output.getvalue())
 
+    def test_profile_create_and_use_keep_runtime_paths_out_of_normal_list_output(self) -> None:
+        profile_path = self.root / "runtime" / "hearth.json"
+        create_output = io.StringIO()
+        list_output = io.StringIO()
+
+        with contextlib.redirect_stdout(create_output):
+            create_exit_code = main(
+                [
+                    "profile",
+                    "create",
+                    str(profile_path),
+                    "--database",
+                    str(self.database),
+                    "--relationship-minimum-score",
+                    "0.81",
+                ]
+            )
+        with contextlib.redirect_stdout(list_output):
+            list_exit_code = main(["--profile", str(profile_path), "list"])
+
+        self.assertEqual(create_exit_code, 0)
+        self.assertEqual(list_exit_code, 0)
+        self.assertTrue(profile_path.is_file())
+        self.assertIn("Created private runtime profile", create_output.getvalue())
+        self.assertIn(f"{self.document_id}: operations.md", list_output.getvalue())
+        self.assertNotIn(str(self.root), list_output.getvalue())
+
+    def test_sources_preview_and_import_use_an_explicit_connected_root(self) -> None:
+        source_root = self.root / "Desktop"
+        source_root.mkdir()
+        source_note = source_root / "brief.md"
+        source_note.write_text("# Brief\n\nThe delivery is on Friday.\n", encoding="utf-8")
+        preview_output = io.StringIO()
+        import_output = io.StringIO()
+
+        with contextlib.redirect_stdout(preview_output):
+            preview_exit_code = main(
+                ["--database", str(self.database), "--source-root", str(source_root), "sources", "preview"]
+            )
+        with contextlib.redirect_stdout(import_output):
+            import_exit_code = main(
+                ["--database", str(self.database), "--source-root", str(source_root), "sources", "import"]
+            )
+
+        self.assertEqual(preview_exit_code, 0)
+        self.assertEqual(import_exit_code, 0)
+        self.assertIn("Desktop: 1 new supported files", preview_output.getvalue())
+        self.assertIn("brief.md (Desktop)", preview_output.getvalue())
+        self.assertIn("Imported: 1 files.", import_output.getvalue())
+        self.assertNotIn(str(source_root), preview_output.getvalue())
+
     def test_search_uses_citation_first_output(self) -> None:
         output = io.StringIO()
 

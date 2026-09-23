@@ -66,14 +66,18 @@ When a source changed outside Hearth, `health` asks you to run an explicit `rein
 `organize preview` and `organize apply` support one explicit same-volume rename or move at a time, preserving the document record and citations without overwriting files.
 `relink preview` and `relink apply` recover an unavailable source binding only when the exact local replacement you select matches the stored source fingerprint.
 Relinking does not search your filesystem or move, copy, delete, re-extract, or reindex a file.
-Bulk actions, deletion, and cross-volume moves are intentionally unsupported in v1.
+`sources preview` scans the profile’s connected folders for supported files without extracting text or changing the collection.
+`sources import` imports the currently eligible files after that explicit command, while leaving each original file in place.
+Source watching, deletion, and cross-volume moves are intentionally unsupported in v1.
 
 ## Local web interface
 
 `web` opens a visual local interface on `127.0.0.1` and prints a random per-launch local URL.
 Use `web --no-open` when you want to copy that URL into a browser manually.
+For repeatable local model and index settings, create a private runtime profile with `hearth profile create` and launch with `hearth --profile /path/to/hearth.json web`.
 The UI uses a native macOS chooser to import an original file in place, so it does not create a browser-upload copy or managed library.
-It provides health, metadata-only inspection, evidence-bound search, and preview-then-apply controls for rename, move, reindex, relink, and collection-record removal.
+It provides connected-folder review, health, metadata-only inspection, evidence-bound search, a semantic-neighborhood map when a local embedding index is configured, and preview-then-apply controls for semantic-index rebuild, rename, move, reindex, relink, and collection-record removal.
+The map is an overview of evidence-backed relationships, not a visual list of every imported source.
 Removing a collection record never deletes its source file.
 
 OCR fallback uses `--ocr-output-directory` as private local scratch space and deletes each derived OCR PDF after text extraction by default.
@@ -114,6 +118,7 @@ An optional host-side MLX benchmark is documented in [benchmarking](docs/benchma
 
 ## Project documentation
 
+- [Domain glossary](CONTEXT.md)
 - [Architecture](docs/architecture.md)
 - [Privacy](docs/privacy.md)
 - [Local inference](docs/local-inference.md)

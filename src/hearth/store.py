@@ -3,6 +3,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
+from .chunking import CHUNKING_VERSION
 from .domain import (
     CollectionHealth,
     Chunk,
@@ -41,9 +42,10 @@ class SQLiteStore:
             self._connection.execute("DELETE FROM documents WHERE canonical_path = ?", (str(path),))
             document_id = self._connection.execute(
                 """INSERT INTO documents
-                (canonical_path, display_name, source_fingerprint, source_size, source_mtime_ns)
-                VALUES (?, ?, ?, ?, ?)""",
-                (str(path), path.name, source_fingerprint, source_size, source_mtime_ns),
+                (canonical_path, display_name, source_fingerprint, source_size, source_mtime_ns,
+                 chunking_version)
+                VALUES (?, ?, ?, ?, ?, ?)""",
+                (str(path), path.name, source_fingerprint, source_size, source_mtime_ns, CHUNKING_VERSION),
             ).lastrowid
             for page in pages:
                 page_id = self._connection.execute(
@@ -111,9 +113,18 @@ class SQLiteStore:
             unavailable_source_count=sum(item.status == "source unavailable" for item in source_attention),
             changed_source_count=sum(item.status == "source changed since import" for item in source_attention),
             baseline_reindex_count=sum(item.status == "source needs baseline reindex" for item in source_attention),
+            stale_chunking_count=sum(item.status == "chunking outdated" for item in source_attention),
             semantic_index_status=semantic_index_status,
             source_attention=source_attention,
         )
+
+    def stale_chunking_document_ids(self) -> set[int]:
+        """Documents whose stored chunks predate the current chunker (ADR-0018)."""
+        rows = self._connection.execute(
+            "SELECT id FROM documents WHERE chunking_version IS NULL OR chunking_version != ?",
+            (CHUNKING_VERSION,),
+        ).fetchall()
+        return {row["id"] for row in rows}
 
     def source_records(self) -> list[tuple[int, str, Path, str | None, int | None, int | None]]:
         rows = self._connection.execute(
@@ -305,6 +316,7 @@ class SQLiteStore:
                 ("source_fingerprint", "TEXT"),
                 ("source_size", "INTEGER"),
                 ("source_mtime_ns", "INTEGER"),
+                ("chunking_version", "TEXT"),
             ):
                 if column not in document_columns:
                     self._connection.execute(f"ALTER TABLE documents ADD COLUMN {column} {definition}")

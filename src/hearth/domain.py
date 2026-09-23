@@ -17,6 +17,33 @@ class SourceRelinkError(ValueError):
 
 
 @dataclass(frozen=True)
+class SourceRoot:
+    """One profile-approved directory available for an explicit source scan."""
+
+    name: str
+    path: Path
+    status: str
+    candidate_count: int
+    imported_count: int
+
+
+@dataclass(frozen=True)
+class SourceCandidate:
+    """One supported file discovered under an approved source root."""
+
+    path: Path
+    source_root: str
+
+
+@dataclass(frozen=True)
+class SourceImportPlan:
+    """A reviewable, non-mutating discovery result for connected source roots."""
+
+    roots: tuple[SourceRoot, ...]
+    candidates: tuple[SourceCandidate, ...]
+
+
+@dataclass(frozen=True)
 class ExtractedPage:
     page_number: int
     text: str
@@ -62,6 +89,18 @@ class ImportSummary:
 
 
 @dataclass(frozen=True)
+class SourceImportFailure:
+    name: str
+    message: str
+
+
+@dataclass(frozen=True)
+class SourceImportResult:
+    imported: tuple[ImportSummary, ...]
+    failures: tuple[SourceImportFailure, ...]
+
+
+@dataclass(frozen=True)
 class CollectionHealth:
     document_count: int
     page_count: int
@@ -70,6 +109,7 @@ class CollectionHealth:
     unavailable_source_count: int
     changed_source_count: int
     baseline_reindex_count: int
+    stale_chunking_count: int
     semantic_index_status: str
     source_attention: tuple["SourceAttention", ...]
 
@@ -121,6 +161,15 @@ class DocumentInspection:
 @dataclass(frozen=True)
 class Evidence:
     chunk: Chunk
+    score: float
+
+
+@dataclass(frozen=True)
+class DocumentRelationship:
+    """One explainable cross-document similarity derived from local embeddings."""
+
+    left_chunk: Chunk
+    right_chunk: Chunk
     score: float
 
 

@@ -50,3 +50,10 @@ Add tags, collections, bulk operations, deletion, cross-volume moves, or undo hi
 The current `health` command diagnoses source changes only when the user runs it and never repairs them.
 Consider a local-only watcher only if regular manual health checks become inadequate.
 Any watcher must preserve explicit reindexing, avoid copying sources into a managed library, and define consent, resource use, and notification behavior in a new ADR.
+
+## 8. Measure and improve semantic-index rebuild throughput
+
+The v1 implementation now runs semantic rebuilds as cancellable background jobs and preserves the previous active index on interruption.
+Use only synthetic or public benchmarks to measure elapsed time, peak memory, and responsiveness for larger collections.
+Consider honest completion estimates, resource throttling, and resumable rebuilds only if they preserve local-only processing and atomic index activation.
+The observed constraint and the prepared external issue draft are recorded in [the semantic-index rebuild responsiveness roadblock note](semantic-index-rebuild-responsiveness.md).

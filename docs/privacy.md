@@ -36,6 +36,9 @@ It validates the replacement locally and does not scan unrelated directories or 
 The `health` command reports source attention by document ID and display name without printing canonical paths or stored document text.
 The web interface uses a native macOS chooser for imports rather than a browser upload, so selected original files remain in place and their paths stay inside the local backend.
 The interface displays canonical paths only in a user-requested organization or relink preview.
+Connected source roots are private runtime configuration that may include absolute paths.
+The source-root review scans only folders named in that profile and sends the browser folder names, availability, counts, and candidate file names without canonical source paths.
+It does not extract file text until the user approves the reviewed import plan.
 
 ## Release verification
 

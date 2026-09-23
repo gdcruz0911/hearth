@@ -17,7 +17,8 @@ related_decisions:
   - ADR-0005
 related_commits: []
 related_issues: []
-related_design_notes: []
+related_design_notes:
+  - docs/semantic-index-rebuild-responsiveness.md
 ---
 
 # ADR-0008: Local embedding and flat vector index
@@ -75,4 +76,5 @@ Changing the embedding model, pooling, normalization, chunking version, or index
 ## Related decisions, commits, issues, and design notes
 
 Related decisions: ADR-0002, ADR-0004, and ADR-0005.
-No related commits, issues, or design notes exist yet.
+No related commits or issues exist yet.
+Related design note: [Semantic index rebuild responsiveness roadblock](../semantic-index-rebuild-responsiveness.md).

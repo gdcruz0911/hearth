@@ -50,6 +50,69 @@ The flat index stores only derived vectors and chunk IDs outside SQLite.
 It validates model fingerprint, dimension, normalization, chunking version, and ordered chunk IDs before search.
 It rebuilds on document import, removal, and reindexing rather than silently using stale vectors.
 
+## Runtime profile
+
+A private runtime profile makes the normal command short while keeping model and database paths outside the repository.
+Create it once at a location that is not committed to Git.
+
+```bash
+hearth profile create "$HOME/Library/Application Support/Hearth/hearth.json" \
+  --database "$HOME/Library/Application Support/Hearth/hearth.sqlite" \
+  --embedding-model "$HOME/Library/Application Support/Hearth/models/qwen3-embedding-0.6b-4bit-dwq" \
+  --index-directory "$HOME/Library/Application Support/Hearth/indexes/main" \
+  --relationship-minimum-score 0.72
+```
+
+Then start Hearth with that profile.
+
+```bash
+hearth --profile "$HOME/Library/Application Support/Hearth/hearth.json" web
+```
+
+The profile is JSON, contains private runtime paths, and is intentionally not created inside the repository.
+Its database, local model, derived-index, OCR, generator, reranker, relationship-score, and connected-source-root settings are supported.
+An explicit command-line option overrides the matching profile setting for a single run.
+The relationship score is a cosine-similarity cutoff for map links, not a probability or factual-confidence value.
+
+## Semantic map for an existing collection
+
+If Hearth already has imported sources but the map says that the local index is not configured, restart the web app with the same database plus an existing local embedding model and private index directory.
+
+```bash
+.venv/bin/python -m hearth.cli \
+  --database "$HOME/Library/Application Support/Hearth/hearth.sqlite" \
+  --embedding-model "$HOME/Library/Application Support/Hearth/models/qwen3-embedding-0.6b-4bit-dwq" \
+  --index-directory "$HOME/Library/Application Support/Hearth/indexes/main" \
+  web
+```
+
+Then use the map's **Rebuild the semantic map** preview and apply it.
+The action derives local vectors from evidence Hearth has already imported.
+It does not modify or copy the original files.
+The web interface runs this rebuild in the background in small batches, shows completed evidence units, and offers a cancel control.
+Cancelling discards only the incomplete derived index and keeps any previously active index unchanged.
+The overview renders only explainable links above the configured relationship threshold, and selecting a neighborhood reveals its source documents and the evidence for each link.
+
+## Connected folders
+
+Profiles connect Desktop, Documents, and Downloads by default.
+Hearth does not scan them automatically.
+Use the browser’s Review folders control or the CLI to inspect the eligible Markdown, text, and PDF files before importing them into the active knowledge base.
+
+```bash
+hearth --profile "$HOME/Library/Application Support/Hearth/hearth.json" sources preview
+hearth --profile "$HOME/Library/Application Support/Hearth/hearth.json" sources import
+```
+
+To use another folder instead of the defaults, repeat `--source-root` when creating the profile.
+
+```bash
+hearth profile create "$HOME/Library/Application Support/Hearth/hearth.json" \
+  --database "$HOME/Library/Application Support/Hearth/hearth.sqlite" \
+  --source-root "$HOME/Documents" \
+  --source-root "$HOME/Projects"
+```
+
 ## Experimental reranking
 
 Pass a pre-provisioned local reranker directory to score the retrieved candidates locally before Hearth selects its evidence bundle.

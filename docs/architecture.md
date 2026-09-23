@@ -18,15 +18,19 @@ Local note or PDF
 `TextNoteExtractor` imports UTF-8 text and Markdown files as one logical page.
 `PopplerPdfExtractor` extracts digital PDF text one page at a time through local Poppler commands.
 `OCRmyPDFFallback` is an optional local extension that fills only pages with no native text and deletes its derived PDF after extraction unless retention is explicitly configured.
-`chunk_page` preserves page boundaries and stores character offsets for each chunk.
+`chunk_page` splits a page on Markdown structure and sentence boundaries, bounds every chunk, preserves page boundaries, and stores character offsets for each chunk.
+`SQLiteStore` records the chunking version per document so a chunker change is reported as attention rather than applied silently.
 `SQLiteStore` is the authoritative store for document identities, page metadata, chunks, source fingerprints, and provenance.
 `CollectionHealth` summarizes local collection counts, OCR-review needs, source freshness attention, and derived-index state without including stored document text or canonical source paths.
 `HearthService` can preview or apply one explicit local rename or same-volume move while updating the existing document source binding and preserving chunks and citations.
 `HearthService` can preview or apply an explicit relink for an unavailable source when a user-selected replacement has the same stored SHA-256 fingerprint.
+`HearthService` can discover supported files under profile-approved source roots and import a separately approved plan into the existing knowledge base.
 `HearthWebServer` binds the existing service to `127.0.0.1` only, scopes requests to a random per-launch capability URL, and serves packaged first-party browser assets without a separate API process.
 `HearthWebApplication` keeps native chooser paths inside the local backend for import and document-ID actions, except when an explicit organization or relink preview displays the selected paths for review.
 `HashingVectorIndex` is an in-memory deterministic retrieval scaffold used when no semantic index is configured.
 `FlatVectorIndex` stores derived normalized float32 vectors and chunk IDs in a versioned local index directory when a semantic index is configured.
+It derives document relationships from mutually nearest cross-document chunk pairs, so each edge is admitted and displayed by the same score.
+It builds replacement indexes in small cancellable batches and activates a completed version atomically, leaving the previous active index intact until then.
 `IdentityReranker` preserves candidate order when no local reranker is configured.
 `MLXLocalReranker` scores already-retrieved query-document pairs locally and reorders the evidence bundle without changing citation or claim-validation rules.
 `EvidenceAnswerer` returns retrieved evidence directly when no generator is configured.
@@ -45,6 +49,7 @@ The `organize` command displays an explicitly selected source and target only in
 The `relink` command displays a previous unavailable path and user-selected replacement only in the local interactive command, then updates the source binding without moving files when their contents match.
 The local web interface uses the same service methods and does not create browser uploads, managed document copies, a second database, or a separate retrieval index.
 It renders canonical paths only inside a requested organization or relink preview.
+The connected-source preview sends root display names, counts, and candidate file names to the browser without sending canonical source paths.
 OCR-derived PDFs are transient private scratch artifacts by default and remain only when a user explicitly opts in to retention for inspection.
 The deterministic hashed index is derived in memory when no semantic index is configured.
 When configured, `FlatVectorIndex` stores its derived vectors and manifest in a local versioned directory that can be rebuilt from source documents and SQLite provenance.
@@ -63,6 +68,11 @@ Explicit local source-file organization is defined in [ADR-0012](decisions/ADR-0
 Source freshness attention is defined in [ADR-0013](decisions/ADR-0013-source-freshness-attention.md).
 Explicit source relinking is defined in [ADR-0014](decisions/ADR-0014-explicit-source-relink.md).
 The loopback local web interface is defined in [ADR-0015](decisions/ADR-0015-loopback-local-web-interface.md).
+Explicit connected source roots are defined in [ADR-0016](decisions/ADR-0016-explicit-connected-source-roots.md).
+Chunk-level document relationships and the NumPy dependency are defined in [ADR-0017](decisions/ADR-0017-numpy-and-chunk-level-relationships.md).
+Structure-aware chunking and its migration are defined in [ADR-0018](decisions/ADR-0018-structure-aware-chunking-and-migration.md).
+Semantic retrieval as the default path is defined in [ADR-0019](decisions/ADR-0019-semantic-retrieval-as-default.md).
+The model provisioning network boundary is defined in [ADR-0020](decisions/ADR-0020-model-provisioning-network-boundary.md).
 
 ## Related decisions
 
@@ -79,3 +89,8 @@ The loopback local web interface is defined in [ADR-0015](decisions/ADR-0015-loo
 - [ADR-0013: Source freshness attention](decisions/ADR-0013-source-freshness-attention.md)
 - [ADR-0014: Explicit source relink](decisions/ADR-0014-explicit-source-relink.md)
 - [ADR-0015: Loopback local web interface](decisions/ADR-0015-loopback-local-web-interface.md)
+- [ADR-0016: Explicit connected source roots](decisions/ADR-0016-explicit-connected-source-roots.md)
+- [ADR-0017: NumPy dependency and chunk-level document relationships](decisions/ADR-0017-numpy-and-chunk-level-relationships.md)
+- [ADR-0018: Structure-aware chunking and chunk version migration](decisions/ADR-0018-structure-aware-chunking-and-migration.md)
+- [ADR-0019: Semantic retrieval as the default path](decisions/ADR-0019-semantic-retrieval-as-default.md)
+- [ADR-0020: Model provisioning network boundary](decisions/ADR-0020-model-provisioning-network-boundary.md)
