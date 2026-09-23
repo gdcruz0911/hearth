@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "hearth"
 version = "0.1.0"
-description = "Local-first, evidence-bound document chat foundation."
+description = "Local-first, evidence-bound personal knowledge hub."
 requires-python = ">=3.11"
 dependencies = ["numpy>=1.26,<3"]
 

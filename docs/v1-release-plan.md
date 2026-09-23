@@ -2,7 +2,8 @@
 
 ## Purpose
 
-Hearth v1 is a single-user, local-first document chat application.
+Hearth v1 is a single-user, local-first document search application.
+Its direction was re-scoped on 2026-09-21 to a personal knowledge hub; see [CONTEXT.md](../CONTEXT.md).
 The command-line foundation is complete, and the local web interface is the final product layer.
 The interface is a control surface over `HearthService`, not a second storage system or a cloud application.
 

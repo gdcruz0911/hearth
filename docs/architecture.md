@@ -32,11 +32,8 @@ Local note or PDF
 It derives document relationships from mutually nearest cross-document chunk pairs, so each edge is admitted and displayed by the same score.
 It builds replacement indexes in small cancellable batches and activates a completed version atomically, leaving the previous active index intact until then.
 `IdentityReranker` preserves candidate order when no local reranker is configured.
-`MLXLocalReranker` scores already-retrieved query-document pairs locally and reorders the evidence bundle without changing citation or claim-validation rules.
-`EvidenceAnswerer` returns retrieved evidence directly when no generator is configured.
-`StructuredGeneratorAnswerer` accepts only strict JSON from an opt-in local generator, resolves citation metadata from the approved evidence bundle, and rejects generated factual text that is not a normalized contiguous span of a cited quote.
-`MLXLocalGenerator` loads a pre-provisioned local model directory and does not accept a model repository identifier.
-`StructuredClaimSupportChecker` is an evaluation-only local adapter that scores a supplied claim against supplied evidence and is not connected to the answer path.
+`MLXLocalReranker` scores already-retrieved query-document pairs locally and reorders the evidence bundle without changing citation rules.
+`EvidenceAnswerer` returns retrieved evidence verbatim with citations, or abstains.
 `validate_answer` rejects a non-abstained answer whose citations are absent or reference chunks outside the approved evidence bundle.
 `has_lexical_support` adds the ADR-0009 fail-closed check that a supported answer's cited evidence shares a meaningful term with the question.
 
@@ -59,7 +56,7 @@ When configured, `FlatVectorIndex` stores its derived vectors and manifest in a 
 The application must preserve document, page, section, extraction method, OCR confidence when available, and chunk identity through citation rendering.
 Local adapters must not introduce cloud fallback, telemetry, or document transmission.
 Generated answers must follow the evidence-bound contract in [ADR-0006](decisions/ADR-0006-evidence-bound-answer-contract.md).
-The structured generator response protocol is defined in [ADR-0007](decisions/ADR-0007-structured-local-generator-response.md).
+Evidence-only answers, which removed the generator, are defined in [ADR-0021](decisions/ADR-0021-evidence-only-answers.md).
 The semantic embedding and index format are defined in [ADR-0008](decisions/ADR-0008-local-embedding-and-flat-vector-index.md).
 The lexical evidence-sufficiency gate is defined in [ADR-0009](decisions/ADR-0009-lexical-evidence-sufficiency-gate.md).
 The verbatim evidence answer contract is defined in [ADR-0010](decisions/ADR-0010-verbatim-evidence-answer-contract.md).
@@ -94,3 +91,4 @@ The model provisioning network boundary is defined in [ADR-0020](decisions/ADR-0
 - [ADR-0018: Structure-aware chunking and chunk version migration](decisions/ADR-0018-structure-aware-chunking-and-migration.md)
 - [ADR-0019: Semantic retrieval as the default path](decisions/ADR-0019-semantic-retrieval-as-default.md)
 - [ADR-0020: Model provisioning network boundary](decisions/ADR-0020-model-provisioning-network-boundary.md)
+- [ADR-0021: Evidence-only answers](decisions/ADR-0021-evidence-only-answers.md)

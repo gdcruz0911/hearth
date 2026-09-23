@@ -3,8 +3,6 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from .answering import LocalInferenceError, MLXLocalGenerator, StructuredGeneratorAnswerer
-from .claim_support import StructuredClaimSupportChecker
 from .domain import (
     CollectionHealth,
     DocumentInspection,
@@ -21,9 +19,7 @@ from .domain import (
 from .embedding import EmbeddingError, FlatVectorIndex, IndexError, MLXEmbedder
 from .evaluation import (
     EvaluationCorpusError,
-    evaluate_claim_support_corpus,
     evaluate_corpus,
-    load_claim_support_corpus,
     load_evaluation_corpus,
 )
 from .retrieval import MLXLocalReranker, RerankerError
@@ -68,11 +64,6 @@ def main(argv: list[str] | None = None) -> int:
         "--retain-ocr-output",
         action="store_true",
         help="Keep OCR-derived PDFs in --ocr-output-directory for local inspection.",
-    )
-    parser.add_argument(
-        "--generator-model",
-        type=Path,
-        help="Pre-provisioned local MLX model directory. Enables generated answers and claim-support evaluation.",
     )
     parser.add_argument(
         "--embedding-model",
@@ -124,10 +115,6 @@ def main(argv: list[str] | None = None) -> int:
     web.add_argument("--no-open", action="store_true", help="Do not open the local interface in the default browser.")
     evaluator = subcommands.add_parser("evaluate", help="Run a local synthetic or public evaluation corpus.")
     evaluator.add_argument("corpus", type=Path)
-    claim_evaluator = subcommands.add_parser(
-        "evaluate-claim-support", help="Run an experimental local claim-support corpus."
-    )
-    claim_evaluator.add_argument("corpus", type=Path)
     profile = subcommands.add_parser("profile", help="Create one private runtime profile for repeatable Hearth commands.")
     profile_commands = profile.add_subparsers(dest="profile_command", required=True)
     profile_create = profile_commands.add_parser("create", help="Create a new profile without overwriting an existing file.")
@@ -135,7 +122,6 @@ def main(argv: list[str] | None = None) -> int:
     profile_create.add_argument("--database", type=Path, required=True)
     profile_create.add_argument("--embedding-model", type=Path)
     profile_create.add_argument("--index-directory", type=Path)
-    profile_create.add_argument("--generator-model", type=Path)
     profile_create.add_argument("--reranker-model", type=Path)
     profile_create.add_argument("--ocr-output-directory", type=Path)
     profile_create.add_argument("--retain-ocr-output", action="store_true")
@@ -159,7 +145,6 @@ def main(argv: list[str] | None = None) -> int:
                     database=args.database,
                     embedding_model=args.embedding_model,
                     index_directory=args.index_directory,
-                    generator_model=args.generator_model,
                     reranker_model=args.reranker_model,
                     ocr_output_directory=args.ocr_output_directory,
                     retain_ocr_output=args.retain_ocr_output,
@@ -179,7 +164,6 @@ def main(argv: list[str] | None = None) -> int:
     args.source_roots = tuple(args.source_root) if args.source_root else profile.source_roots
     args.embedding_model = args.embedding_model or profile.embedding_model
     args.index_directory = args.index_directory or profile.index_directory
-    args.generator_model = args.generator_model or profile.generator_model
     args.reranker_model = args.reranker_model or profile.reranker_model
     args.ocr_output_directory = args.ocr_output_directory or profile.ocr_output_directory
     args.retain_ocr_output = args.retain_ocr_output or profile.retain_ocr_output
@@ -192,12 +176,8 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--embedding-model and --index-directory must be provided together.")
     if args.retain_ocr_output and args.ocr_output_directory is None:
         parser.error("--retain-ocr-output requires --ocr-output-directory.")
-    if args.command == "evaluate-claim-support" and args.generator_model is None:
-        parser.error("evaluate-claim-support requires --generator-model.")
     service: HearthService | None = None
     try:
-        generator = MLXLocalGenerator(args.generator_model) if args.generator_model is not None else None
-        answerer = StructuredGeneratorAnswerer(generator) if generator is not None else None
         semantic_index = (
             FlatVectorIndex(args.index_directory, MLXEmbedder(args.embedding_model))
             if args.embedding_model is not None
@@ -206,7 +186,6 @@ def main(argv: list[str] | None = None) -> int:
         reranker = MLXLocalReranker(args.reranker_model) if args.reranker_model is not None else None
         service = HearthService(
             args.database,
-            answerer=answerer,
             reranker=reranker,
             semantic_index=semantic_index,
             ocr_output_directory=args.ocr_output_directory,
@@ -274,17 +253,6 @@ def main(argv: list[str] | None = None) -> int:
             passed_count = sum(outcome.passed for outcome in outcomes)
             print(f"Summary: {passed_count}/{len(outcomes)} cases passed.")
             return 0 if passed_count == len(outcomes) else 1
-        elif args.command == "evaluate-claim-support":
-            checker = StructuredClaimSupportChecker(generator)
-            outcomes = evaluate_claim_support_corpus(checker, load_claim_support_corpus(args.corpus))
-            for outcome in outcomes:
-                expected = "supported" if outcome.expected_supported else "unsupported"
-                received = "supported" if outcome.received_supported else "unsupported"
-                detail = "" if outcome.passed else f": {outcome.category}; expected {expected}, received {received}"
-                print(f"{outcome.case_id}: {'PASS' if outcome.passed else 'FAIL'}{detail}")
-            passed_count = sum(outcome.passed for outcome in outcomes)
-            print(f"Summary: {passed_count}/{len(outcomes)} cases passed.")
-            return 0 if passed_count == len(outcomes) else 1
         elif args.command == "search":
             answer = service.answer(args.question)
             _print_answer(answer)
@@ -294,7 +262,6 @@ def main(argv: list[str] | None = None) -> int:
         FileOrganizationError,
         ImportError,
         IndexError,
-        LocalInferenceError,
         RerankerError,
         RuntimeProfileError,
         SourceRelinkError,

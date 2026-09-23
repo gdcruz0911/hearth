@@ -20,7 +20,6 @@ class RuntimeProfile:
     database: Path | None = None
     embedding_model: Path | None = None
     index_directory: Path | None = None
-    generator_model: Path | None = None
     reranker_model: Path | None = None
     ocr_output_directory: Path | None = None
     retain_ocr_output: bool = False
@@ -33,11 +32,11 @@ _PATH_FIELDS = (
     "database",
     "embedding_model",
     "index_directory",
-    "generator_model",
     "reranker_model",
     "ocr_output_directory",
 )
-_FIELDS = {"format", *_PATH_FIELDS, "retain_ocr_output", "relationship_minimum_score", "source_roots"}
+# generator_model is accepted and ignored so profiles written before chat was removed still load.
+_FIELDS = {"format", *_PATH_FIELDS, "generator_model", "retain_ocr_output", "relationship_minimum_score", "source_roots"}
 
 
 def load_runtime_profile(path: Path) -> RuntimeProfile:

@@ -12,7 +12,7 @@ Each launch uses a random local capability URL and does not log that URL through
 
 This is not a claim that every operation associated with development is offline.
 Installing Python packages and downloading a model are explicit provisioning operations that can contact external registries.
-The optional benchmark itself uses a pre-provisioned filesystem model path and sets Hugging Face Hub offline mode, but that environment setting is not a whole-process network firewall.
+The optional MLX adapters use pre-provisioned filesystem model paths and set Hugging Face Hub offline mode, but that environment setting is not a whole-process network firewall.
 
 ## Source control boundary
 

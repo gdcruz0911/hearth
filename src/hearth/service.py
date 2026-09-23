@@ -5,7 +5,7 @@ import os
 from collections.abc import Callable
 from pathlib import Path
 
-from .answering import Answerer, EvidenceAnswerer, validate_answer
+from .answering import EvidenceAnswerer, validate_answer
 from .chunking import chunk_page
 from .domain import (
     Answer,
@@ -38,7 +38,6 @@ class HearthService:
         database_path: Path,
         pdf_extractor: PageExtractor | None = None,
         reranker: Reranker | None = None,
-        answerer: Answerer | None = None,
         semantic_index: FlatVectorIndex | None = None,
         ocr_output_directory: Path | None = None,
         retain_ocr_output: bool = False,
@@ -64,7 +63,7 @@ class HearthService:
             ),
         )
         self._reranker = reranker or IdentityReranker()
-        self._answerer = answerer or EvidenceAnswerer()
+        self._answerer = EvidenceAnswerer()
         self._semantic_index = semantic_index
         self._retain_ocr_output = retain_ocr_output
         self._relationship_minimum_score = relationship_minimum_score

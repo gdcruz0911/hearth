@@ -1,10 +1,10 @@
 ---
 id: ADR-0007
 title: Structured local generator response
-status: accepted
+status: superseded
 date: 2026-07-27
 supersedes: null
-superseded_by: null
+superseded_by: ADR-0021
 affected_components:
   - src/hearth/answering.py
   - src/hearth/service.py

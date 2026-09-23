@@ -1,10 +1,10 @@
 ---
 id: ADR-0010
 title: Verbatim evidence answer contract
-status: accepted
+status: superseded
 date: 2026-07-29
 supersedes: null
-superseded_by: null
+superseded_by: ADR-0021
 affected_components:
   - src/hearth/answering.py
   - structured generator prompt
