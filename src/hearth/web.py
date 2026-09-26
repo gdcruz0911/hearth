@@ -24,8 +24,6 @@ from .domain import (
     Chunk,
     DocumentRelationship,
     DocumentInspection,
-    FileOrganizationError,
-    FileOrganizationPlan,
     ImportError,
     ImportSummary,
     ImportedDocument,
@@ -33,8 +31,6 @@ from .domain import (
     SourceImportResult,
     SourceCandidate,
     SourceRoot,
-    SourceRelinkError,
-    SourceRelinkPlan,
 )
 from .service import HearthService
 
@@ -96,13 +92,11 @@ class HearthWebApplication:
         service: HearthService,
         capability_token: str,
         choose_file: Callable[[], Path] = None,
-        choose_directory: Callable[[], Path] = None,
         source_roots: tuple[Path, ...] = (),
     ):
         self._service = service
         self._capability_token = capability_token
         self._choose_file = choose_file or choose_local_file
-        self._choose_directory = choose_directory or choose_local_directory
         self._source_roots = source_roots
         self._pending_actions: dict[str, _PendingAction] = {}
         self._pending_source_imports: dict[str, _PendingSourceImport] = {}
@@ -126,7 +120,7 @@ class HearthWebApplication:
             return self._json_error(HTTPStatus.METHOD_NOT_ALLOWED, "This local endpoint does not allow that method.")
         except NativeChooserCancelled:
             return self._json_error(HTTPStatus.CONFLICT, "No local file or folder was selected.")
-        except (FileOrganizationError, ImportError, SourceRelinkError, WebRequestError) as exc:
+        except (ImportError, WebRequestError) as exc:
             return self._json_error(HTTPStatus.BAD_REQUEST, str(exc))
         except (OSError, ValueError):
             return self._json_error(HTTPStatus.BAD_REQUEST, "The requested local action could not be completed.")
@@ -200,9 +194,7 @@ class HearthWebApplication:
             parts = prefix.split("/")
             if len(parts) != 5 or parts[:2] != ["api", "documents"] or parts[3] != "actions":
                 return self._not_found()
-            document_id = _document_id(parts[2])
-            payload = _json_body(body)
-            return self._preview(document_id, parts[4], payload)
+            return self._preview(_document_id(parts[2]), parts[4])
         if relative_path.startswith("api/previews/") and relative_path.endswith("/apply"):
             preview_id = relative_path.removeprefix("api/previews/").removesuffix("/apply")
             if not preview_id or "/" in preview_id:
@@ -210,7 +202,7 @@ class HearthWebApplication:
             return self._apply(preview_id)
         return self._not_found()
 
-    def _preview(self, document_id: int, action: str, payload: Mapping[str, Any]) -> _WebResponse:
+    def _preview(self, document_id: int, action: str) -> _WebResponse:
         self._discard_expired_previews()
         if action == "reindex":
             document = self._service.plan_reindex_document(document_id)
@@ -236,26 +228,6 @@ class HearthWebApplication:
                     }
                 }
             )
-        if action == "organize":
-            operation = payload.get("operation")
-            if operation == "rename":
-                rename = payload.get("rename")
-                if not isinstance(rename, str):
-                    raise WebRequestError("Enter one new file name before previewing a rename.")
-                plan = self._service.plan_organization(document_id, rename=rename)
-                arguments = {"rename": rename}
-            elif operation == "move":
-                move_to = self._choose_directory()
-                plan = self._service.plan_organization(document_id, move_to=move_to)
-                arguments = {"move_to": str(move_to)}
-            else:
-                raise WebRequestError("Choose either a rename or a move.")
-            preview = self._create_preview(action, document_id, arguments)
-            return self._json_response({"preview": {**preview, **_organization_plan_payload(plan)}})
-        if action == "relink":
-            plan = self._service.plan_relink(document_id, self._choose_file())
-            preview = self._create_preview(action, document_id, {"replacement_path": str(plan.replacement_source_path)})
-            return self._json_response({"preview": {**preview, **_relink_plan_payload(plan)}})
         return self._not_found()
 
     def _apply(self, preview_id: str) -> _WebResponse:
@@ -289,17 +261,6 @@ class HearthWebApplication:
                     }
                 }
             )
-        if pending.action == "organize":
-            if "rename" in pending.arguments:
-                plan = self._service.apply_organization(pending.document_id, rename=pending.arguments["rename"])
-            else:
-                plan = self._service.apply_organization(
-                    pending.document_id, move_to=Path(pending.arguments["move_to"])
-                )
-            return self._json_response({"applied": {"action": "organize", **_organization_plan_payload(plan)}})
-        if pending.action == "relink":
-            plan = self._service.apply_relink(pending.document_id, Path(pending.arguments["replacement_path"]))
-            return self._json_response({"applied": {"action": "relink", **_relink_plan_payload(plan)}})
         return self._not_found()
 
     def _semantic_index_preview(self) -> _WebResponse:
@@ -492,12 +453,11 @@ class HearthWebServer:
         *,
         port: int,
         choose_file: Callable[[], Path] = None,
-        choose_directory: Callable[[], Path] = None,
         source_roots: tuple[Path, ...] = (),
         browser_opener: Callable[[str], bool] = webbrowser.open,
     ):
         token = secrets.token_urlsafe(32)
-        self._application = HearthWebApplication(service, token, choose_file, choose_directory, source_roots)
+        self._application = HearthWebApplication(service, token, choose_file, source_roots)
         self._browser_opener = browser_opener
         self._http_server = _LoopbackHTTPServer(("127.0.0.1", port), _handler_type(self._application))
         self._http_server.timeout = 0.5
@@ -527,12 +487,6 @@ class HearthWebServer:
 def choose_local_file() -> Path:
     return _choose_with_osascript(
         'POSIX path of (choose file with prompt "Choose a local document to import into Hearth")'
-    )
-
-
-def choose_local_directory() -> Path:
-    return _choose_with_osascript(
-        'POSIX path of (choose folder with prompt "Choose a local destination folder")'
     )
 
 
@@ -839,24 +793,4 @@ def _answer_payload(answer: Answer) -> dict[str, Any]:
             }
             for citation in answer.citations
         ],
-    }
-
-
-def _organization_plan_payload(plan: FileOrganizationPlan) -> dict[str, Any]:
-    return {
-        "document": _document_payload(plan.document),
-        "operation": plan.operation,
-        "source_path": str(plan.source_path),
-        "target_path": str(plan.target_path),
-        "message": "No changes have been made. Apply this exact preview to continue.",
-    }
-
-
-def _relink_plan_payload(plan: SourceRelinkPlan) -> dict[str, Any]:
-    return {
-        "document": _document_payload(plan.document),
-        "operation": "relink",
-        "previous_source_path": str(plan.previous_source_path),
-        "replacement_source_path": str(plan.replacement_source_path),
-        "message": "No changes have been made. Apply this exact preview to continue.",
     }

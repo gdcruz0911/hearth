@@ -6,15 +6,11 @@ from pathlib import Path
 from .domain import (
     CollectionHealth,
     DocumentInspection,
-    FileOrganizationError,
-    FileOrganizationPlan,
     ImportedDocument,
     ImportError,
     ImportSummary,
     SourceImportPlan,
     SourceImportResult,
-    SourceRelinkError,
-    SourceRelinkPlan,
 )
 from .embedding import EmbeddingError, FlatVectorIndex, IndexError, MLXEmbedder
 from .evaluation import (
@@ -36,13 +32,13 @@ from .web import HearthWebServer
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Local-only, evidence-bound document chat.",
+        description="Local-only, evidence-bound knowledge hub.",
         epilog=(
             "Common workflow:\n"
             "  import <local-file>  Add one note or PDF.\n"
             "  health               Check collection attention items.\n"
             "  search <question>    Answer from cited evidence.\n"
-            "  list                 Find document IDs for inspect, organize, or relink.\n"
+            "  list                 Find document IDs to inspect.\n"
             "Run a command with --help to see its arguments."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -98,16 +94,6 @@ def main(argv: list[str] | None = None) -> int:
     subcommands.add_parser("health", help="Summarize private collection health without document text or source paths.")
     inspector = subcommands.add_parser("inspect", help="Inspect one document's local provenance metadata.")
     inspector.add_argument("document_id", type=int)
-    organizer = subcommands.add_parser("organize", help="Preview or apply one explicit local file move or rename.")
-    organizer.add_argument("action", choices=("preview", "apply"))
-    organizer.add_argument("document_id", type=int)
-    organization_target = organizer.add_mutually_exclusive_group(required=True)
-    organization_target.add_argument("--move-to", type=Path, help="Existing local directory to receive the file.")
-    organization_target.add_argument("--rename", help="New file name that preserves the existing extension.")
-    relinker = subcommands.add_parser("relink", help="Preview or apply an explicit source binding for an unavailable document.")
-    relinker.add_argument("action", choices=("preview", "apply"))
-    relinker.add_argument("document_id", type=int)
-    relinker.add_argument("replacement_path", type=Path, help="Existing local file with identical imported contents.")
     sources = subcommands.add_parser("sources", help="Preview or import supported files from connected local folders.")
     sources.add_argument("action", choices=("preview", "import"))
     web = subcommands.add_parser("web", help="Run the local Hearth web interface on this Mac only.")
@@ -213,20 +199,6 @@ def main(argv: list[str] | None = None) -> int:
                 print("Next: run list to review imported documents and their IDs.")
                 return 1
             _print_document_inspection(inspection)
-        elif args.command == "organize":
-            plan = service.plan_organization(args.document_id, move_to=args.move_to, rename=args.rename)
-            if args.action == "preview":
-                _print_organization_preview(plan)
-            else:
-                plan = service.apply_organization(args.document_id, move_to=args.move_to, rename=args.rename)
-                _print_organization_applied(plan)
-        elif args.command == "relink":
-            plan = service.plan_relink(args.document_id, args.replacement_path)
-            if args.action == "preview":
-                _print_relink_preview(plan)
-            else:
-                plan = service.apply_relink(args.document_id, args.replacement_path)
-                _print_relink_applied(plan)
         elif args.command == "sources":
             plan = service.plan_source_import(args.source_roots)
             if args.action == "preview":
@@ -259,12 +231,10 @@ def main(argv: list[str] | None = None) -> int:
     except (
         EmbeddingError,
         EvaluationCorpusError,
-        FileOrganizationError,
         ImportError,
         IndexError,
         RerankerError,
         RuntimeProfileError,
-        SourceRelinkError,
     ) as exc:
         parser.error(str(exc))
     finally:
@@ -303,7 +273,7 @@ def _print_documents(documents: list[ImportedDocument]) -> None:
             f"{document.id}: {document.name} "
             f"(pages: {document.page_count}, chunks: {document.chunk_count}, OCR pages: {document.ocr_page_count})"
         )
-    print("Next: inspect <document-id>, organize preview <document-id>, relink an unavailable source, or search.")
+    print("Next: inspect <document-id>, or search.")
 
 
 def _print_import_summary(action: str, summary: ImportSummary) -> None:
@@ -360,8 +330,8 @@ def _print_collection_health(health: CollectionHealth) -> None:
             print(f"- Document {attention.document_id}: {attention.document_name} - {attention.status}")
             if attention.status == "source unavailable":
                 print(
-                    "  Next: restore the source file, relink it with "
-                    "relink preview <document-id> <replacement-path>, or remove its stale collection record."
+                    "  Next: restore the source file, or remove its stale collection record "
+                    "and import the file from its new location."
                 )
             elif attention.status == "chunking outdated":
                 print(
@@ -376,33 +346,6 @@ def _print_collection_health(health: CollectionHealth) -> None:
         print("Next: reindex the affected source document before searching semantically.")
     if not (health.ocr_page_count or health.source_attention or health.semantic_index_status == "needs reindex"):
         print("Next: import a document, or search the current collection.")
-
-
-def _print_organization_preview(plan: FileOrganizationPlan) -> None:
-    print(f"Preview: {plan.operation} document {plan.document.id}: {plan.document.name}")
-    print(f"Source: {plan.source_path}")
-    print(f"Target: {plan.target_path}")
-    print("No changes made. Run the same command with organize apply to proceed.")
-
-
-def _print_organization_applied(plan: FileOrganizationPlan) -> None:
-    print(f"Applied: {plan.operation} document {plan.document.id}: {plan.source_path.name} -> {plan.target_path.name}")
-    print("Source binding updated. Existing extracted text and citation chunk IDs were preserved.")
-
-
-def _print_relink_preview(plan: SourceRelinkPlan) -> None:
-    print(f"Preview: relink document {plan.document.id}: {plan.document.name}")
-    print(f"Previous source (unavailable): {plan.previous_source_path}")
-    print(f"Replacement source: {plan.replacement_source_path}")
-    print("No changes made. Run the same command with relink apply to proceed.")
-
-
-def _print_relink_applied(plan: SourceRelinkPlan) -> None:
-    print(
-        f"Applied: relink document {plan.document.id}: "
-        f"{plan.previous_source_path.name} -> {plan.replacement_source_path.name}"
-    )
-    print("Source binding updated. Existing extracted text, citation chunk IDs, and semantic index were preserved.")
 
 
 def _print_answer(answer) -> None:

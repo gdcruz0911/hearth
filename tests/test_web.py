@@ -58,14 +58,12 @@ class HearthWebServerTests(unittest.TestCase):
         self.note = self.root / "facts.md"
         self.note.write_text("# Operations\n\nThe deployment owner is Ada.\n", encoding="utf-8")
         self.selected_file = self.note
-        self.selected_directory = self.root
         self.service = HearthService(self.database)
         self.opened_urls: list[str] = []
         self.server = HearthWebServer(
             self.service,
             port=0,
             choose_file=lambda: self.selected_file,
-            choose_directory=lambda: self.selected_directory,
             browser_opener=self.opened_urls.append,
         )
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
@@ -117,7 +115,6 @@ class HearthWebServerTests(unittest.TestCase):
             self.service,
             port=0,
             choose_file=lambda: self.selected_file,
-            choose_directory=lambda: self.selected_directory,
             browser_opener=self.opened_urls.append,
         )
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
@@ -149,7 +146,6 @@ class HearthWebServerTests(unittest.TestCase):
             self.service,
             port=0,
             choose_file=lambda: self.selected_file,
-            choose_directory=lambda: self.selected_directory,
             browser_opener=self.opened_urls.append,
         )
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
@@ -185,7 +181,6 @@ class HearthWebServerTests(unittest.TestCase):
             self.service,
             port=0,
             choose_file=lambda: self.selected_file,
-            choose_directory=lambda: self.selected_directory,
             browser_opener=self.opened_urls.append,
         )
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
@@ -243,7 +238,6 @@ class HearthWebServerTests(unittest.TestCase):
             self.service,
             port=0,
             choose_file=lambda: self.selected_file,
-            choose_directory=lambda: self.selected_directory,
             source_roots=(source_root,),
             browser_opener=self.opened_urls.append,
         )
@@ -267,59 +261,19 @@ class HearthWebServerTests(unittest.TestCase):
         self.assertEqual([item["document"]["name"] for item in applied["imported"]], ["brief.md"])
         self.assertEqual(self._json_request("GET", "api/documents")["documents"][0]["name"], "brief.md")
 
-    def test_previewed_rename_requires_one_apply_and_preserves_search(self) -> None:
+    def test_previewed_reindex_requires_one_apply_and_refreshes_search(self) -> None:
         self._json_request("POST", "api/import")
-        preview = self._json_request(
-            "POST",
-            "api/documents/1/actions/organize/preview",
-            {"operation": "rename", "rename": "owners.md"},
-        )["preview"]
+        self.note.write_text("# Operations\n\nThe deployment owner is Lin.\n", encoding="utf-8")
+        preview = self._json_request("POST", "api/documents/1/actions/reindex/preview")["preview"]
 
-        self.assertIn(str(self.note), preview["source_path"])
-        self.assertTrue(self.note.is_file())
         applied = self._json_request("POST", f"api/previews/{preview['id']}/apply")["applied"]
         reused_response, reused = self._request("POST", self._path(f"api/previews/{preview['id']}/apply"))
         answer = self._json_request("POST", "api/search", {"question": "Who is the deployment owner?"})
 
-        self.assertEqual(applied["action"], "organize")
-        self.assertFalse(self.note.exists())
-        self.assertTrue((self.root / "owners.md").is_file())
+        self.assertEqual(applied["action"], "reindex")
         self.assertEqual(reused_response.status, 409)
         self.assertIn(b"Preview the action again", reused)
-        self.assertEqual(answer["answer"]["citations"][0]["document_name"], "owners.md")
-
-    def test_native_selection_drives_move_relink_and_reindex_previews(self) -> None:
-        self._json_request("POST", "api/import")
-        destination = self.root / "organized"
-        destination.mkdir()
-        self.selected_directory = destination
-
-        move_preview = self._json_request(
-            "POST", "api/documents/1/actions/organize/preview", {"operation": "move"}
-        )["preview"]
-        self._json_request("POST", f"api/previews/{move_preview['id']}/apply")
-        moved_note = destination / "facts.md"
-        self.assertTrue(moved_note.is_file())
-
-        moved_note.write_text("# Operations\n\nThe deployment owner is Lin.\n", encoding="utf-8")
-        reindex_preview = self._json_request("POST", "api/documents/1/actions/reindex/preview")["preview"]
-        reindexed = self._json_request("POST", f"api/previews/{reindex_preview['id']}/apply")["applied"]
-        refreshed_answer = self._json_request("POST", "api/search", {"question": "Who is the deployment owner?"})
-        self.assertEqual(reindexed["action"], "reindex")
-        self.assertIn("Lin", refreshed_answer["answer"]["text"])
-
-        replacement = self.root / "relocated.md"
-        moved_note.rename(replacement)
-        self.selected_file = replacement
-        relink_preview = self._json_request("POST", "api/documents/1/actions/relink/preview")["preview"]
-        relinked = self._json_request("POST", f"api/previews/{relink_preview['id']}/apply")["applied"]
-
-        self.assertEqual(relinked["action"], "relink")
-        self.assertEqual(relinked["replacement_source_path"], str(replacement.resolve()))
-        self.assertEqual(
-            self._json_request("POST", "api/search", {"question": "Who is the deployment owner?"})["answer"]["citations"][0]["document_name"],
-            "relocated.md",
-        )
+        self.assertIn("Lin", answer["answer"]["text"])
 
     def test_previewed_record_removal_leaves_the_source_file_untouched(self) -> None:
         self._json_request("POST", "api/import")

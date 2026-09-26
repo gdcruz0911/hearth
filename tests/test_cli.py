@@ -49,7 +49,7 @@ class CollectionInspectionCliTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertIn(f"{self.document_id}: operations.md", output.getvalue())
         self.assertIn("pages: 1, chunks: 1, OCR pages: 0", output.getvalue())
-        self.assertIn("Next: inspect <document-id>, organize preview <document-id>, relink an unavailable source, or search.", output.getvalue())
+        self.assertIn("Next: inspect <document-id>, or search.", output.getvalue())
         self.assertNotIn("The deployment owner is Ada.", output.getvalue())
         self.assertNotIn(str(self.root), output.getvalue())
 
@@ -94,7 +94,7 @@ class CollectionInspectionCliTests(unittest.TestCase):
         self.assertIn("Source files unavailable: 1", output.getvalue())
         self.assertIn("Needs attention", output.getvalue())
         self.assertIn("Document 1: operations.md - source unavailable", output.getvalue())
-        self.assertIn("relink preview <document-id> <replacement-path>", output.getvalue())
+        self.assertIn("remove its stale collection record and import the file from its new location", output.getvalue())
         self.assertNotIn("operations-moved.md", output.getvalue())
         self.assertNotIn(str(self.root), output.getvalue())
 
@@ -236,7 +236,7 @@ class CollectionInspectionCliTests(unittest.TestCase):
 
         self.assertEqual(exit_context.exception.code, 0)
         self.assertIn("Common workflow:", output.getvalue())
-        self.assertIn("Find document IDs for inspect, organize, or relink.", output.getvalue())
+        self.assertIn("Find document IDs to inspect.", output.getvalue())
 
     def test_remove_missing_document_suggests_list(self) -> None:
         missing_path = self.root / "missing.md"

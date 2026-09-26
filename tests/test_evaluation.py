@@ -90,7 +90,7 @@ class EvaluationTests(unittest.TestCase):
         )
         self.assertTrue(all(outcome.passed for outcome in outcomes))
 
-    def test_related_unsupported_generator_question_retrieves_scaffold_evidence(self) -> None:
+    def test_scaffold_cites_related_evidence_for_an_unanswerable_question(self) -> None:
         self.service.import_document(str(self.document))
 
         answer = self.service.answer("What is the deployment owner's phone number?")
