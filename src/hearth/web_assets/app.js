@@ -447,14 +447,6 @@ function renderPreview(preview) {
   const card = make("section", "preview-card");
   const actionLabel = preview.action === "semantic-index" ? "semantic index" : preview.action;
   card.append(make("h3", "", `Preview ${actionLabel}`), make("p", "", preview.message));
-  if (preview.source_path) {
-    card.append(make("p", "preview-path", `Source: ${preview.source_path}`));
-    card.append(make("p", "preview-path", `Target: ${preview.target_path}`));
-  }
-  if (preview.previous_source_path) {
-    card.append(make("p", "preview-path", `Unavailable source: ${preview.previous_source_path}`));
-    card.append(make("p", "preview-path", `Replacement: ${preview.replacement_source_path}`));
-  }
   const actions = make("div", "preview-actions");
   actions.append(button("Apply this preview", "button-primary", async () => {
     try {
@@ -527,11 +519,8 @@ function addAction(detail, label, note, callback, className = "") {
   detail.append(row);
 }
 
-function actionPreview(documentId, action, payload = {}) {
-  return api(`documents/${documentId}/actions/${action}/preview`, {
-    method: "POST",
-    body: JSON.stringify(payload),
-  }).then((result) => result.preview);
+function actionPreview(documentId, action) {
+  return api(`documents/${documentId}/actions/${action}/preview`, { method: "POST" }).then((result) => result.preview);
 }
 
 function renderDetail(inspection) {
@@ -559,32 +548,11 @@ function renderDetail(inspection) {
   }
   const actionDisclosure = document.createElement("details");
   actionDisclosure.className = "actions";
-  actionDisclosure.append(make("summary", "", "File actions"));
+  actionDisclosure.append(make("summary", "", "Record actions"));
   const actions = make("div", "action-content");
 
-  const renameRow = make("div", "action-row");
-  const renameLabel = make("label", "", "Rename this original file");
-  const renameInput = document.createElement("input");
-  renameInput.placeholder = "New name with the same extension";
-  renameLabel.append(renameInput);
-  renameRow.append(renameLabel, button("Preview rename", "", async () => {
-    try {
-      const preview = await actionPreview(inspection.document.id, "organize", { operation: "rename", rename: renameInput.value });
-      detail.append(renderPreview(preview));
-    } catch (error) { setStatus(error.message, "error"); }
-  }));
-  actions.append(renameRow);
-
-  addAction(actions, "Move this original file", "Choose one existing local folder, then review the exact source and target before moving it.", async () => {
-    try { detail.append(renderPreview(await actionPreview(inspection.document.id, "organize", { operation: "move" }))); }
-    catch (error) { setStatus(error.message, "error"); }
-  });
   addAction(actions, "Reindex from the current source", "Refresh derived evidence from the source file after you have reviewed a change.", async () => {
     try { detail.append(renderPreview(await actionPreview(inspection.document.id, "reindex"))); }
-    catch (error) { setStatus(error.message, "error"); }
-  });
-  addAction(actions, "Relink an unavailable source", "Choose an exact local replacement. Hearth accepts it only when its imported fingerprint matches.", async () => {
-    try { detail.append(renderPreview(await actionPreview(inspection.document.id, "relink"))); }
     catch (error) { setStatus(error.message, "error"); }
   });
   addAction(actions, "Remove this collection record", "This removes Hearth's local metadata and derived index data. It never deletes the original file.", async () => {

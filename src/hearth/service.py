@@ -12,8 +12,6 @@ from .domain import (
     CollectionHealth,
     DocumentRelationship,
     DocumentInspection,
-    FileOrganizationError,
-    FileOrganizationPlan,
     ImportedDocument,
     ImportError,
     ImportSummary,
@@ -22,8 +20,6 @@ from .domain import (
     SourceImportFailure,
     SourceImportPlan,
     SourceImportResult,
-    SourceRelinkError,
-    SourceRelinkPlan,
     SourceRoot,
 )
 from .embedding import FlatVectorIndex
@@ -214,73 +210,6 @@ class HearthService:
                 attention.append(SourceAttention(document_id, document_name, status))
         return self._store.collection_health(semantic_index_status, tuple(attention))
 
-    def plan_organization(
-        self, document_id: int, *, move_to: Path | None = None, rename: str | None = None
-    ) -> FileOrganizationPlan:
-        if (move_to is None) == (rename is None):
-            raise FileOrganizationError("Choose exactly one of move_to or rename.")
-        inspection = self.inspect_document(document_id)
-        source_path = self._store.source_path(document_id)
-        if inspection is None or source_path is None:
-            raise FileOrganizationError(f"No imported document with ID {document_id}.")
-        if not source_path.is_file():
-            raise FileOrganizationError("The imported source file is unavailable. Restore it before organizing.")
-        if rename is not None:
-            target_path = _rename_target(source_path, rename)
-            operation = "rename"
-        else:
-            target_path = _move_target(source_path, move_to)
-            operation = "move"
-        _validate_organization_target(source_path, target_path)
-        return FileOrganizationPlan(
-            document=inspection.document,
-            operation=operation,
-            source_path=source_path,
-            target_path=target_path,
-        )
-
-    def apply_organization(
-        self, document_id: int, *, move_to: Path | None = None, rename: str | None = None
-    ) -> FileOrganizationPlan:
-        plan = self.plan_organization(document_id, move_to=move_to, rename=rename)
-        _move_without_overwrite(plan.source_path, plan.target_path)
-        try:
-            self._store.relocate_document(document_id, plan.source_path, plan.target_path)
-        except Exception as exc:
-            try:
-                _move_without_overwrite(plan.target_path, plan.source_path)
-            except FileOrganizationError as rollback_error:
-                raise FileOrganizationError(
-                    "The file moved but Hearth could not update or restore its source binding."
-                ) from rollback_error
-            raise FileOrganizationError("Hearth restored the file because its source binding could not be updated.") from exc
-        return plan
-
-    def plan_relink(self, document_id: int, replacement_source_path: Path) -> SourceRelinkPlan:
-        plan, _ = self._relink_plan(document_id, replacement_source_path)
-        return plan
-
-    def apply_relink(self, document_id: int, replacement_source_path: Path) -> SourceRelinkPlan:
-        plan, source_fingerprint = self._relink_plan(document_id, replacement_source_path)
-        try:
-            replacement_state = _source_state(plan.replacement_source_path)
-        except ImportError as exc:
-            raise SourceRelinkError("The replacement source file could not be read.") from exc
-        if replacement_state[0] != source_fingerprint:
-            raise SourceRelinkError("The replacement source changed while relinking. Retry after it finishes changing.")
-        try:
-            self._store.relink_document(
-                document_id,
-                plan.previous_source_path,
-                plan.replacement_source_path,
-                source_fingerprint,
-                replacement_state[1],
-                replacement_state[2],
-            )
-        except ValueError as exc:
-            raise SourceRelinkError(str(exc)) from exc
-        return plan
-
     def answer(self, question: str) -> Answer:
         if not question.strip():
             return Answer.abstain()
@@ -340,37 +269,6 @@ class HearthService:
             semantic_index_status=self.collection_health().semantic_index_status,
             ocr_artifact_status=ocr_artifact_status,
         )
-
-    def _relink_plan(self, document_id: int, replacement_source_path: Path) -> tuple[SourceRelinkPlan, str]:
-        inspection = self.inspect_document(document_id)
-        previous_source_path = self._store.source_path(document_id)
-        source_fingerprint = self._store.source_fingerprint(document_id)
-        if inspection is None or previous_source_path is None:
-            raise SourceRelinkError(f"No imported document with ID {document_id}.")
-        if previous_source_path.is_file():
-            raise SourceRelinkError("The imported source file is still available. Relink is only for an unavailable source.")
-        if source_fingerprint is None:
-            raise SourceRelinkError(
-                "This source needs a baseline reindex before it can be relinked. Restore it, then run reindex."
-            )
-        try:
-            replacement_path = _validated_local_file(str(replacement_source_path))
-            replacement_fingerprint, _, _ = _source_state(replacement_path)
-        except ImportError as exc:
-            raise SourceRelinkError("Choose a readable local replacement file.") from exc
-        if replacement_fingerprint != source_fingerprint:
-            raise SourceRelinkError(
-                "The replacement source does not match the imported source fingerprint. Reindex it to refresh extracted content."
-            )
-        return (
-            SourceRelinkPlan(
-                document=inspection.document,
-                previous_source_path=previous_source_path,
-                replacement_source_path=replacement_path,
-            ),
-            source_fingerprint,
-        )
-
 
 def _validated_local_file(raw_path: str) -> Path:
     path = _validated_local_path(raw_path)
@@ -468,55 +366,3 @@ def _source_attention_status(
     except ImportError:
         return "source unavailable"
     return None if current_fingerprint == fingerprint else "source changed since import"
-
-
-def _rename_target(source_path: Path, rename: str) -> Path:
-    candidate = Path(rename)
-    if not rename or candidate.name != rename or rename in {".", ".."}:
-        raise FileOrganizationError("The new name must be a single file name.")
-    if candidate.suffix != source_path.suffix:
-        raise FileOrganizationError("Renaming must preserve the source file extension.")
-    return source_path.with_name(rename)
-
-
-def _move_target(source_path: Path, move_to: Path | None) -> Path:
-    assert move_to is not None
-    try:
-        target_directory = move_to.expanduser().resolve(strict=True)
-    except OSError as exc:
-        raise FileOrganizationError("The target directory is unavailable.") from exc
-    if not target_directory.is_dir():
-        raise FileOrganizationError("The move target must be an existing directory.")
-    return target_directory / source_path.name
-
-
-def _validate_organization_target(source_path: Path, target_path: Path) -> None:
-    if source_path == target_path:
-        raise FileOrganizationError("The target must differ from the current source path.")
-    if os.path.lexists(target_path):
-        raise FileOrganizationError("The target path already exists. Hearth will not overwrite files.")
-    try:
-        if source_path.stat().st_dev != target_path.parent.stat().st_dev:
-            raise FileOrganizationError("Cross-volume moves are not supported by the first organization version.")
-    except OSError as exc:
-        raise FileOrganizationError("The source or target directory is unavailable.") from exc
-
-
-def _move_without_overwrite(source_path: Path, target_path: Path) -> None:
-    """Moves one same-volume file without allowing a target replacement race."""
-    try:
-        os.link(source_path, target_path)
-    except FileExistsError as exc:
-        raise FileOrganizationError("The target path already exists. Hearth will not overwrite files.") from exc
-    except OSError as exc:
-        raise FileOrganizationError("The local file could not be moved or renamed.") from exc
-    try:
-        source_path.unlink()
-    except OSError as exc:
-        try:
-            target_path.unlink()
-        except OSError as rollback_error:
-            raise FileOrganizationError(
-                "Hearth could not move the file and could not restore the original source state."
-            ) from rollback_error
-        raise FileOrganizationError("Hearth restored the source because the file move could not complete.") from exc

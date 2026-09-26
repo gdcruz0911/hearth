@@ -8,14 +8,6 @@ class ImportError(ValueError):
     """Raised when a local document cannot safely be imported."""
 
 
-class FileOrganizationError(ValueError):
-    """Raised when an explicit local file organization action cannot be completed safely."""
-
-
-class SourceRelinkError(ValueError):
-    """Raised when an explicit local source relink cannot be completed safely."""
-
-
 @dataclass(frozen=True)
 class SourceRoot:
     """One profile-approved directory available for an explicit source scan."""
@@ -119,21 +111,6 @@ class SourceAttention:
     document_id: int
     document_name: str
     status: str
-
-
-@dataclass(frozen=True)
-class FileOrganizationPlan:
-    document: ImportedDocument
-    operation: str
-    source_path: Path
-    target_path: Path
-
-
-@dataclass(frozen=True)
-class SourceRelinkPlan:
-    document: ImportedDocument
-    previous_source_path: Path
-    replacement_source_path: Path
 
 
 @dataclass(frozen=True)

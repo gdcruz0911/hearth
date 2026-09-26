@@ -48,8 +48,6 @@ Import a local note, query it, and run the public evaluation corpus.
 .venv/bin/python -m hearth.cli --database .hearth/hearth.sqlite search "your question"
 .venv/bin/python -m hearth.cli --database .hearth/hearth.sqlite list
 .venv/bin/python -m hearth.cli --database .hearth/hearth.sqlite inspect 1
-.venv/bin/python -m hearth.cli --database .hearth/hearth.sqlite organize preview 1 --rename archive-notes.md
-.venv/bin/python -m hearth.cli --database .hearth/hearth.sqlite relink preview 1 /new/location/note.md
 .venv/bin/python -m hearth.cli --database .hearth/hearth.sqlite web
 .venv/bin/python -m hearth.cli --database .hearth/hearth.sqlite evaluate tests/fixtures/public/baseline-evaluation.json
 ```
@@ -60,12 +58,9 @@ Import a local note, query it, and run the public evaluation corpus.
 When a source changed outside Hearth, `health` asks you to run an explicit `reindex` rather than changing stored evidence automatically.
 `import` and `reindex` report extraction counts, semantic-index state, and the configured OCR artifact outcome.
 `search` prints the evidence-bound answer followed by its compact source metadata and the cited evidence text.
-`organize preview` and `organize apply` support one explicit same-volume rename or move at a time, preserving the document record and citations without overwriting files.
-`relink preview` and `relink apply` recover an unavailable source binding only when the exact local replacement you select matches the stored source fingerprint.
-Relinking does not search your filesystem or move, copy, delete, re-extract, or reindex a file.
 `sources preview` scans the profile’s connected folders for supported files without extracting text or changing the collection.
 `sources import` imports the currently eligible files after that explicit command, while leaving each original file in place.
-Source watching, deletion, and cross-volume moves are intentionally unsupported in v1.
+Hearth never moves, renames, rewrites, or deletes a source file, and source watching is intentionally unsupported.
 
 ## Local web interface
 
@@ -73,7 +68,7 @@ Source watching, deletion, and cross-volume moves are intentionally unsupported 
 Use `web --no-open` when you want to copy that URL into a browser manually.
 For repeatable local model and index settings, create a private runtime profile with `hearth profile create` and launch with `hearth --profile /path/to/hearth.json web`.
 The UI uses a native macOS chooser to import an original file in place, so it does not create a browser-upload copy or managed library.
-It provides connected-folder review, health, metadata-only inspection, evidence-bound search, a semantic-neighborhood map when a local embedding index is configured, and preview-then-apply controls for semantic-index rebuild, rename, move, reindex, relink, and collection-record removal.
+It provides connected-folder review, health, metadata-only inspection, evidence-bound search, a semantic-neighborhood map when a local embedding index is configured, and preview-then-apply controls for semantic-index rebuild, reindex, and collection-record removal.
 The map is an overview of evidence-backed relationships, not a visual list of every imported source.
 Removing a collection record never deletes its source file.
 
@@ -105,7 +100,7 @@ PYTHONPATH=src .venv/bin/python -m hearth.cli --database /private/tmp/hearth-eva
 - Hearth has no conversational memory.
   It answers from the currently imported collection, so removed documents and reindexed source changes are not retained as answerable evidence.
 - `health` detects changes only at an imported file's stored path.
-  An externally moved unchanged source is reported as unavailable until you restore it, remove its stale record, reimport it, or explicitly relink it to a fingerprint-matching replacement.
+  An externally moved source is reported as unavailable until you restore it, or remove its stale record and import it from its new location.
 - The web interface is local-only and single-user.
   It has no cloud synchronization, account system, LAN binding, public deployment, or multi-user support.
 
@@ -118,5 +113,6 @@ PYTHONPATH=src .venv/bin/python -m hearth.cli --database /private/tmp/hearth-eva
 - [PDF and OCR](docs/pdf-and-ocr.md)
 - [Evaluation](docs/evaluation.md)
 - [Architecture Decision Records](docs/decisions/README.md)
-- [v1 release plan](docs/v1-release-plan.md)
-- [Next milestones](docs/next-milestones.md)
+- [Workbench specification](docs/workbench-spec.md)
+- [Workbench implementation plan](docs/workbench-plan.md), including the knowledge track
+- [Coding requirements](CODING_REQUIREMENTS.md)
