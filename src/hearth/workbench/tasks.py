@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shlex
 import shutil
 import signal
@@ -48,6 +49,18 @@ IMPLEMENT_ROLES = {"test", "implement", "fix"}
 # The task board: who an agent may address, and what kind of message it may post.
 RECIPIENTS = {"person", "implement", "review"}  # ponytail: "knowledge" joins once search --json lands in Phase 5.
 KINDS = {"question", "answer", "finding", "handoff", "blocker"}
+# Guards: deterministic checks on the task's whole diff after the project's check passes.
+MAX_DIFF_LINES = 1500  # ponytail: one limit for all projects; a per-project setting once one needs it.
+GUARD_PATTERNS = [
+    ("AWS access key", r"AKIA[0-9A-Z]{16}"),
+    ("GitHub token", r"gh[pousr]_[A-Za-z0-9]{36,}"),
+    ("private key", r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
+    ("Anthropic key", r"sk-ant-[A-Za-z0-9_-]{20,}"),
+    ("OpenAI key", r"sk-(?:proj-)?[A-Za-z0-9_-]{32,}"),
+    ("Google API key", r"AIza[0-9A-Za-z_-]{35}"),
+    ("Slack token", r"xox[abprs]-[A-Za-z0-9-]{10,}"),
+    ("absolute home path", r"/(?:Users|home)/[A-Za-z0-9._-]+/"),  # CODE-6: real local paths reveal names and layout.
+]
 GUIDANCE = ["AGENTS.md", "CLAUDE.md", "CODING_REQUIREMENTS.md", "CONTEXT.md", "docs/standards"]
 HEADROOM_LIMIT = 90
 PROMPT = """# Task {id}
@@ -327,7 +340,7 @@ def _loop(args: argparse.Namespace) -> int:
         print(f"No task {args.id}.\nNext: hearth task list", file=sys.stderr)
         return 1
     task = _read(task_dir)
-    if task["status"] not in ("done", "failed") or task["stop_reason"] not in (None, "check_failed", "no_changes", "review_unparsed", "rounds_exhausted"):
+    if task["status"] not in ("done", "failed") or task["stop_reason"] not in (None, "check_failed", "guard_failed", "no_changes", "review_unparsed", "rounds_exhausted"):
         reason = f" ({task['stop_reason']})" if task["stop_reason"] else ""
         print(f"{task['id']} is {task['status']}{reason}; the loop continues only a finished task whose check ran.\nNext: hearth task show {task['id']}", file=sys.stderr)
         return 1
@@ -345,6 +358,9 @@ def _loop(args: argparse.Namespace) -> int:
         if task["stop_reason"] == "check_failed":
             checks = (task_dir / "runs" / task["runs"][-1]["dir"] / "checks.txt").read_text(encoding="utf-8")
             feedback = f"The project's check failed; fix it:\n\n```text\n{checks[-4000:]}\n```\n"
+        elif task["stop_reason"] == "guard_failed":
+            guards = (task_dir / "runs" / task["runs"][-1]["dir"] / "guards.txt").read_text(encoding="utf-8")
+            feedback = f"Hearth's guards failed on the task's diff; fix these without weakening any test:\n\n{guards}\n"
         elif task["stop_reason"] == "no_changes" and not _git(Path(task["worktree"]), "diff", f"{task['base']}..HEAD"):
             feedback = "The last run changed no files; continue the goal, using the board messages below.\n"
         else:
@@ -381,8 +397,34 @@ def _loop(args: argparse.Namespace) -> int:
         _finish(project, task, task_dir, result["stop"])
         if task["stop_reason"] == "no_changes" and _git(Path(task["worktree"]), "diff", f"{task['base']}..HEAD"):
             continue  # The implementer disagreed and changed nothing; the reviewer reads its board note next.
-        if task["stop_reason"] not in (None, "check_failed"):
+        if task["stop_reason"] not in (None, "check_failed", "guard_failed"):
             return 1
+
+
+def _guards(task: dict) -> list[str]:
+    """Problems in the task's whole diff: changed protected tests, too many changed lines, or secret-shaped strings.
+
+    Secret values are never repeated in the result, only their kind and location.
+    """
+    repo = Path(task["worktree"])
+    problems = []
+    if task.get("protected_tests"):
+        changed = _git(repo, "diff", "--name-only", f"{task['protected_commit']}..HEAD", "--", *task["protected_tests"]).split()
+        problems += [f"protected test changed: {path}" for path in changed]
+    numstat = [row.split("\t") for row in _git(repo, "diff", "--numstat", f"{task['base']}..HEAD").splitlines()]
+    changed_lines = sum(int(added) + int(deleted) for added, deleted, _ in numstat if added != "-")
+    if changed_lines > MAX_DIFF_LINES:
+        problems.append(f"the diff changes {changed_lines} lines, over the limit of {MAX_DIFF_LINES}; split the work into smaller tasks")
+    path, line = None, 0
+    for row in _git(repo, "diff", "-U0", f"{task['base']}..HEAD").splitlines():
+        if row.startswith("+++ "):
+            path = row[6:] if row.startswith("+++ b/") else None
+        elif row.startswith("@@"):
+            line = int(re.search(r"\+(\d+)", row).group(1)) - 1
+        elif row.startswith("+") and path:
+            line += 1
+            problems += [f"{kind} in {path}:{line}" for kind, pattern in GUARD_PATTERNS if re.search(pattern, row[1:])]
+    return problems
 
 
 def _drain(task: dict, task_dir: Path, record: dict) -> None:
@@ -537,6 +579,11 @@ def _finish(project: dict, task: dict, task_dir: Path, stop_reason: str | None) 
         (run_dir / "checks.txt").write_text(f"$ {project['check']}\n{check.stdout}{check.stderr}\nexit code: {check.returncode}\n", encoding="utf-8")
         record["check_exit_code"] = check.returncode
         stop_reason = "check_failed" if check.returncode else None
+    if stop_reason is None:
+        problems = _guards(task)
+        (run_dir / "guards.txt").write_text(("\n".join(problems) or "All guards passed.") + "\n", encoding="utf-8")
+        record["guards"] = "fail" if problems else "pass"
+        stop_reason = "guard_failed" if problems else None
     (task_dir / "diff.patch").write_text(_git(worktree, "diff", f"{task['base']}..HEAD"), encoding="utf-8")
     task.update(status="failed" if stop_reason else "done", stop_reason=stop_reason, finished=_now())
     if _hold_for_person(task, task_dir, task["status"], stop_reason):
