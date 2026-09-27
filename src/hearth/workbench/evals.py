@@ -36,7 +36,7 @@ def run(args: argparse.Namespace) -> int:
         shutil.copytree(case_dir / "after", repo, dirs_exist_ok=True)
         _commit(repo, case["goal"])
         task = {"id": f"eval-{case_dir.name}", "goal": case["goal"], "base": base, "worktree": str(repo), "runs": [], "status": "running"}
-        prompt = REVIEW_PROMPT.format(id=task["id"], goal=case["goal"], base=base[:12], diff=_git(repo, "diff", f"{base}..HEAD"), messages="")
+        prompt = REVIEW_PROMPT.format(id=task["id"], goal=case["goal"], base=base[:12], diff=_git(repo, "diff", f"{base}..HEAD"), messages="", verification="")
         started = time.monotonic()
         result = _run(task, work, "review", args.reviewer, REVIEWERS[args.reviewer], prompt, model, None, args.timeout, "")
         verdict = None if result["stop"] else _verdict(result["final"])

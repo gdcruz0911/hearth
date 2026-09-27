@@ -502,6 +502,69 @@ class ReviewEvaluationTests(LoopTestCase):
         self.assertIn("SECONDS_PER_UNIT", prompt)
 
 
+class VerifyTests(LoopTestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        (self.repo / "VERIFY.md").write_text("Run the program and save its output as evidence.\n", encoding="utf-8")
+        git(self.repo, "add", "VERIFY.md")
+        git(self.repo, "commit", "-q", "-m", "add VERIFY.md")
+        patch = mock.patch.dict(tasks.VERIFIERS, {"codex": FAKE_CODEX})
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def run_loop(self, verify: str, reviews: str = "approve", *argv: str) -> tuple[int, dict]:
+        os.environ["FAKE_VERIFY"] = verify
+        status = self.loop(self.start(), reviews, *argv)
+        return status, self.only_task()
+
+    def test_verified_evidence_is_kept_and_summarized_for_the_reviewer(self) -> None:
+        status, task = self.run_loop("verified")
+
+        self.assertEqual((status, [run["role"] for run in task["runs"]]), (0, ["implement", "verify", "review"]))
+        run_dir = self.home / ".hearth/tasks" / task["id"] / "runs/02-verify-codex"
+        self.assertTrue((run_dir / "evidence/hello.txt").read_text(encoding="utf-8"))
+        self.assertIn("pass: hello.txt greets the person (evidence/hello.txt)", (self.home / ".fake-last-review-prompt").read_text(encoding="utf-8"))
+        self.assertIn("VERIFY.md", (self.home / ".fake-last-verify-prompt").read_text(encoding="utf-8"))
+
+    def test_a_failed_claim_is_sent_back_as_a_fix_run(self) -> None:
+        status, task = self.run_loop("failed,verified")
+
+        self.assertEqual([run["role"] for run in task["runs"]], ["implement", "verify", "fix", "verify", "review"])
+        fix_prompt = (self.home / ".hearth/tasks" / task["id"] / "runs/03-fix-claude/prompt.md").read_text(encoding="utf-8")
+        self.assertIn("fail: hello.txt greets the person", fix_prompt)
+
+    def test_a_verified_verdict_citing_missing_evidence_is_rejected(self) -> None:
+        status, task = self.run_loop("missing")
+
+        self.assertEqual((status, task["stop_reason"]), (1, "verify_rejected"))
+        self.assertIn("evidence/hello.txt is missing or empty", (self.home / ".hearth/tasks" / task["id"] / "runs/02-verify-codex/verify.txt").read_text(encoding="utf-8"))
+
+    def test_a_verifier_that_edits_source_stops_the_task_for_the_person(self) -> None:
+        status, task = self.run_loop("edit")
+
+        self.assertEqual((status, task["stop_reason"]), (1, "verifier_edited"))
+        self.assertEqual((Path(task["worktree"]) / "hello.txt").read_text(encoding="utf-8"), "changed by the verifier\n")
+
+    def test_a_task_recorded_before_copied_files_were_tracked_still_verifies(self) -> None:
+        os.environ["FAKE_VERIFY"] = "verified"
+        task = self.start()
+        del task["copied"]
+        (self.home / ".hearth/tasks" / task["id"] / "task.json").write_text(json.dumps(task), encoding="utf-8")
+        (Path(task["worktree"]) / ".venv").write_text("an untracked link in an old worktree\n", encoding="utf-8")
+
+        status = self.loop(task, "approve")
+
+        self.assertEqual((status, self.only_task()["status"]), (0, "done"))
+
+    def test_projects_without_verify_md_skip_verification(self) -> None:
+        git(self.repo, "rm", "-q", "VERIFY.md")
+        git(self.repo, "commit", "-q", "-m", "drop VERIFY.md")
+
+        status, task = self.run_loop("verified")
+
+        self.assertEqual([run["role"] for run in task["runs"]], ["implement", "review"])
+
+
 class GuardTests(LoopTestCase):
     def test_a_secret_shaped_string_fails_the_guards_without_echoing_the_secret(self) -> None:
         secret = "AKIA" + "ABCDEFGHIJKLMNOP"

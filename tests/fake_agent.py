@@ -3,6 +3,7 @@
 It reads the prompt on standard input and prints Claude-format stream events, or another CLI's after `--as codex` or `--as antigravity`.
 The scenario comes from FAKE_AGENT_SCENARIO: edit, idle, fail, auth, or hang.
 A prompt that starts with "# Review" is answered with the next verdict in FAKE_REVIEWS: approve, changes, or garbage.
+A prompt that starts with "# Verify" follows the next scenario in FAKE_VERIFY: verified, failed, missing, edit, or garbage.
 An editing or idle run also writes FAKE_OUTBOX, if set, to .hearth/outbox.jsonl as board messages,
 and an editing run appends FAKE_EXTRA, if set, to hello.txt.
 """
@@ -38,11 +39,27 @@ def finish(text: str, error: bool = False) -> None:
         emit({"type": "result", "subtype": "success", "is_error": error, "result": text, "session_id": SESSION, "usage": {"input_tokens": 3, "output_tokens": 4}})
 
 
-def next_review() -> str:
-    count = Path.home() / ".fake-reviews-given"
+def next_answer(name: str, default: str) -> str:
+    count = Path.home() / f".fake-{name}-given"
     given = int(count.read_text()) if count.exists() else 0
     count.write_text(str(given + 1))
-    return os.environ.get("FAKE_REVIEWS", "approve").split(",")[given]
+    return os.environ.get(f"FAKE_{name.upper()}", default).split(",")[given]
+
+
+def verify() -> None:
+    scenario = next_answer("verify", "verified")
+    if scenario == "garbage":
+        finish("It works, I think.")
+        return
+    if scenario == "edit":
+        Path("hello.txt").write_text("changed by the verifier\n", encoding="utf-8")
+    if scenario != "missing":
+        Path(".hearth/evidence").mkdir(parents=True, exist_ok=True)
+        Path(".hearth/evidence/hello.txt").write_text(Path("hello.txt").read_text(encoding="utf-8"), encoding="utf-8")
+    result = "fail" if scenario == "failed" else "pass"
+    claims = [{"claim": "hello.txt greets the person", "evidence": "evidence/hello.txt", "result": result}]
+    verdict = "failed" if scenario == "failed" else "verified"
+    finish("Checked.\n" + json.dumps({"verdict": verdict, "claims": claims}))
 
 
 def main() -> int:
@@ -56,7 +73,11 @@ def main() -> int:
         emit({"type": "system", "subtype": "init", "session_id": SESSION, "model": "fake-model", "argv": sys.argv[1:], "hearth_task": os.environ.get("HEARTH_TASK")})
     if prompt.startswith("# Review"):
         Path.home().joinpath(".fake-last-review-prompt").write_text(prompt, encoding="utf-8")
-        finish(VERDICTS[next_review()])
+        finish(VERDICTS[next_answer("reviews", "approve")])
+        return 0
+    if prompt.startswith("# Verify"):
+        Path.home().joinpath(".fake-last-verify-prompt").write_text(prompt, encoding="utf-8")
+        verify()
         return 0
     if os.environ.get("FAKE_OUTBOX"):
         Path(".hearth").mkdir(exist_ok=True)
