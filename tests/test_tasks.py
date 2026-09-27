@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import contextlib
 import io
 import json
@@ -462,6 +463,8 @@ class BoardTests(LoopTestCase):
         self.assertEqual([message["body"] for message in self.board(task)], ["Fine."])
         self.assertEqual(task["runs"][0]["rejected_messages"], 2)
         self.assertFalse((Path(task["worktree"]) / ".hearth/outbox.jsonl").exists())
+        receipt = self.home / ".hearth/tasks" / task["id"] / "runs/01-implement-claude/outbox.jsonl"
+        self.assertIn("not json", receipt.read_text(encoding="utf-8"))
 
     def test_answering_a_task_with_no_open_question_is_refused(self) -> None:
         task = self.start()
@@ -502,7 +505,7 @@ class ReviewEvaluationTests(LoopTestCase):
         self.assertIn("SECONDS_PER_UNIT", prompt)
 
 
-class VerifyTests(LoopTestCase):
+class VerifyTestCase(LoopTestCase):
     def setUp(self) -> None:
         super().setUp()
         (self.repo / "VERIFY.md").write_text("Run the program and save its output as evidence.\n", encoding="utf-8")
@@ -517,6 +520,8 @@ class VerifyTests(LoopTestCase):
         status = self.loop(self.start(), reviews, *argv)
         return status, self.only_task()
 
+
+class VerifyTests(VerifyTestCase):
     def test_verified_evidence_is_kept_and_summarized_for_the_reviewer(self) -> None:
         status, task = self.run_loop("verified")
 
@@ -613,6 +618,64 @@ class GuardTests(LoopTestCase):
 
 def _head(repo: Path) -> str:
     return git(repo, "rev-parse", "HEAD").strip()
+
+
+class PersonRulesTests(VerifyTestCase):
+    """The person's rules for the orchestrator, each held by a test."""
+
+    def snapshot(self) -> dict:
+        return {path.relative_to(self.repo): path.read_bytes() for path in self.repo.rglob("*")
+                if path.is_file() and ".git" not in path.relative_to(self.repo).parts}
+
+    def test_a_full_task_and_loop_leave_the_main_checkout_untouched(self) -> None:
+        before = (self.snapshot(), git(self.repo, "status", "--porcelain"), git(self.repo, "rev-parse", "HEAD"))
+
+        self.run_loop("failed,verified", "changes,approve")
+
+        self.assertEqual((self.snapshot(), git(self.repo, "status", "--porcelain"), git(self.repo, "rev-parse", "HEAD")), before)
+
+    def test_the_workbench_never_merges(self) -> None:
+        package = Path(__file__).resolve().parents[1] / "src/hearth/workbench"
+        merges = [f"{path.name}:{node.lineno}" for path in package.glob("*.py")
+                  for node in ast.walk(ast.parse(path.read_text(encoding="utf-8")))
+                  if isinstance(node, ast.Constant) and isinstance(node.value, str) and node.value.split()[:1] == ["merge"]]
+
+        self.assertEqual(merges, [])
+
+    def test_discard_refuses_to_destroy_uncommitted_work(self) -> None:
+        task = self.start()
+        worktree = Path(task["worktree"])
+        (worktree / "hello.txt").write_text("the person's unsaved idea\n", encoding="utf-8")
+        (worktree / "draft.txt").write_text("new and uncommitted\n", encoding="utf-8")
+
+        _, preview = self.cli("task", "discard", task["id"])
+        refused, _ = self.cli("task", "discard", task["id"], "--apply")
+
+        self.assertIn("hello.txt", preview)
+        self.assertIn("draft.txt", preview)
+        self.assertEqual(refused, 1)
+        self.assertEqual((worktree / "draft.txt").read_text(encoding="utf-8"), "new and uncommitted\n")
+        self.assertEqual(self.cli("task", "discard", task["id"], "--apply", "--discard-uncommitted")[0], 0)
+        self.assertFalse(worktree.exists())
+
+    def test_every_task_prompt_asks_for_faithful_reports(self) -> None:
+        task = self.start()
+
+        prompt = (self.home / ".hearth/tasks" / task["id"] / "runs/01-implement-claude/prompt.md").read_text(encoding="utf-8")
+
+        self.assertIn("never claim a check you did not run", prompt)
+
+    def test_leftover_evidence_is_moved_to_the_receipts_not_deleted(self) -> None:
+        task = self.start()
+        (Path(task["worktree"]) / ".hearth/evidence").mkdir(parents=True)
+        (Path(task["worktree"]) / ".hearth/evidence/old.txt").write_text("from a crashed run\n", encoding="utf-8")
+        os.environ["FAKE_VERIFY"] = "verified"
+
+        self.assertEqual(self.loop(task, "approve"), 0)
+
+        kept = list((self.home / ".hearth/tasks" / task["id"]).glob("leftover-evidence-*/old.txt"))
+        self.assertEqual([path.read_text(encoding="utf-8") for path in kept], ["from a crashed run\n"])
+        self.assertFalse((Path(task["worktree"]) / ".hearth/evidence").exists())
 
 
 class ProviderResultTests(unittest.TestCase):

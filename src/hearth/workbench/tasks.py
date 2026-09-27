@@ -83,6 +83,7 @@ To ask the person or hand something to the reviewer, append one JSON line to .he
 {{"to": "person", "kind": "question", "body": "..."}}; "to" is person, implement, or review, and "kind" is question, finding, handoff, or blocker.
 A question to the person pauses the task until they answer, so ask only what you cannot decide from the code and docs.
 End with what changed, which checks you ran and their results, and any open questions.
+If something failed or you could not check it, say so plainly; never claim a check you did not run.
 """)
 VERIFY_PROMPT = """# Verify task {id}
 
@@ -95,6 +96,7 @@ Commands other than `{check}` and `{verify}` may be refused.
 End your reply with this JSON and nothing after it:
 {{"verdict": "verified" or "failed", "claims": [{{"claim": "what you observed", "evidence": "evidence/name.txt", "result": "pass" or "fail"}}]}}
 A verified verdict needs at least one claim, and every claim must pass and cite a file that is not empty.
+If you could not run something, say so and mark that claim fail; never claim a check you did not run.
 {messages}
 The diff from {base} to the task branch:
 
@@ -151,6 +153,7 @@ def add_parser(subcommands: argparse._SubParsersAction) -> None:
     discard = actions.add_parser("discard", help="Preview, or with --apply remove, a task's worktree and branch.")
     discard.add_argument("id")
     discard.add_argument("--apply", action="store_true", help="Remove the worktree and branch; the task directory stays as a receipt.")
+    discard.add_argument("--discard-uncommitted", action="store_true", help="Also destroy uncommitted changes in the worktree, which --apply otherwise refuses.")
     loop = subcommands.add_parser("loop", help="Review a finished task with another model family, and fix it until approved or out of rounds.")
     loop.add_argument("id")
     loop.add_argument("--reviewer", choices=sorted(REVIEWERS), help="Reviewing provider. Defaults to the first allowed one from another model family.")
@@ -206,7 +209,7 @@ def run(args: argparse.Namespace) -> int:
         return _finish(_projects()[task["project"]], task, task_dir, None)
     if args.task_command == "answer":
         return _answer(task, task_dir, args.text)
-    return _discard(task, task_dir, args.apply)
+    return _discard(task, task_dir, args.apply, args.discard_uncommitted)
 
 
 def parse_events(provider: str, text: str) -> dict:
@@ -455,18 +458,19 @@ def _verify(task: dict, task_dir: Path, project: dict, family: str, timeout: int
                                   check=project["check"], verify=verify, messages=_messages(task_dir, "verify"))
     for verifier in verifiers:
         _wait_for_slot("support", task, task_dir)
-        shutil.rmtree(worktree / ".hearth/evidence", ignore_errors=True)  # Stale evidence must never satisfy a new claim.
+        if (worktree / ".hearth/evidence").exists():  # Left by a crashed run: kept as a receipt, never deleted or reused.
+            shutil.move(worktree / ".hearth/evidence", task_dir / f"leftover-evidence-{time.strftime('%Y%m%d-%H%M%S')}")
         result = _run(task, task_dir, "verify", verifier, VERIFIERS[verifier], prompt, None, None, timeout, project["check"], verify)
         run_dir = task_dir / "runs" / task["runs"][-1]["dir"]
-        if (worktree / ".hearth/evidence").is_dir():
-            shutil.copytree(worktree / ".hearth/evidence", run_dir / "evidence", dirs_exist_ok=True)
-        if _git(worktree, "status", "--porcelain", "--", ".", ":(exclude).hearth", *[f":(exclude){name}" for name in _copied(task)]):
+        if (worktree / ".hearth/evidence").exists():
+            shutil.move(worktree / ".hearth/evidence", run_dir / "evidence")
+        if _uncommitted(task):
             (run_dir / "verify.txt").write_text("The verifier changed files outside .hearth/evidence/; see git status in the worktree.\n", encoding="utf-8")
             return {"stop": "verifier_edited", "feedback": None, "summary": ""}
         if not result["stop"] and _hold_for_person(task, task_dir, "done", None):
             return {"stop": "question", "feedback": None, "summary": ""}
         verdict = None if result["stop"] else _verdict(result["final"], ("verified", "failed"), "claims")
-        problems = ["no readable verdict"] if verdict is None else _evidence_problems(worktree, verdict)
+        problems = ["no readable verdict"] if verdict is None else _evidence_problems(run_dir, verdict)
         (run_dir / "verify.txt").write_text(("\n".join(problems) or "Every claim cites evidence.") + "\n", encoding="utf-8")
         task["runs"][-1]["verdict"] = verdict["verdict"] if verdict and not problems else None
         if not problems:
@@ -479,18 +483,23 @@ def _verify(task: dict, task_dir: Path, project: dict, family: str, timeout: int
     return {"stop": None, "summary": "", "feedback": f"A verifier from another model family ran the program, and these claims failed:\n\n{lines}"}
 
 
+def _uncommitted(task: dict) -> str:
+    """Changed or new files in the worktree outside Hearth's own folder and the files Hearth copied in."""
+    return _git(Path(task["worktree"]), "status", "--porcelain", "--", ".", ":(exclude).hearth", *[f":(exclude){name}" for name in _copied(task)])
+
+
 def _copied(task: dict) -> list[str]:
     """Files Hearth copied into the worktree; records made before Hearth tracked them get the full candidate list."""
     return task.get("copied", GUIDANCE + [".venv"])
 
 
-def _evidence_problems(worktree: Path, verdict: dict) -> list[str]:
+def _evidence_problems(run_dir: Path, verdict: dict) -> list[str]:
     """Reasons a verification cannot be trusted: no claims, or a claim whose evidence is missing, empty, or elsewhere."""
-    evidence = (worktree / ".hearth/evidence").resolve()
+    evidence = (run_dir / "evidence").resolve()
     problems = [] if verdict["claims"] else ["the verdict makes no claims"]
     for claim in verdict["claims"]:
         cited = str(claim.get("evidence", ""))
-        path = (worktree / ".hearth" / cited).resolve()
+        path = (run_dir / cited).resolve()
         if not (path.is_relative_to(evidence) and path.is_file() and path.stat().st_size):
             problems.append(f"{cited or 'a claim'} is missing or empty")
         if claim.get("result") not in ("pass", "fail"):
@@ -547,7 +556,7 @@ def _drain(task: dict, task_dir: Path, record: dict) -> None:
         refs = message.get("refs") if isinstance(message.get("refs"), list) else []
         _post(task_dir, {"id": f"m{count}", "from": record["dir"], "to": message["to"], "kind": message["kind"],
                          "body": body[:2000], "refs": [str(ref)[:200] for ref in refs[:10]]})
-    outbox.unlink()
+    shutil.move(outbox, task_dir / "runs" / record["dir"] / "outbox.jsonl")  # The raw lines, rejected ones included, stay as a receipt.
     record["rejected_messages"] = rejected
 
 
@@ -792,12 +801,20 @@ def _show(task: dict, task_dir: Path, as_json: bool) -> None:
     print(f"  (cd {repo} && gh pr create --head {task['branch']} --fill)")
 
 
-def _discard(task: dict, task_dir: Path, apply: bool) -> int:
+def _discard(task: dict, task_dir: Path, apply: bool, discard_uncommitted: bool) -> int:
     repo = _repo(task)
+    uncommitted = _uncommitted(task) if Path(task["worktree"]).exists() else ""
     if not apply:
         print(f"Would remove worktree {task['worktree']} and branch {task['branch']}; {task_dir} stays as a receipt.")
+        if uncommitted:
+            print("These uncommitted changes would be lost:\n" + uncommitted.rstrip())
         print(f"Next: hearth task discard {task['id']} --apply", file=sys.stderr)
         return 0
+    if uncommitted and not discard_uncommitted:
+        # The person's rule: never tear down uncommitted work that someone may have been editing.
+        print(f"{task['id']} has uncommitted changes:\n{uncommitted.rstrip()}", file=sys.stderr)
+        print(f"Next: commit or collect them, or pass --discard-uncommitted to destroy them", file=sys.stderr)
+        return 1
     if task["runs"] and task["runs"][-1].get("interactive"):
         _close_window(task["project"], task["id"])
     if Path(task["worktree"]).exists():
