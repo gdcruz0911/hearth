@@ -7,6 +7,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -15,6 +16,7 @@ from hearth.cli import main
 from hearth.workbench import tasks
 
 FAKE_AGENT = [sys.executable, str(Path(__file__).with_name("fake_agent.py")), "{options}", "--allowedTools", "Bash({check} *)"]
+FAKE_CODEX = [sys.executable, str(Path(__file__).with_name("fake_agent.py")), "--as", "codex", "{options}"]
 FIXTURES = Path(__file__).parent / "fixtures/public/providers"
 
 
@@ -49,10 +51,10 @@ class TaskTestCase(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary_directory.cleanup()
 
-    def write_projects(self, check: str) -> None:
+    def write_projects(self, check: str, providers: tuple[str, ...] = ("claude",)) -> None:
         config = self.home / ".hearth/projects.json"
         config.parent.mkdir(parents=True, exist_ok=True)
-        config.write_text(json.dumps({"demo": {"path": str(self.repo), "check": check, "providers": ["claude"]}}), encoding="utf-8")
+        config.write_text(json.dumps({"demo": {"path": str(self.repo), "check": check, "providers": list(providers)}}), encoding="utf-8")
 
     def cli(self, *argv: str) -> tuple[int, str]:
         output = io.StringIO()
@@ -276,6 +278,93 @@ class InteractiveTaskTests(TaskTestCase):
         with mock.patch.object(tasks, "_has_session", return_value=True):
             self.cli("open", "demo")
         self.assertEqual([argv[:2] for argv in self.launched], [["tmux", "attach"]])
+
+
+class LoopTests(TaskTestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        patch = mock.patch.dict(tasks.REVIEWERS, {"codex": FAKE_CODEX})
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def start(self, check: str = "test -f hello.txt") -> dict:
+        self.write_projects(check=check, providers=("claude", "codex"))
+        self.cli("task", "new", "demo", "Add hello.txt")
+        return self.only_task()
+
+    def loop(self, task: dict, reviews: str, *argv: str) -> int:
+        os.environ["FAKE_REVIEWS"] = reviews
+        return self.cli("loop", task["id"], *argv)[0]
+
+    def test_an_approving_review_from_another_model_family_finishes_the_task(self) -> None:
+        status = self.loop(self.start(), "approve")
+
+        task = self.only_task()
+        self.assertEqual((status, task["status"], task["stop_reason"]), (0, "done", None))
+        self.assertEqual([(run["role"], run["provider"]) for run in task["runs"]], [("implement", "claude"), ("review", "codex")])
+        self.assertEqual(task["review"]["verdict"], "approve")
+        prompt = (self.home / ".fake-last-review-prompt").read_text(encoding="utf-8")
+        self.assertIn(f"+# Task {task['id']}", prompt)
+        self.assertIn("docs/standards/", prompt)
+
+    def test_requested_changes_get_a_fix_run_and_another_review(self) -> None:
+        status = self.loop(self.start(), "changes,approve")
+
+        task = self.only_task()
+        self.assertEqual(status, 0)
+        self.assertEqual([run["role"] for run in task["runs"]], ["implement", "review", "fix", "review"])
+        self.assertEqual(git(Path(task["worktree"]), "log", "-1", "--format=%s"), "hearth: run 03 fix claude\n")
+        fix_prompt = (self.home / ".hearth/tasks" / task["id"] / "runs/03-fix-claude/prompt.md").read_text(encoding="utf-8")
+        self.assertIn("CLI-3 hello.txt:1 Say hello.", fix_prompt)
+
+    def test_the_loop_stops_when_its_fix_rounds_run_out(self) -> None:
+        status = self.loop(self.start(), "changes,changes", "--rounds", "1")
+
+        task = self.only_task()
+        self.assertEqual((status, task["status"], task["stop_reason"]), (1, "failed", "rounds_exhausted"))
+
+    def test_an_unreadable_verdict_stops_the_loop(self) -> None:
+        self.assertEqual(self.loop(self.start(), "garbage"), 1)
+        self.assertEqual(self.only_task()["stop_reason"], "review_unparsed")
+
+    def test_the_loop_can_be_rerun_after_an_unreadable_verdict(self) -> None:
+        task = self.start()
+        self.loop(task, "garbage")
+
+        os.environ["FAKE_REVIEWS"] = "garbage,approve"
+        status, _ = self.cli("loop", task["id"])
+
+        self.assertEqual((status, self.only_task()["status"]), (0, "done"))
+        self.assertIn("Do not run commands", (self.home / ".fake-last-review-prompt").read_text(encoding="utf-8"))
+
+    def test_a_failed_check_is_fixed_before_any_review(self) -> None:
+        task = self.start(check="grep -q 'fix round' hello.txt")
+        self.assertEqual(task["stop_reason"], "check_failed")
+
+        status = self.loop(task, "approve")
+
+        task = self.only_task()
+        self.assertEqual((status, [run["role"] for run in task["runs"]]), (0, ["implement", "fix", "review"]))
+
+    def test_a_reviewer_from_the_implementer_family_is_refused(self) -> None:
+        self.assertEqual(self.loop(self.start(), "approve", "--reviewer", "claude"), 1)
+        self.assertEqual(len(self.only_task()["runs"]), 1)
+
+    def test_work_waits_as_queued_while_its_slot_is_full(self) -> None:
+        task = self.start()
+        statuses = []
+        real_sleep = time.sleep
+
+        def sleep(seconds: float) -> None:
+            if seconds == 5:  # Hearth's slot poll; subprocess sleeps briefly while it waits for a process.
+                statuses.append(self.only_task()["status"])
+            else:
+                real_sleep(seconds)
+
+        with mock.patch.object(tasks, "_busy", side_effect=[1, 0]), mock.patch.object(tasks.time, "sleep", side_effect=sleep):
+            self.loop(task, "approve")
+
+        self.assertEqual(statuses, ["queued"])
 
 
 class ProviderResultTests(unittest.TestCase):

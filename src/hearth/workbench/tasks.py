@@ -31,17 +31,47 @@ INTERACTIVE = {
     "antigravity": ["agy", "{options}", "-i", "{prompt}"],
 }
 # Ignored files a worktree lacks but an agent needs; tracked files are already in every worktree.
+# Read-only invocations for review runs; each is confirmed against the installed version before first use (TEST-6).
+REVIEWERS = {
+    "claude": ["claude", "{options}", "-p", "--output-format", "stream-json", "--verbose", "--allowedTools", "Read", "Grep", "Glob"],
+    "codex": ["codex", "exec", "{options}", "--json", "--sandbox", "read-only", "-"],
+    "antigravity": ["agy", "{options}", "--output-format", "stream-json", "--mode", "plan", "-p", "{prompt}"],
+}
+# Antigravity is last: headless agy quits when a command is refused, even in plan mode (2026-09-27).
+REVIEW_ORDER = ["codex", "claude", "antigravity"]
+# agy also runs Claude and GPT-OSS models, so its reviews name a Gemini model to stay in another family.
+REVIEW_MODELS = {"antigravity": "gemini-3.1-pro-high"}
+# The spec's slots: how many runs of each kind may be active at once, across all projects.
+SLOTS = {"implement": 2, "support": 1}
+IMPLEMENT_ROLES = {"test", "implement", "fix"}
 GUIDANCE = ["AGENTS.md", "CLAUDE.md", "CODING_REQUIREMENTS.md", "CONTEXT.md", "docs/standards"]
 HEADROOM_LIMIT = 90
 PROMPT = """# Task {id}
 
 Goal: {goal}
 
-Work only in this directory, and follow AGENTS.md if it exists.
+""" + (INSTRUCTIONS := """Work only in this directory, and follow AGENTS.md if it exists.
 Run tests only with `{check}`, adding arguments at the end if you need fewer tests, such as `-k NAME`; other forms are refused.
 Do not commit; Hearth commits a checkpoint after this run and then runs the project's check.
 Save anything meant for the person, such as a page or an image, in .hearth/artifacts/.
 End with what changed, which checks you ran and their results, and any open questions.
+""")
+REVIEW_PROMPT = """# Review of task {id}
+
+Goal: {goal}
+
+You are reviewing a change another model made in this worktree; do not edit any file.
+Do not run commands: the diff is below, you can read any file, and Hearth has already run the project's check.
+Check it against the goal, AGENTS.md, and the standards in docs/standards/, and cite a standard ID such as CLI-3 for each finding when one applies.
+Approve only when the change meets the goal, is tested, and has no problem you would block a merge for.
+End your reply with this JSON and nothing after it:
+{{"verdict": "approve" or "changes", "findings": [{{"standard": "CLI-3", "file": "path", "line": 1, "problem": "what is wrong and why"}}]}}
+
+The diff from {base} to the task branch:
+
+```diff
+{diff}
+```
 """
 
 
@@ -71,11 +101,22 @@ def add_parser(subcommands: argparse._SubParsersAction) -> None:
     discard = actions.add_parser("discard", help="Preview, or with --apply remove, a task's worktree and branch.")
     discard.add_argument("id")
     discard.add_argument("--apply", action="store_true", help="Remove the worktree and branch; the task directory stays as a receipt.")
+    loop = subcommands.add_parser("loop", help="Review a finished task with another model family, and fix it until approved or out of rounds.")
+    loop.add_argument("id")
+    loop.add_argument("--reviewer", choices=sorted(REVIEWERS), help="Reviewing provider. Defaults to the first allowed one from another model family.")
+    loop.add_argument("--rounds", type=int, default=2, help="Fix runs allowed before stopping. Defaults to 2.")
+    loop.add_argument("--timeout", type=int, default=1800, help="Seconds before each run is stopped. Defaults to 1800.")
     project_opener = subcommands.add_parser("open", help="Open or attach to a project's tmux session: an editor, a task list, and interactive tasks.")
     project_opener.add_argument("project", help="A project name from ~/.hearth/projects.json.")
 
 
 def run(args: argparse.Namespace) -> int:
+    if (args.command == "loop" or getattr(args, "task_command", None) == "new") and os.environ.get("HEARTH_TASK"):
+        # ADR-0023: an agent never starts another task or run, so it cannot spend the person's quota on its own.
+        print(f"Agents cannot start tasks; this shell belongs to task {os.environ['HEARTH_TASK']}.\nNext: ask the person, through the task board or your final report", file=sys.stderr)
+        return 1
+    if args.command == "loop":
+        return _loop(args)
     if args.command == "open":
         return _open(args.project)
     if args.task_command == "new":
@@ -144,10 +185,6 @@ def parse_events(provider: str, text: str) -> dict:
 
 
 def _new(args: argparse.Namespace) -> int:
-    if os.environ.get("HEARTH_TASK"):
-        # ADR-0023: an agent never starts another task, so a run cannot spend the person's quota on its own.
-        print(f"Agents cannot start tasks; this shell belongs to task {os.environ['HEARTH_TASK']}.\nNext: ask the person, through the task board or your final report", file=sys.stderr)
-        return 1
     projects = _projects()
     if args.project not in projects:
         print(f"No project {args.project} in ~/.hearth/projects.json.\nNext: add it there, or use one of: {', '.join(projects)}", file=sys.stderr)
@@ -208,34 +245,50 @@ def _new(args: argparse.Namespace) -> int:
         "worktree": str(worktree), "status": "waiting" if args.interactive else "running", "stop_reason": None,
         "created": _now(), "finished": None, "discarded": None, "copied": copied, "runs": [],
     }
-    record = {"role": "implement", "provider": provider, "model": args.model, "effort": args.effort, "sandbox": "local",
-              "interactive": args.interactive, "dir": f"01-implement-{provider}", "pid": None, "exit_code": None,
-              "session_id": None, "usage": None, "check_exit_code": None, "started": _now(), "finished": None}
-    task["runs"].append(record)
-    run_dir = task_dir / "runs" / record["dir"]
-    run_dir.mkdir(parents=True)
     prompt = PROMPT.format(id=task_id, goal=goal, check=project["check"]) + context
-    (run_dir / "prompt.md").write_text(prompt, encoding="utf-8")
+    if not args.interactive:
+        _wait_for_slot("implement", task, task_dir)
+        result = _run(task, task_dir, "implement", provider, PROVIDERS[provider], prompt, args.model, args.effort, args.timeout, project["check"])
+        return _finish(project, task, task_dir, result["stop"])
 
-    if args.interactive:
-        _ensure_session(args.project, repo)
-        argv = _argv(INTERACTIVE[provider], provider, prompt, project["check"], args.model, args.effort)
-        _launch(["tmux", "new-window", "-t", f"=hearth-{args.project}:", "-c", str(worktree), "-n", task_id, "-e", f"HEARTH_TASK={task_id}", *argv])
-        _write(task_dir, task)
-        print(f"{task_id}  waiting  {worktree}")
-        print(f"Next: work with the agent, exit it, then hearth task collect {task_id}", file=sys.stderr)
-        _attach(f"=hearth-{args.project}:{task_id}")
-        return 0
+    record = _record(task, task_dir, "implement", provider, args.model, args.effort, prompt)
+    record["interactive"] = True
+    _ensure_session(args.project, repo)
+    argv = _argv(INTERACTIVE[provider], provider, prompt, project["check"], args.model, args.effort)
+    _launch(["tmux", "new-window", "-t", f"=hearth-{args.project}:", "-c", str(worktree), "-n", task_id, "-e", f"HEARTH_TASK={task_id}", *argv])
+    _write(task_dir, task)
+    print(f"{task_id}  waiting  {worktree}")
+    print(f"Next: work with the agent, exit it, then hearth task collect {task_id}", file=sys.stderr)
+    _attach(f"=hearth-{args.project}:{task_id}")
+    return 0
 
-    argv = _argv(PROVIDERS[provider], provider, prompt, project["check"], args.model, args.effort)
+
+def _record(task: dict, task_dir: Path, role: str, provider: str, model: str | None, effort: str | None, prompt: str) -> dict:
+    """Add a run to the task and save its prompt before anything is sent."""
+    record = {"role": role, "provider": provider, "model": model, "effort": effort, "sandbox": "local", "interactive": False,
+              "dir": f"{len(task['runs']) + 1:02d}-{role}-{provider}", "pid": None, "exit_code": None, "session_id": None,
+              "usage": None, "check_exit_code": None, "started": _now(), "finished": None}
+    task["runs"].append(record)
+    (task_dir / "runs" / record["dir"]).mkdir(parents=True)
+    (task_dir / "runs" / record["dir"] / "prompt.md").write_text(prompt, encoding="utf-8")
+    return record
+
+
+def _run(task: dict, task_dir: Path, role: str, provider: str, template: list[str], prompt: str,
+         model: str | None, effort: str | None, timeout: int, check: str) -> dict:
+    """Run one headless provider turn in the task's worktree and record it; returns the parsed result and a stop reason."""
+    record = _record(task, task_dir, role, provider, model, effort, prompt)
+    run_dir = task_dir / "runs" / record["dir"]
+    argv = _argv(template, provider, prompt, check, model, effort)
     with (run_dir / "events.jsonl").open("w", encoding="utf-8") as events, (run_dir / "stderr.txt").open("w", encoding="utf-8") as errors:
-        process = subprocess.Popen(argv, cwd=worktree, stdin=subprocess.PIPE, stdout=events, stderr=errors, text=True,
-                                   start_new_session=True, env={**os.environ, "HEARTH_TASK": task_id})
+        process = subprocess.Popen(argv, cwd=task["worktree"], stdin=subprocess.PIPE, stdout=events, stderr=errors, text=True,
+                                   start_new_session=True, env={**os.environ, "HEARTH_TASK": task["id"]})
         record["pid"] = process.pid
+        task["status"] = "running"
         _write(task_dir, task)
         timed_out = False
         try:
-            process.communicate("" if "{prompt}" in PROVIDERS[provider] else prompt, timeout=args.timeout)
+            process.communicate("" if "{prompt}" in template else prompt, timeout=timeout)
         except subprocess.TimeoutExpired:
             timed_out = True
             _stop(process)
@@ -243,7 +296,108 @@ def _new(args: argparse.Namespace) -> int:
     parsed = parse_events(provider, (run_dir / "events.jsonl").read_text(encoding="utf-8"))
     record.update(session_id=parsed["session_id"], usage=parsed["usage"])
     (run_dir / "report.md").write_text(parsed["final"], encoding="utf-8")
-    return _finish(project, task, task_dir, "timeout" if timed_out else parsed["error"] or ("provider_error" if process.returncode else None))
+    parsed["stop"] = "timeout" if timed_out else parsed["error"] or ("provider_error" if process.returncode else None)
+    return parsed
+
+
+def _loop(args: argparse.Namespace) -> int:
+    task_dir = _home() / "tasks" / args.id
+    if not (task_dir / "task.json").exists():
+        print(f"No task {args.id}.\nNext: hearth task list", file=sys.stderr)
+        return 1
+    task = _read(task_dir)
+    if task["status"] not in ("done", "failed") or task["stop_reason"] not in (None, "check_failed", "review_unparsed", "rounds_exhausted"):
+        reason = f" ({task['stop_reason']})" if task["stop_reason"] else ""
+        print(f"{task['id']} is {task['status']}{reason}; the loop continues only a finished task whose check ran.\nNext: hearth task show {task['id']}", file=sys.stderr)
+        return 1
+    project = _projects()[task["project"]]
+    implementer = next(run for run in task["runs"] if run["role"] == "implement")
+    family = _family(implementer["provider"], implementer["model"])
+    candidates = [args.reviewer] if args.reviewer else [name for name in REVIEW_ORDER if name in project["providers"]]
+    reviewer = next((name for name in candidates if _family(name, REVIEW_MODELS.get(name)) != family), None)
+    if reviewer is None or reviewer not in project["providers"]:
+        print(f"No allowed reviewer outside the {family} model family.\nNext: add another provider to {task['project']}'s providers, or pick one with --reviewer", file=sys.stderr)
+        return 1
+
+    fixes = 0
+    while True:
+        if task["stop_reason"] == "check_failed":
+            checks = (task_dir / "runs" / task["runs"][-1]["dir"] / "checks.txt").read_text(encoding="utf-8")
+            feedback = f"The project's check failed:\n\n```text\n{checks[-4000:]}\n```\n"
+        else:
+            _wait_for_slot("support", task, task_dir)
+            diff = _git(Path(task["worktree"]), "diff", f"{task['base']}..HEAD")
+            prompt = REVIEW_PROMPT.format(id=task["id"], goal=task["goal"], base=task["base"][:12], diff=diff[:100_000])  # ponytail: a cap, not paging, for very large diffs.
+            result = _run(task, task_dir, "review", reviewer, REVIEWERS[reviewer], prompt, REVIEW_MODELS.get(reviewer), None, args.timeout, project["check"])
+            verdict = None if result["stop"] else _verdict(result["final"])
+            task["runs"][-1]["verdict"] = verdict and verdict["verdict"]
+            if verdict is None:
+                return _end(task, task_dir, result["stop"] or "review_unparsed")
+            if verdict["verdict"] == "approve":
+                task.update(status="done", stop_reason=None, finished=_now(), review={"verdict": "approve", "reviewer": reviewer, "fixes": fixes})
+                _write(task_dir, task)
+                print(f"{task['id']}  done  approved by {reviewer} after {fixes} fix run{'s' if fixes != 1 else ''}")
+                print(f"Next: hearth task show {task['id']}", file=sys.stderr)
+                return 0
+            findings = "".join(f"- {item.get('standard', '')} {item.get('file', '')}:{item.get('line', '')} {item.get('problem', '')}\n" for item in verdict["findings"])
+            feedback = f"A reviewer from another model family asked for changes:\n\n{findings}"
+        if fixes == args.rounds:
+            return _end(task, task_dir, "rounds_exhausted")
+        fixes += 1
+        _wait_for_slot("implement", task, task_dir)
+        prompt = f"# Task {task['id']}: fix round {fixes}\n\nGoal: {task['goal']}\n\n{feedback}\nFix these.\n" + INSTRUCTIONS.format(check=project["check"])
+        result = _run(task, task_dir, "fix", implementer["provider"], PROVIDERS[implementer["provider"]], prompt,
+                      implementer["model"], implementer["effort"], args.timeout, project["check"])
+        _finish(project, task, task_dir, result["stop"])
+        if task["stop_reason"] not in (None, "check_failed"):
+            return 1
+
+
+def _verdict(text: str) -> dict | None:
+    """Find the last JSON object in a reply that is a well-formed review verdict."""
+    decoder = json.JSONDecoder()
+    for index in reversed([i for i, character in enumerate(text) if character == "{"]):
+        try:
+            value, _ = decoder.raw_decode(text[index:])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict) and value.get("verdict") in ("approve", "changes") and isinstance(value.get("findings", []), list):
+            value.setdefault("findings", [])
+            return value
+    return None
+
+
+def _family(provider: str, model: str | None) -> str:
+    """The model's maker, which review independence is judged by."""
+    if provider == "antigravity" and model:
+        return "anthropic" if model.startswith("claude") else "openai" if model.startswith("gpt") else "google"
+    return {"claude": "anthropic", "codex": "openai", "antigravity": "google"}[provider]
+
+
+def _wait_for_slot(kind: str, task: dict, task_dir: Path) -> None:
+    while _busy(kind) >= SLOTS[kind]:
+        if task["status"] != "queued":
+            task["status"] = "queued"
+            _write(task_dir, task)
+        time.sleep(5)  # ponytail: polling, and two waiters can start together; a lock file if that ever matters.
+
+
+def _busy(kind: str) -> int:
+    """Count headless runs of this kind that are active now, across all tasks."""
+    count = 0
+    for path in _home().glob("tasks/*/task.json"):
+        other = _read(path.parent)
+        if other["status"] == "running" and other["runs"] and (other["runs"][-1]["role"] in IMPLEMENT_ROLES) == (kind == "implement"):
+            count += 1
+    return count
+
+
+def _end(task: dict, task_dir: Path, reason: str) -> int:
+    task.update(status="failed", stop_reason=reason, finished=_now())
+    _write(task_dir, task)
+    print(f"{task['id']}  failed ({reason})")
+    print(f"Next: hearth task show {task['id']}", file=sys.stderr)
+    return 1
 
 
 def _finish(project: dict, task: dict, task_dir: Path, stop_reason: str | None) -> int:
