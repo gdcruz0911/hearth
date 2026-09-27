@@ -84,10 +84,19 @@ class TaskTests(TaskTestCase):
         self.assertEqual(task["runs"][0]["session_id"], "00000000-0000-0000-0000-00000000000f")
         argv = json.loads((run_dir / "events.jsonl").read_text(encoding="utf-8").splitlines()[0])["argv"]
         self.assertIn("fake-model", argv)
+        self.assertEqual(json.loads((run_dir / "events.jsonl").read_text(encoding="utf-8").splitlines()[0])["hearth_task"], task["id"])
         self.assertEqual(argv[argv.index("--allowedTools") + 1], "Bash(test -f hello.txt *)")
         self.assertEqual(git(worktree, "log", "-1", "--format=%s"), "hearth: run 01 implement claude\n")
         self.assertEqual(git(worktree, "show", "--name-only", "--format=", "HEAD"), "hello.txt\n")
         self.assertEqual((worktree / "AGENTS.md").read_text(encoding="utf-8"), "Run the check.\n")
+
+    def test_an_agent_cannot_start_a_task(self) -> None:
+        os.environ["HEARTH_TASK"] = "20260927-000000"
+
+        status, _ = self.cli("task", "new", "demo", "Add hello.txt")
+
+        self.assertEqual(status, 1)
+        self.assertFalse((self.home / ".hearth/tasks").exists())
 
     def test_a_failed_check_fails_the_task(self) -> None:
         self.write_projects(check="exit 3")
@@ -198,11 +207,11 @@ class InteractiveTaskTests(TaskTestCase):
         self.assertEqual((status, task["status"]), (0, "waiting"))
         window = self.launched[-2]
         self.assertEqual(self.launched[-1], ["tmux", "attach", "-t", f"=hearth-demo:{task['id']}"])
-        self.assertEqual(window[:8], ["tmux", "new-window", "-t", "=hearth-demo:", "-c", str(worktree), "-n", task["id"]])
+        self.assertEqual(window[:10], ["tmux", "new-window", "-t", "=hearth-demo:", "-c", str(worktree), "-n", task["id"], "-e", f"HEARTH_TASK={task['id']}"])
         # The prompt precedes the options, because --allowedTools takes several values and would swallow it.
-        self.assertEqual(window[8], "claude")
-        self.assertIn("Add hello.txt", window[9])
-        self.assertEqual(window[10:12], ["--model", "fake-model"])
+        self.assertEqual(window[10], "claude")
+        self.assertIn("Add hello.txt", window[11])
+        self.assertEqual(window[12:14], ["--model", "fake-model"])
 
         (worktree / "hello.txt").write_text("by hand\n", encoding="utf-8")
         collected, _ = self.cli("task", "collect", task["id"])
