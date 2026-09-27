@@ -17,6 +17,7 @@ from hearth.workbench import tasks
 
 FAKE_AGENT = [sys.executable, str(Path(__file__).with_name("fake_agent.py")), "{options}", "--allowedTools", "Bash({check} *)"]
 FAKE_CODEX = [sys.executable, str(Path(__file__).with_name("fake_agent.py")), "--as", "codex", "{options}"]
+FAKE_AGY = [sys.executable, str(Path(__file__).with_name("fake_agent.py")), "--as", "antigravity", "{options}"]
 FIXTURES = Path(__file__).parent / "fixtures/public/providers"
 
 
@@ -284,7 +285,7 @@ class InteractiveTaskTests(TaskTestCase):
 class LoopTestCase(TaskTestCase):
     def setUp(self) -> None:
         super().setUp()
-        patch = mock.patch.dict(tasks.REVIEWERS, {"codex": FAKE_CODEX})
+        patch = mock.patch.dict(tasks.REVIEWERS, {"codex": FAKE_CODEX, "antigravity": FAKE_AGY})
         patch.start()
         self.addCleanup(patch.stop)
 
@@ -308,7 +309,7 @@ class LoopTests(LoopTestCase):
         self.assertEqual(task["review"]["verdict"], "approve")
         prompt = (self.home / ".fake-last-review-prompt").read_text(encoding="utf-8")
         self.assertIn(f"+# Task {task['id']}", prompt)
-        self.assertIn("docs/standards/", prompt)
+        self.assertIn("where they exist, AGENTS.md and the standards in docs/standards/", prompt)
 
     def test_requested_changes_get_a_fix_run_and_another_review(self) -> None:
         status = self.loop(self.start(), "changes,approve")
@@ -348,6 +349,26 @@ class LoopTests(LoopTestCase):
 
         task = self.only_task()
         self.assertEqual((status, [run["role"] for run in task["runs"]]), (0, ["implement", "fix", "review"]))
+
+    def test_antigravity_reviews_first_and_an_empty_review_falls_back_to_the_next_reviewer(self) -> None:
+        self.write_projects(check="test -f hello.txt", providers=("claude", "codex", "antigravity"))
+        self.cli("task", "new", "demo", "Add hello.txt")
+
+        status = self.loop(self.only_task(), "garbage,approve")
+
+        task = self.only_task()
+        self.assertEqual(status, 0)
+        self.assertEqual([(run["role"], run["provider"]) for run in task["runs"]],
+                         [("implement", "claude"), ("review", "antigravity"), ("review", "codex")])
+        self.assertEqual(task["review"]["reviewer"], "codex")
+
+    def test_a_named_reviewer_gets_no_fallback(self) -> None:
+        self.write_projects(check="test -f hello.txt", providers=("claude", "codex", "antigravity"))
+        self.cli("task", "new", "demo", "Add hello.txt")
+
+        status = self.loop(self.only_task(), "garbage,approve", "--reviewer", "antigravity")
+
+        self.assertEqual((status, self.only_task()["stop_reason"]), (1, "review_unparsed"))
 
     def test_a_reviewer_from_the_implementer_family_is_refused(self) -> None:
         self.assertEqual(self.loop(self.start(), "approve", "--reviewer", "claude"), 1)

@@ -1,6 +1,6 @@
 """A stand-in provider CLI for workbench tests.
 
-It reads the prompt on standard input and prints Claude-format stream events, or Codex-format ones after `--as codex`.
+It reads the prompt on standard input and prints Claude-format stream events, or another CLI's after `--as codex` or `--as antigravity`.
 The scenario comes from FAKE_AGENT_SCENARIO: edit, idle, fail, auth, or hang.
 A prompt that starts with "# Review" is answered with the next verdict in FAKE_REVIEWS: approve, changes, or garbage.
 An editing or idle run also writes FAKE_OUTBOX, if set, to .hearth/outbox.jsonl as board messages.
@@ -15,7 +15,7 @@ import time
 from pathlib import Path
 
 SESSION = "00000000-0000-0000-0000-00000000000f"
-CODEX = "--as" in sys.argv and sys.argv[sys.argv.index("--as") + 1] == "codex"
+FORMAT = sys.argv[sys.argv.index("--as") + 1] if "--as" in sys.argv else "claude"
 VERDICTS = {
     "approve": 'Looks good.\n{"verdict": "approve", "findings": []}',
     "changes": 'One problem.\n{"verdict": "changes", "findings": [{"standard": "CLI-3", "file": "hello.txt", "line": 1, "problem": "Say hello."}]}',
@@ -28,7 +28,9 @@ def emit(event: dict) -> None:
 
 
 def finish(text: str, error: bool = False) -> None:
-    if CODEX:
+    if FORMAT == "antigravity":
+        emit({"event": "result", "result": {"conversation_id": SESSION, "status": "ERROR" if error else "SUCCESS", "response": text}})
+    elif FORMAT == "codex":
         emit({"type": "item.completed", "item": {"id": "item_0", "type": "agent_message", "text": text}})
         emit({"type": "turn.failed"} if error else {"type": "turn.completed", "usage": {"input_tokens": 3, "output_tokens": 4}})
     else:
@@ -45,7 +47,9 @@ def next_review() -> str:
 def main() -> int:
     prompt = sys.stdin.read()
     scenario = os.environ.get("FAKE_AGENT_SCENARIO", "edit")
-    if CODEX:
+    if FORMAT == "antigravity":
+        emit({"event": "init", "conversation_id": SESSION, "init": {"argv": sys.argv[1:]}})
+    elif FORMAT == "codex":
         emit({"type": "thread.started", "thread_id": SESSION, "argv": sys.argv[1:]})
     else:
         emit({"type": "system", "subtype": "init", "session_id": SESSION, "model": "fake-model", "argv": sys.argv[1:], "hearth_task": os.environ.get("HEARTH_TASK")})

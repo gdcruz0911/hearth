@@ -37,8 +37,9 @@ REVIEWERS = {
     "codex": ["codex", "exec", "{options}", "--json", "--sandbox", "read-only", "-"],
     "antigravity": ["agy", "{options}", "--output-format", "stream-json", "--mode", "plan", "-p", "{prompt}"],
 }
-# Antigravity is last: headless agy quits when a command is refused, even in plan mode (2026-09-27).
-REVIEW_ORDER = ["codex", "claude", "antigravity"]
+# Antigravity first spends the plan that is otherwise idle; it needs the read-only allow rules in the spec,
+# and an empty review falls back to the next reviewer from another model family.
+REVIEW_ORDER = ["antigravity", "claude", "codex"]
 # agy also runs Claude and GPT-OSS models, so its reviews name a Gemini model to stay in another family.
 REVIEW_MODELS = {"antigravity": "gemini-3.1-pro-high"}
 # The spec's slots: how many runs of each kind may be active at once, across all projects.
@@ -67,8 +68,8 @@ REVIEW_PROMPT = """# Review of task {id}
 Goal: {goal}
 
 You are reviewing a change another model made in this worktree; do not edit any file.
-Do not run commands: the diff is below, you can read any file, and Hearth has already run the project's check.
-Check it against the goal, AGENTS.md, and the standards in docs/standards/, and cite a standard ID such as CLI-3 for each finding when one applies.
+Do not run commands or search the disk: the diff is below, your file tools can read the worktree, and Hearth has already run the project's check.
+Check it against the goal and, where they exist, AGENTS.md and the standards in docs/standards/, and cite a standard ID such as CLI-3 for each finding when one applies.
 Approve only when the change meets the goal, is tested, and has no problem you would block a merge for.
 End your reply with this JSON and nothing after it:
 {{"verdict": "approve" or "changes", "findings": [{{"standard": "CLI-3", "file": "path", "line": 1, "problem": "what is wrong and why"}}]}}
@@ -334,8 +335,8 @@ def _loop(args: argparse.Namespace) -> int:
     implementer = next(run for run in task["runs"] if run["role"] == "implement")
     family = _family(implementer["provider"], implementer["model"])
     candidates = [args.reviewer] if args.reviewer else [name for name in REVIEW_ORDER if name in project["providers"]]
-    reviewer = next((name for name in candidates if _family(name, REVIEW_MODELS.get(name)) != family), None)
-    if reviewer is None or reviewer not in project["providers"]:
+    reviewers = [name for name in candidates if name in project["providers"] and _family(name, REVIEW_MODELS.get(name)) != family]
+    if not reviewers:
         print(f"No allowed reviewer outside the {family} model family.\nNext: add another provider to {task['project']}'s providers, or pick one with --reviewer", file=sys.stderr)
         return 1
 
@@ -351,9 +352,12 @@ def _loop(args: argparse.Namespace) -> int:
             diff = _git(Path(task["worktree"]), "diff", f"{task['base']}..HEAD")
             prompt = REVIEW_PROMPT.format(id=task["id"], goal=task["goal"], base=task["base"][:12], diff=diff[:100_000],
                                           messages=_messages(task_dir, "review"))  # ponytail: a cap, not paging, for very large diffs.
-            result = _run(task, task_dir, "review", reviewer, REVIEWERS[reviewer], prompt, REVIEW_MODELS.get(reviewer), None, args.timeout, project["check"])
-            verdict = None if result["stop"] else _verdict(result["final"])
-            task["runs"][-1]["verdict"] = verdict and verdict["verdict"]
+            for reviewer in reviewers:
+                result = _run(task, task_dir, "review", reviewer, REVIEWERS[reviewer], prompt, REVIEW_MODELS.get(reviewer), None, args.timeout, project["check"])
+                verdict = None if result["stop"] else _verdict(result["final"])
+                task["runs"][-1]["verdict"] = verdict and verdict["verdict"]
+                if verdict or result["stop"] == "timeout":
+                    break  # An empty or failed review falls back to the next reviewer; a slow one does not.
             if not result["stop"] and _hold_for_person(task, task_dir, "done", None):
                 return 1
             if verdict is None:
