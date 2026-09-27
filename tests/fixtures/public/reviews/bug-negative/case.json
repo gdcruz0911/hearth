@@ -1,0 +1,1 @@
+{"goal": "Allow negative durations such as -5m, which mean -300 seconds.", "expect": "changes", "planted": "The sign is stripped and never applied, so -5m returns 300, and the new test only checks that -5m is accepted."}

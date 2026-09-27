@@ -284,7 +284,7 @@ if __name__ == "__main__":
 
 
 class CommandReferenceTests(unittest.TestCase):
-    """The README's command table lists every command and subcommand the parser accepts."""
+    """docs/commands.md lists every command and subcommand the parser accepts."""
 
     @staticmethod
     def subcommands(*argv: str) -> list[str]:
@@ -295,8 +295,8 @@ class CommandReferenceTests(unittest.TestCase):
         match = re.search(r"(?:\] |^\s+)\{([\w,-]+)\}", output.getvalue(), re.MULTILINE)
         return match.group(1).split(",") if match else []
 
-    def test_readme_lists_every_command(self) -> None:
-        readme = (Path(__file__).resolve().parents[1] / "README.md").read_text(encoding="utf-8")
+    def test_the_command_list_names_every_command(self) -> None:
+        readme = (Path(__file__).resolve().parents[1] / "docs/commands.md").read_text(encoding="utf-8")
         commands = []
         for command in self.subcommands():
             commands += [f"{command} {sub}" for sub in self.subcommands(command)] or [command]
