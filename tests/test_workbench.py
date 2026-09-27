@@ -118,6 +118,15 @@ class UsageTests(unittest.TestCase):
         self.assertEqual(status, 0)
         self.assertEqual([row["provider"] for row in json.loads(output.getvalue())], ["claude", "codex", "antigravity"])
 
+    def test_cli_table_keeps_a_gap_after_every_provider_name(self) -> None:
+        output = io.StringIO()
+
+        with mock.patch.dict(os.environ, {"HOME": str(self.home)}), contextlib.redirect_stdout(output):
+            main(["usage"])
+
+        for line, provider in zip(output.getvalue().splitlines()[1:], ["claude", "codex", "antigravity"]):
+            self.assertTrue(line.startswith(provider + " "), line)
+
     def test_cli_statusline_records_stdin_and_prints_one_line(self) -> None:
         output = io.StringIO()
 
