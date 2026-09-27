@@ -94,11 +94,11 @@ def _row(provider: str, plan: str, five_hour: dict | None, week: dict | None, ke
 
 
 def _print_table(rows: list[dict]) -> None:
-    print(f"{'provider':<9}{'plan':<8}{'5-hour':>7}{'week':>7}  {'week resets':<18}{'left per day':>12}")
+    print(f"{'provider':<13}{'plan':<8}{'5-hour':>7}{'week':>7}  {'week resets':<18}{'left per day':>12}")
     for row in rows:
         resets = datetime.fromtimestamp(row["week_resets_at"]).strftime("%a %b %d %H:%M") if row["week_resets_at"] else "-"
         print(
-            f"{row['provider']:<9}{row['plan']:<8}{_percent(row['five_hour']):>7}{_percent(row['week']):>7}"
+            f"{row['provider']:<13}{row['plan']:<8}{_percent(row['five_hour']):>7}{_percent(row['week']):>7}"
             f"  {resets:<18}{_percent(row['remaining_per_day']):>12}"
         )
     missing = [row["provider"] for row in rows if row["week"] is None and row["provider"] != "antigravity"]
