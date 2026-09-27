@@ -43,6 +43,14 @@ REVIEWERS = {
 REVIEW_ORDER = ["antigravity", "claude", "codex"]
 # agy also runs Claude and GPT-OSS models, so its reviews name a Gemini model to stay in another family.
 REVIEW_MODELS = {"antigravity": "gemini-3.1-pro-high"}
+# Verifiers run the real program, so they need commands: Codex in its workspace sandbox, and Claude limited to the
+# project's check and its "verify" command prefix. Headless agy refuses unlisted commands, so it cannot verify.
+VERIFIERS = {
+    "codex": ["codex", "exec", "{options}", "--json", "--sandbox", "workspace-write", "-"],
+    "claude": ["claude", "{options}", "-p", "--output-format", "stream-json", "--verbose", "--permission-mode", "acceptEdits",
+               "--allowedTools", "Bash({check} *)", "Bash({verify} *)"],
+}
+VERIFY_ORDER = ["codex", "claude"]
 # The spec's slots: how many runs of each kind may be active at once, across all projects.
 SLOTS = {"implement": 2, "support": 1}
 IMPLEMENT_ROLES = {"test", "implement", "fix"}
@@ -61,7 +69,7 @@ GUARD_PATTERNS = [
     ("Slack token", r"xox[abprs]-[A-Za-z0-9-]{10,}"),
     ("absolute home path", r"/(?:Users|home)/[A-Za-z0-9._-]+/"),  # CODE-6: real local paths reveal names and layout.
 ]
-GUIDANCE = ["AGENTS.md", "CLAUDE.md", "CODING_REQUIREMENTS.md", "CONTEXT.md", "docs/standards"]
+GUIDANCE = ["AGENTS.md", "CLAUDE.md", "CODING_REQUIREMENTS.md", "CONTEXT.md", "VERIFY.md", "docs/standards"]
 HEADROOM_LIMIT = 90
 PROMPT = """# Task {id}
 
@@ -76,6 +84,24 @@ To ask the person or hand something to the reviewer, append one JSON line to .he
 A question to the person pauses the task until they answer, so ask only what you cannot decide from the code and docs.
 End with what changed, which checks you ran and their results, and any open questions.
 """)
+VERIFY_PROMPT = """# Verify task {id}
+
+Goal: {goal}
+
+Follow VERIFY.md to show that the change on this branch does what the goal says, by running the real program rather than reading code.
+Do not edit any file outside .hearth/evidence/; Hearth stops the task if you do.
+Save the output of each command you rely on to its own file in .hearth/evidence/, and cite it as evidence/<name>.
+Commands other than `{check}` and `{verify}` may be refused.
+End your reply with this JSON and nothing after it:
+{{"verdict": "verified" or "failed", "claims": [{{"claim": "what you observed", "evidence": "evidence/name.txt", "result": "pass" or "fail"}}]}}
+A verified verdict needs at least one claim, and every claim must pass and cite a file that is not empty.
+{messages}
+The diff from {base} to the task branch:
+
+```diff
+{diff}
+```
+"""
 REVIEW_PROMPT = """# Review of task {id}
 
 Goal: {goal}
@@ -87,7 +113,7 @@ Approve only when the change meets the goal, is tested, and has no problem you w
 End your reply with this JSON and nothing after it:
 {{"verdict": "approve" or "changes", "findings": [{{"standard": "CLI-3", "file": "path", "line": 1, "problem": "what is wrong and why"}}]}}
 
-{messages}
+{messages}{verification}
 The diff from {base} to the task branch:
 
 ```diff
@@ -308,11 +334,11 @@ def _record(task: dict, task_dir: Path, role: str, provider: str, model: str | N
 
 
 def _run(task: dict, task_dir: Path, role: str, provider: str, template: list[str], prompt: str,
-         model: str | None, effort: str | None, timeout: int, check: str) -> dict:
+         model: str | None, effort: str | None, timeout: int, check: str, verify: str = "") -> dict:
     """Run one headless provider turn in the task's worktree and record it; returns the parsed result and a stop reason."""
     record = _record(task, task_dir, role, provider, model, effort, prompt)
     run_dir = task_dir / "runs" / record["dir"]
-    argv = _argv(template, provider, prompt, check, model, effort)
+    argv = _argv(template, provider, prompt, check, model, effort, verify)
     with (run_dir / "events.jsonl").open("w", encoding="utf-8") as events, (run_dir / "stderr.txt").open("w", encoding="utf-8") as errors:
         process = subprocess.Popen(argv, cwd=task["worktree"], stdin=subprocess.PIPE, stdout=events, stderr=errors, text=True,
                                    start_new_session=True, env={**os.environ, "HEARTH_TASK": task["id"]})
@@ -340,7 +366,7 @@ def _loop(args: argparse.Namespace) -> int:
         print(f"No task {args.id}.\nNext: hearth task list", file=sys.stderr)
         return 1
     task = _read(task_dir)
-    if task["status"] not in ("done", "failed") or task["stop_reason"] not in (None, "check_failed", "guard_failed", "no_changes", "review_unparsed", "rounds_exhausted"):
+    if task["status"] not in ("done", "failed") or task["stop_reason"] not in (None, "check_failed", "guard_failed", "no_changes", "review_unparsed", "verify_rejected", "rounds_exhausted"):
         reason = f" ({task['stop_reason']})" if task["stop_reason"] else ""
         print(f"{task['id']} is {task['status']}{reason}; the loop continues only a finished task whose check ran.\nNext: hearth task show {task['id']}", file=sys.stderr)
         return 1
@@ -363,11 +389,24 @@ def _loop(args: argparse.Namespace) -> int:
             feedback = f"Hearth's guards failed on the task's diff; fix these without weakening any test:\n\n{guards}\n"
         elif task["stop_reason"] == "no_changes" and not _git(Path(task["worktree"]), "diff", f"{task['base']}..HEAD"):
             feedback = "The last run changed no files; continue the goal, using the board messages below.\n"
+        elif task["stop_reason"] == "verify_failed":
+            feedback = task.pop("verify_feedback")
         else:
+            verification = ""
+            if (Path(task["worktree"]) / "VERIFY.md").exists():
+                outcome = _verify(task, task_dir, project, family, args.timeout)
+                if outcome["stop"] == "question":
+                    return 1
+                if outcome["stop"]:
+                    return _end(task, task_dir, outcome["stop"])
+                if outcome["feedback"]:
+                    task.update(stop_reason="verify_failed", verify_feedback=outcome["feedback"])
+                    continue
+                verification = outcome["summary"]
             _wait_for_slot("support", task, task_dir)
             diff = _git(Path(task["worktree"]), "diff", f"{task['base']}..HEAD")
             prompt = REVIEW_PROMPT.format(id=task["id"], goal=task["goal"], base=task["base"][:12], diff=diff[:100_000],
-                                          messages=_messages(task_dir, "review"))  # ponytail: a cap, not paging, for very large diffs.
+                                          messages=_messages(task_dir, "review"), verification=verification)  # ponytail: a cap, not paging, for very large diffs.
             for reviewer in reviewers:
                 result = _run(task, task_dir, "review", reviewer, REVIEWERS[reviewer], prompt, REVIEW_MODELS.get(reviewer), None, args.timeout, project["check"])
                 verdict = None if result["stop"] else _verdict(result["final"])
@@ -399,6 +438,66 @@ def _loop(args: argparse.Namespace) -> int:
             continue  # The implementer disagreed and changed nothing; the reviewer reads its board note next.
         if task["stop_reason"] not in (None, "check_failed", "guard_failed"):
             return 1
+
+
+def _verify(task: dict, task_dir: Path, project: dict, family: str, timeout: int) -> dict:
+    """Run a verifier from another model family and judge its claims by the evidence files it saved.
+
+    Returns a stop reason, feedback for a fix run when a claim failed, or a summary of passing claims for the reviewer.
+    """
+    worktree = Path(task["worktree"])
+    verifiers = [name for name in VERIFY_ORDER if name in project["providers"] and _family(name, None) != family]
+    if not verifiers:
+        return {"stop": "no_verifier", "feedback": None, "summary": ""}
+    diff = _git(worktree, "diff", f"{task['base']}..HEAD")
+    verify = project.get("verify", project["check"])
+    prompt = VERIFY_PROMPT.format(id=task["id"], goal=task["goal"], base=task["base"][:12], diff=diff[:100_000],
+                                  check=project["check"], verify=verify, messages=_messages(task_dir, "verify"))
+    for verifier in verifiers:
+        _wait_for_slot("support", task, task_dir)
+        shutil.rmtree(worktree / ".hearth/evidence", ignore_errors=True)  # Stale evidence must never satisfy a new claim.
+        result = _run(task, task_dir, "verify", verifier, VERIFIERS[verifier], prompt, None, None, timeout, project["check"], verify)
+        run_dir = task_dir / "runs" / task["runs"][-1]["dir"]
+        if (worktree / ".hearth/evidence").is_dir():
+            shutil.copytree(worktree / ".hearth/evidence", run_dir / "evidence", dirs_exist_ok=True)
+        if _git(worktree, "status", "--porcelain", "--", ".", ":(exclude).hearth", *[f":(exclude){name}" for name in _copied(task)]):
+            (run_dir / "verify.txt").write_text("The verifier changed files outside .hearth/evidence/; see git status in the worktree.\n", encoding="utf-8")
+            return {"stop": "verifier_edited", "feedback": None, "summary": ""}
+        if not result["stop"] and _hold_for_person(task, task_dir, "done", None):
+            return {"stop": "question", "feedback": None, "summary": ""}
+        verdict = None if result["stop"] else _verdict(result["final"], ("verified", "failed"), "claims")
+        problems = ["no readable verdict"] if verdict is None else _evidence_problems(worktree, verdict)
+        (run_dir / "verify.txt").write_text(("\n".join(problems) or "Every claim cites evidence.") + "\n", encoding="utf-8")
+        task["runs"][-1]["verdict"] = verdict["verdict"] if verdict and not problems else None
+        if not problems:
+            break
+    else:
+        return {"stop": "verify_rejected", "feedback": None, "summary": ""}
+    lines = "".join(f"- {claim['result']}: {claim['claim']} ({claim['evidence']})\n" for claim in verdict["claims"])
+    if verdict["verdict"] == "verified":
+        return {"stop": None, "feedback": None, "summary": f"\nA verifier ran the program; its claims and evidence files:\n{lines}"}
+    return {"stop": None, "summary": "", "feedback": f"A verifier from another model family ran the program, and these claims failed:\n\n{lines}"}
+
+
+def _copied(task: dict) -> list[str]:
+    """Files Hearth copied into the worktree; records made before Hearth tracked them get the full candidate list."""
+    return task.get("copied", GUIDANCE + [".venv"])
+
+
+def _evidence_problems(worktree: Path, verdict: dict) -> list[str]:
+    """Reasons a verification cannot be trusted: no claims, or a claim whose evidence is missing, empty, or elsewhere."""
+    evidence = (worktree / ".hearth/evidence").resolve()
+    problems = [] if verdict["claims"] else ["the verdict makes no claims"]
+    for claim in verdict["claims"]:
+        cited = str(claim.get("evidence", ""))
+        path = (worktree / ".hearth" / cited).resolve()
+        if not (path.is_relative_to(evidence) and path.is_file() and path.stat().st_size):
+            problems.append(f"{cited or 'a claim'} is missing or empty")
+        if claim.get("result") not in ("pass", "fail"):
+            problems.append(f"{cited or 'a claim'} has no pass or fail result")
+    if verdict["verdict"] == "verified" and any(claim.get("result") != "pass" for claim in verdict["claims"]):
+        problems.append("a verified verdict includes a claim that did not pass")
+    return problems
 
 
 def _guards(task: dict) -> list[str]:
@@ -514,16 +613,16 @@ def _answer(task: dict, task_dir: Path, text: str) -> int:
     return 0
 
 
-def _verdict(text: str) -> dict | None:
-    """Find the last JSON object in a reply that is a well-formed review verdict."""
+def _verdict(text: str, verdicts: tuple[str, str] = ("approve", "changes"), items: str = "findings") -> dict | None:
+    """Find the last JSON object in a reply that is a well-formed review or verification verdict."""
     decoder = json.JSONDecoder()
     for index in reversed([i for i, character in enumerate(text) if character == "{"]):
         try:
             value, _ = decoder.raw_decode(text[index:])
         except json.JSONDecodeError:
             continue
-        if isinstance(value, dict) and value.get("verdict") in ("approve", "changes") and isinstance(value.get("findings", []), list):
-            value.setdefault("findings", [])
+        if isinstance(value, dict) and value.get("verdict") in verdicts and isinstance(value.get(items, []), list):
+            value.setdefault(items, [])
             return value
     return None
 
@@ -569,7 +668,7 @@ def _finish(project: dict, task: dict, task_dir: Path, stop_reason: str | None) 
     if (worktree / ".hearth/artifacts").is_dir():
         shutil.copytree(worktree / ".hearth/artifacts", run_dir / "artifacts", dirs_exist_ok=True)
     _git(worktree, "add", "-A")
-    _git(worktree, "reset", "-q", "--", ".hearth", *task["copied"])
+    _git(worktree, "reset", "-q", "--", ".hearth", *_copied(task))
     changed = subprocess.run(["git", "-C", str(worktree), "diff", "--cached", "--quiet"]).returncode != 0
     if changed:
         _git(worktree, "commit", "-q", "-m", f"hearth: run {record['dir'].replace('-', ' ')}")
@@ -649,7 +748,7 @@ def _projects() -> dict:
     return json.loads((_home() / "projects.json").read_text(encoding="utf-8"))
 
 
-def _argv(template: list[str], provider: str, prompt: str, check: str, model: str | None, effort: str | None) -> list[str]:
+def _argv(template: list[str], provider: str, prompt: str, check: str, model: str | None, effort: str | None, verify: str = "") -> list[str]:
     options = []
     if model:
         options += ["-m" if provider == "codex" else "--model", model]
@@ -657,7 +756,7 @@ def _argv(template: list[str], provider: str, prompt: str, check: str, model: st
         options += ["-c", f"model_reasoning_effort={effort}"] if provider == "codex" else ["--effort", effort]
     argv = []
     for part in template:
-        argv += options if part == "{options}" else [prompt if part == "{prompt}" else part.replace("{check}", check)]
+        argv += options if part == "{options}" else [prompt if part == "{prompt}" else part.replace("{check}", check).replace("{verify}", verify or check)]
     return argv
 
 
