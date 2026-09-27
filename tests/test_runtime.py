@@ -51,13 +51,12 @@ class RuntimeProfileTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeProfileError, "overwrite"):
             write_runtime_profile(profile_path, RuntimeProfile(database=self.root / "other.sqlite"))
 
-    def test_load_ignores_the_retired_generator_model_setting(self) -> None:
+    def test_load_rejects_the_retired_generator_model_setting(self) -> None:
         profile_path = self.root / "hearth.json"
         profile_path.write_text(
             json.dumps({"format": "hearth-runtime-profile-v1", "database": "hearth.sqlite", "generator_model": "models/gen"}),
             encoding="utf-8",
         )
 
-        profile = load_runtime_profile(profile_path)
-
-        self.assertEqual(profile.database, (self.root / "hearth.sqlite").resolve())
+        with self.assertRaisesRegex(RuntimeProfileError, "unsupported settings"):
+            load_runtime_profile(profile_path)

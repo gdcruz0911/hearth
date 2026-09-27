@@ -13,12 +13,21 @@ The default answer path returns retrieved source text with citations instead of 
 The local MLX runtime and two candidate models are provisioned separately for host-side evaluation.
 An opt-in MLX embedding and flat-index path is implemented behind `--embedding-model` and `--index-directory`.
 An opt-in MLX reranker is implemented behind `--reranker-model`.
-Hearth does not generate prose answers; see [ADR-0021](docs/decisions/ADR-0021-evidence-only-answers.md).
+Hearth Knowledge does not generate prose answers; see [ADR-0022](docs/decisions/ADR-0022-workbench-boundary.md).
+
+The workbench, in `src/hearth/workbench/`, is the second half of Hearth and coordinates coding agents across three subscription plans.
+It currently has one command, `hearth usage`, which reads the five-hour and weekly plan limits that Codex and Claude Code already write locally.
+`hearth usage statusline`, registered as Claude Code's status line, records Claude's limits whenever they change.
 
 ## Privacy boundary
 
-Hearth keeps imported documents and runtime data on the local machine.
-The current application code has no configured cloud service, telemetry, or cloud-model fallback.
+Hearth has two halves with different promises; see [ADR-0022](docs/decisions/ADR-0022-workbench-boundary.md).
+
+Hearth Knowledge keeps imported documents and runtime data on the local machine.
+Its code has no configured cloud service, telemetry, or cloud-model fallback, and it never imports the workbench.
+
+The workbench is the only part of Hearth that may reach the network, and only through the provider tools and destinations its ADRs name.
+Its only command so far, `hearth usage`, reads local log files and makes no network request.
 Installing dependencies and provisioning models are separate operations that can use package or model registries.
 Do not commit private documents, OCR output, SQLite databases, indexes, model weights, prompts, responses, or absolute local paths.
 

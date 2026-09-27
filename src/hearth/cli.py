@@ -28,6 +28,7 @@ from .runtime import (
 )
 from .service import HearthService
 from .web import HearthWebServer
+from .workbench import usage
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -90,6 +91,7 @@ def main(argv: list[str] | None = None) -> int:
     reindexer.add_argument("path")
     remover = subcommands.add_parser("remove", help="Remove a document and its derived records.")
     remover.add_argument("path")
+    usage.add_parser(subcommands)
     subcommands.add_parser("list", help="List imported documents without document text or source paths.")
     subcommands.add_parser("health", help="Summarize private collection health without document text or source paths.")
     inspector = subcommands.add_parser("inspect", help="Inspect one document's local provenance metadata.")
@@ -119,6 +121,8 @@ def main(argv: list[str] | None = None) -> int:
         help="Connected local folder. Defaults to Desktop, Documents, and Downloads when omitted.",
     )
     args = parser.parse_args(argv)
+    if args.command == "usage":
+        return usage.run(args)
     if args.command == "profile":
         if (args.embedding_model is None) != (args.index_directory is None):
             parser.error("--embedding-model and --index-directory must be provided together.")
