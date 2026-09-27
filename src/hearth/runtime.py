@@ -35,8 +35,7 @@ _PATH_FIELDS = (
     "reranker_model",
     "ocr_output_directory",
 )
-# generator_model is accepted and ignored so profiles written before chat was removed still load.
-_FIELDS = {"format", *_PATH_FIELDS, "generator_model", "retain_ocr_output", "relationship_minimum_score", "source_roots"}
+_FIELDS = {"format", *_PATH_FIELDS, "retain_ocr_output", "relationship_minimum_score", "source_roots"}
 
 
 def load_runtime_profile(path: Path) -> RuntimeProfile:
