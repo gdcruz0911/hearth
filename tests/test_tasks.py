@@ -22,7 +22,7 @@ def git(repo: Path, *args: str) -> str:
     return subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, text=True).stdout
 
 
-class TaskTests(unittest.TestCase):
+class TaskTestCase(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary_directory = tempfile.TemporaryDirectory()
         self.home = Path(self.temporary_directory.name)
@@ -64,6 +64,8 @@ class TaskTests(unittest.TestCase):
         (task_dir,) = (self.home / ".hearth/tasks").iterdir()
         return json.loads((task_dir / "task.json").read_text(encoding="utf-8"))
 
+
+class TaskTests(TaskTestCase):
     def test_a_successful_run_leaves_a_checkpoint_and_a_complete_task_directory(self) -> None:
         status, _ = self.cli("task", "new", "demo", "Add hello.txt", "--model", "fake-model")
 
@@ -173,6 +175,98 @@ class TaskTests(unittest.TestCase):
         _, output = self.cli("task", "show", task["id"])
 
         self.assertIn(f"git -C {self.repo} push -u origin {task['branch']}", output)
+
+
+class InteractiveTaskTests(TaskTestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.launched: list[list[str]] = []
+        patches = [
+            mock.patch.object(tasks, "_launch", side_effect=lambda argv: self.launched.append(argv)),
+            mock.patch.object(tasks, "_has_session", return_value=True),
+        ]
+        for patch in patches:
+            patch.start()
+            self.addCleanup(patch.stop)
+        os.environ.pop("TMUX", None)  # Restored by the HOME patch; attach, not switch-client, outside tmux.
+
+    def test_interactive_opens_the_cli_in_a_tmux_window_then_collect_records_the_work(self) -> None:
+        status, _ = self.cli("task", "new", "demo", "Add hello.txt", "--interactive", "--model", "fake-model")
+
+        task = self.only_task()
+        worktree = Path(task["worktree"])
+        self.assertEqual((status, task["status"]), (0, "waiting"))
+        window = self.launched[-2]
+        self.assertEqual(self.launched[-1], ["tmux", "attach", "-t", f"=hearth-demo:{task['id']}"])
+        self.assertEqual(window[:8], ["tmux", "new-window", "-t", "=hearth-demo:", "-c", str(worktree), "-n", task["id"]])
+        # The prompt precedes the options, because --allowedTools takes several values and would swallow it.
+        self.assertEqual(window[8], "claude")
+        self.assertIn("Add hello.txt", window[9])
+        self.assertEqual(window[10:12], ["--model", "fake-model"])
+
+        (worktree / "hello.txt").write_text("by hand\n", encoding="utf-8")
+        collected, _ = self.cli("task", "collect", task["id"])
+
+        task = self.only_task()
+        self.assertEqual((collected, task["status"]), (0, "done"))
+        self.assertEqual(git(worktree, "show", "--name-only", "--format=", "HEAD"), "hello.txt\n")
+
+    def test_discard_closes_the_task_window(self) -> None:
+        self.cli("task", "new", "demo", "Add hello.txt", "--interactive")
+        task = self.only_task()
+
+        with mock.patch.object(tasks, "_close_window") as closed:
+            self.cli("task", "discard", task["id"], "--apply")
+
+        closed.assert_called_once_with("demo", task["id"])
+
+    def test_collect_without_changes_fails(self) -> None:
+        self.cli("task", "new", "demo", "Add hello.txt", "--interactive")
+
+        status, _ = self.cli("task", "collect", self.only_task()["id"])
+
+        self.assertEqual((status, self.only_task()["stop_reason"]), (1, "no_changes"))
+
+    def test_attachments_are_copied_and_listed_in_the_prompt(self) -> None:
+        sketch = self.home / "sketch.png"
+        sketch.write_bytes(b"png")
+
+        self.cli("task", "new", "demo", "Add hello.txt", "--interactive", "--attach", str(sketch))
+
+        task = self.only_task()
+        self.assertEqual((Path(task["worktree"]) / ".hearth/attachments/sketch.png").read_bytes(), b"png")
+        prompt = (self.home / ".hearth/tasks" / task["id"] / "runs/01-implement-claude/prompt.md").read_text(encoding="utf-8")
+        self.assertIn(".hearth/attachments/sketch.png", prompt)
+
+    def test_an_issue_starts_the_brief(self) -> None:
+        issue = {"title": "Add hello.txt", "body": "It should say hello."}
+        with mock.patch.object(tasks, "_issue", return_value=issue) as fetched:
+            self.cli("task", "new", "demo", "--issue", "7", "--interactive")
+
+        task = self.only_task()
+        fetched.assert_called_once_with(self.repo, 7)
+        self.assertEqual(task["goal"], "Add hello.txt")
+        self.assertIn("It should say hello.", (self.home / ".hearth/tasks" / task["id"] / "brief.md").read_text(encoding="utf-8"))
+
+    def test_open_launches_vs_code_on_the_worktree(self) -> None:
+        self.cli("task", "new", "demo", "Add hello.txt", "--interactive")
+        task = self.only_task()
+
+        self.cli("task", "open", task["id"])
+
+        self.assertEqual(self.launched[-1], ["code", task["worktree"]])
+
+    def test_hearth_open_creates_the_project_session_once(self) -> None:
+        with mock.patch.object(tasks, "_has_session", return_value=False):
+            self.cli("open", "demo")
+        created = [argv for argv in self.launched if argv[:2] == ["tmux", "new-session"]]
+        self.assertEqual(created[0][:6], ["tmux", "new-session", "-d", "-s", "hearth-demo", "-c"])
+        self.assertEqual(self.launched[-1][:2], ["tmux", "attach"])
+
+        self.launched.clear()
+        with mock.patch.object(tasks, "_has_session", return_value=True):
+            self.cli("open", "demo")
+        self.assertEqual([argv[:2] for argv in self.launched], [["tmux", "attach"]])
 
 
 class ProviderResultTests(unittest.TestCase):

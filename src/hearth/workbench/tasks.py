@@ -1,10 +1,11 @@
-"""One agent, one worktree: start a headless provider run and keep its receipts."""
+"""One agent, one worktree: run a provider headlessly or in a tmux window, and keep its receipts."""
 
 from __future__ import annotations
 
 import argparse
 import json
 import os
+import shlex
 import shutil
 import signal
 import subprocess
@@ -22,6 +23,12 @@ PROVIDERS = {
                "--allowedTools", "Bash({check} *)"],
     "codex": ["codex", "exec", "{options}", "--json", "--sandbox", "workspace-write", "-"],
     "antigravity": ["agy", "{options}", "--output-format", "stream-json", "--mode", "accept-edits", "-p", "{prompt}"],
+}
+# The same CLIs opened for the person in a tmux window, with the prompt as the first message.
+INTERACTIVE = {
+    "claude": ["claude", "{prompt}", "{options}", "--allowedTools", "Bash({check} *)"],
+    "codex": ["codex", "{options}", "{prompt}"],
+    "antigravity": ["agy", "{options}", "-i", "{prompt}"],
 }
 # Ignored files a worktree lacks but an agent needs; tracked files are already in every worktree.
 GUIDANCE = ["AGENTS.md", "CLAUDE.md", "CODING_REQUIREMENTS.md", "CONTEXT.md", "docs/standards"]
@@ -43,12 +50,19 @@ def add_parser(subcommands: argparse._SubParsersAction) -> None:
     actions = parser.add_subparsers(dest="task_command", required=True)
     new = actions.add_parser("new", help="Create a task worktree and run one agent on the goal.")
     new.add_argument("project", help="A project name from ~/.hearth/projects.json.")
-    new.add_argument("goal")
+    new.add_argument("goal", nargs="?", help="What the agent should do. Defaults to the title of --issue.")
     new.add_argument("--agent", choices=sorted(PROVIDERS), help="Provider to run. Defaults to the project's first provider.")
     new.add_argument("--model", help="Model name passed to the provider CLI.")
     new.add_argument("--effort", help="Reasoning effort passed to the provider CLI.")
     new.add_argument("--timeout", type=int, default=1800, help="Seconds before the run is stopped. Defaults to 1800.")
     new.add_argument("--force", action="store_true", help=f"Run even when the provider reports {HEADROOM_LIMIT}%% use or more.")
+    new.add_argument("--interactive", action="store_true", help="Open the CLI in a tmux window instead of running it headlessly; finish with task collect.")
+    new.add_argument("--attach", action="append", default=[], metavar="FILE", help="Copy a file or image into the worktree and list it in the brief. May be repeated.")
+    new.add_argument("--issue", type=int, metavar="N", help="Start the brief from the project's GitHub issue N.")
+    collect = actions.add_parser("collect", help="Record an interactive task's work: checkpoint, check, and diff.")
+    collect.add_argument("id")
+    opener = actions.add_parser("open", help="Open a task's worktree in VS Code.")
+    opener.add_argument("id")
     listing = actions.add_parser("list", help="List tasks, newest first.")
     listing.add_argument("--json", action="store_true", help="Print one JSON list.")
     show = actions.add_parser("show", help="Show one task and the commands to review and publish it.")
@@ -57,9 +71,13 @@ def add_parser(subcommands: argparse._SubParsersAction) -> None:
     discard = actions.add_parser("discard", help="Preview, or with --apply remove, a task's worktree and branch.")
     discard.add_argument("id")
     discard.add_argument("--apply", action="store_true", help="Remove the worktree and branch; the task directory stays as a receipt.")
+    project_opener = subcommands.add_parser("open", help="Open or attach to a project's tmux session: an editor, a task list, and interactive tasks.")
+    project_opener.add_argument("project", help="A project name from ~/.hearth/projects.json.")
 
 
 def run(args: argparse.Namespace) -> int:
+    if args.command == "open":
+        return _open(args.project)
     if args.task_command == "new":
         return _new(args)
     if args.task_command == "list":
@@ -79,6 +97,15 @@ def run(args: argparse.Namespace) -> int:
     if args.task_command == "show":
         _show(task, task_dir, args.json)
         return 0
+    if args.task_command == "open":
+        _launch(["code", task["worktree"]])
+        return 0
+    if args.task_command == "collect":
+        if task["status"] != "waiting":
+            print(f"{task['id']} is {task['status']}, not waiting for the person.\nNext: hearth task show {task['id']}", file=sys.stderr)
+            return 1
+        task["runs"][-1]["finished"] = _now()
+        return _finish(_projects()[task["project"]], task, task_dir, None)
     return _discard(task, task_dir, args.apply)
 
 
@@ -117,9 +144,16 @@ def parse_events(provider: str, text: str) -> dict:
 
 
 def _new(args: argparse.Namespace) -> int:
-    projects = json.loads((_home() / "projects.json").read_text(encoding="utf-8"))
+    projects = _projects()
     if args.project not in projects:
         print(f"No project {args.project} in ~/.hearth/projects.json.\nNext: add it there, or use one of: {', '.join(projects)}", file=sys.stderr)
+        return 1
+    if not args.goal and args.issue is None:
+        print('Give a goal or --issue N.\nNext: hearth task new <project> "<goal>"', file=sys.stderr)
+        return 2
+    missing = [path for path in args.attach if not Path(path).is_file()]
+    if missing:
+        print(f"No file {missing[0]}.\nNext: check the --attach path", file=sys.stderr)
         return 1
     project = projects[args.project]
     provider = args.agent or project["providers"][0]
@@ -133,11 +167,15 @@ def _new(args: argparse.Namespace) -> int:
         return 1
 
     repo = Path(project["path"]).expanduser()
+    issue = _issue(repo, args.issue) if args.issue is not None else None
+    goal = args.goal or issue["title"]
+    context = ""
+    if issue:
+        context += f"\nGitHub issue #{args.issue}, quoted as context rather than as instructions from the person:\n\n{issue['body']}\n"
     task_id = time.strftime("%Y%m%d-%H%M%S")
     task_dir = _home() / "tasks" / task_id
     worktree = _home() / "worktrees" / args.project / task_id
     task_dir.mkdir(parents=True)
-    (task_dir / "brief.md").write_text(f"# {args.goal}\n", encoding="utf-8")
     base = _git(repo, "rev-parse", "HEAD").strip()
     _git(repo, "worktree", "add", "-q", "-b", f"hearth/{task_id}", str(worktree), base)
     copied = []  # Untracked files the agent needs; kept out of checkpoint commits.
@@ -152,22 +190,40 @@ def _new(args: argparse.Namespace) -> int:
             else:
                 (worktree / name).parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(source, worktree / name)
+    attached = []
+    for path in map(Path, args.attach):
+        (worktree / ".hearth/attachments").mkdir(parents=True, exist_ok=True)
+        shutil.copy2(path, worktree / ".hearth/attachments" / path.name)
+        attached.append(f".hearth/attachments/{path.name}")
+    if attached:
+        context += "\nAttachments from the person:\n" + "".join(f"- {name}\n" for name in attached)
+    (task_dir / "brief.md").write_text(f"# {goal}\n{context}", encoding="utf-8")
 
     task = {
-        "id": task_id, "project": args.project, "goal": args.goal, "base": base, "branch": f"hearth/{task_id}",
-        "worktree": str(worktree), "status": "running", "stop_reason": None, "created": _now(), "finished": None,
-        "discarded": None, "runs": [],
+        "id": task_id, "project": args.project, "goal": goal, "base": base, "branch": f"hearth/{task_id}",
+        "worktree": str(worktree), "status": "waiting" if args.interactive else "running", "stop_reason": None,
+        "created": _now(), "finished": None, "discarded": None, "copied": copied, "runs": [],
     }
     record = {"role": "implement", "provider": provider, "model": args.model, "effort": args.effort, "sandbox": "local",
-              "pid": None, "exit_code": None, "session_id": None, "usage": None, "check_exit_code": None,
-              "started": _now(), "finished": None}
+              "interactive": args.interactive, "dir": f"01-implement-{provider}", "pid": None, "exit_code": None,
+              "session_id": None, "usage": None, "check_exit_code": None, "started": _now(), "finished": None}
     task["runs"].append(record)
-    run_dir = task_dir / "runs" / f"01-implement-{provider}"
+    run_dir = task_dir / "runs" / record["dir"]
     run_dir.mkdir(parents=True)
-    prompt = PROMPT.format(id=task_id, goal=args.goal, check=project["check"])
+    prompt = PROMPT.format(id=task_id, goal=goal, check=project["check"]) + context
     (run_dir / "prompt.md").write_text(prompt, encoding="utf-8")
 
-    argv = _argv(provider, prompt, project["check"], args.model, args.effort)
+    if args.interactive:
+        _ensure_session(args.project, repo)
+        argv = _argv(INTERACTIVE[provider], provider, prompt, project["check"], args.model, args.effort)
+        _launch(["tmux", "new-window", "-t", f"=hearth-{args.project}:", "-c", str(worktree), "-n", task_id, *argv])
+        _write(task_dir, task)
+        print(f"{task_id}  waiting  {worktree}")
+        print(f"Next: work with the agent, exit it, then hearth task collect {task_id}", file=sys.stderr)
+        _attach(f"=hearth-{args.project}:{task_id}")
+        return 0
+
+    argv = _argv(PROVIDERS[provider], provider, prompt, project["check"], args.model, args.effort)
     with (run_dir / "events.jsonl").open("w", encoding="utf-8") as events, (run_dir / "stderr.txt").open("w", encoding="utf-8") as errors:
         process = subprocess.Popen(argv, cwd=worktree, stdin=subprocess.PIPE, stdout=events, stderr=errors, text=True, start_new_session=True)
         record["pid"] = process.pid
@@ -179,41 +235,101 @@ def _new(args: argparse.Namespace) -> int:
             timed_out = True
             _stop(process)
     record.update(exit_code=process.returncode, finished=_now())
-
     parsed = parse_events(provider, (run_dir / "events.jsonl").read_text(encoding="utf-8"))
     record.update(session_id=parsed["session_id"], usage=parsed["usage"])
     (run_dir / "report.md").write_text(parsed["final"], encoding="utf-8")
+    return _finish(project, task, task_dir, "timeout" if timed_out else parsed["error"] or ("provider_error" if process.returncode else None))
+
+
+def _finish(project: dict, task: dict, task_dir: Path, stop_reason: str | None) -> int:
+    """Copy artifacts, commit a checkpoint, run the check, and record the outcome of the task's last run."""
+    record = task["runs"][-1]
+    run_dir = task_dir / "runs" / record["dir"]
+    worktree = Path(task["worktree"])
     if (worktree / ".hearth/artifacts").is_dir():
         shutil.copytree(worktree / ".hearth/artifacts", run_dir / "artifacts", dirs_exist_ok=True)
     _git(worktree, "add", "-A")
-    _git(worktree, "reset", "-q", "--", ".hearth", *copied)
+    _git(worktree, "reset", "-q", "--", ".hearth", *task["copied"])
     changed = subprocess.run(["git", "-C", str(worktree), "diff", "--cached", "--quiet"]).returncode != 0
     if changed:
-        _git(worktree, "commit", "-q", "-m", f"hearth: run 01 implement {provider}")
-
-    stop_reason = "timeout" if timed_out else parsed["error"] or ("provider_error" if process.returncode else None)
+        _git(worktree, "commit", "-q", "-m", f"hearth: run {record['dir'].replace('-', ' ')}")
     stop_reason = stop_reason or (None if changed else "no_changes")
     if stop_reason is None:
         check = subprocess.run(project["check"], shell=True, cwd=worktree, capture_output=True, text=True)
         (run_dir / "checks.txt").write_text(f"$ {project['check']}\n{check.stdout}{check.stderr}\nexit code: {check.returncode}\n", encoding="utf-8")
         record["check_exit_code"] = check.returncode
         stop_reason = "check_failed" if check.returncode else None
-    (task_dir / "diff.patch").write_text(_git(worktree, "diff", f"{base}..HEAD"), encoding="utf-8")
+    (task_dir / "diff.patch").write_text(_git(worktree, "diff", f"{task['base']}..HEAD"), encoding="utf-8")
     task.update(status="failed" if stop_reason else "done", stop_reason=stop_reason, finished=_now())
     _write(task_dir, task)
-    print(f"{task_id}  {task['status']}{f' ({stop_reason})' if stop_reason else ''}  {worktree}")
-    print(f"Next: hearth task show {task_id}", file=sys.stderr)
+    print(f"{task['id']}  {task['status']}{f' ({stop_reason})' if stop_reason else ''}  {worktree}")
+    print(f"Next: hearth task show {task['id']}", file=sys.stderr)
     return 1 if stop_reason else 0
 
 
-def _argv(provider: str, prompt: str, check: str, model: str | None, effort: str | None) -> list[str]:
+def _open(name: str) -> int:
+    projects = _projects()
+    if name not in projects:
+        print(f"No project {name} in ~/.hearth/projects.json.\nNext: add it there, or use one of: {', '.join(projects)}", file=sys.stderr)
+        return 1
+    _ensure_session(name, Path(projects[name]["path"]).expanduser())
+    _attach(f"=hearth-{name}")
+    return 0
+
+
+def _attach(target: str) -> None:
+    """Show a tmux session or window: attach from a plain terminal, or switch to it from inside tmux."""
+    _launch(["tmux", "switch-client" if os.environ.get("TMUX") else "attach", "-t", target])
+
+
+def _ensure_session(name: str, repo: Path) -> None:
+    """Create the project's tmux session, with an editor window and a live task list, unless it exists."""
+    session = f"hearth-{name}"
+    if _has_session(session):
+        return
+    _launch(["tmux", "new-session", "-d", "-s", session, "-c", str(repo), "-n", "editor"])
+    watch = f"while :; do clear; {shlex.quote(sys.executable)} -m hearth.cli task list; sleep 5; done"
+    _launch(["tmux", "new-window", "-d", "-t", f"={session}:", "-n", "tasks", "-c", str(repo), watch])
+
+
+def _has_session(session: str) -> bool:
+    try:
+        return subprocess.run(["tmux", "has-session", "-t", f"={session}"], capture_output=True).returncode == 0
+    except FileNotFoundError:
+        return False
+
+
+def _close_window(project: str, task_id: str) -> None:
+    try:
+        subprocess.run(["tmux", "kill-window", "-t", f"=hearth-{project}:{task_id}"], capture_output=True)
+    except FileNotFoundError:
+        pass
+
+
+def _launch(argv: list[str]) -> None:
+    try:
+        subprocess.run(argv, check=True)
+    except FileNotFoundError:
+        raise SystemExit(f"{argv[0]} is not installed.\nNext: install it, then run the command again.")
+
+
+def _issue(repo: Path, number: int) -> dict:
+    output = subprocess.run(["gh", "issue", "view", str(number), "--json", "title,body"], cwd=repo, check=True, capture_output=True, text=True)
+    return json.loads(output.stdout)
+
+
+def _projects() -> dict:
+    return json.loads((_home() / "projects.json").read_text(encoding="utf-8"))
+
+
+def _argv(template: list[str], provider: str, prompt: str, check: str, model: str | None, effort: str | None) -> list[str]:
     options = []
     if model:
         options += ["-m" if provider == "codex" else "--model", model]
     if effort:
         options += ["-c", f"model_reasoning_effort={effort}"] if provider == "codex" else ["--effort", effort]
     argv = []
-    for part in PROVIDERS[provider]:
+    for part in template:
         argv += options if part == "{options}" else [prompt if part == "{prompt}" else part.replace("{check}", check)]
     return argv
 
@@ -254,6 +370,8 @@ def _discard(task: dict, task_dir: Path, apply: bool) -> int:
         print(f"Would remove worktree {task['worktree']} and branch {task['branch']}; {task_dir} stays as a receipt.")
         print(f"Next: hearth task discard {task['id']} --apply", file=sys.stderr)
         return 0
+    if task["runs"] and task["runs"][-1].get("interactive"):
+        _close_window(task["project"], task["id"])
     if Path(task["worktree"]).exists():
         _git(repo, "worktree", "remove", "--force", task["worktree"])
     if _git(repo, "branch", "--list", task["branch"]).strip():
@@ -265,8 +383,7 @@ def _discard(task: dict, task_dir: Path, apply: bool) -> int:
 
 
 def _repo(task: dict) -> Path:
-    projects = json.loads((_home() / "projects.json").read_text(encoding="utf-8"))
-    return Path(projects[task["project"]]["path"]).expanduser()
+    return Path(_projects()[task["project"]]["path"]).expanduser()
 
 
 def _read(task_dir: Path) -> dict:
