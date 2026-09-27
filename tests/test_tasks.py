@@ -14,7 +14,7 @@ from unittest import mock
 from hearth.cli import main
 from hearth.workbench import tasks
 
-FAKE_AGENT = [sys.executable, str(Path(__file__).with_name("fake_agent.py")), "{options}"]
+FAKE_AGENT = [sys.executable, str(Path(__file__).with_name("fake_agent.py")), "{options}", "--allowedTools", "Bash({check} *)"]
 FIXTURES = Path(__file__).parent / "fixtures/public/providers"
 
 
@@ -74,12 +74,15 @@ class TaskTests(unittest.TestCase):
         self.assertEqual(status, 0)
         self.assertEqual(task["status"], "done")
         self.assertIn("Add hello.txt", (run_dir / "prompt.md").read_text(encoding="utf-8"))
+        self.assertIn("`test -f hello.txt`", (run_dir / "prompt.md").read_text(encoding="utf-8"))
         self.assertEqual((run_dir / "report.md").read_text(encoding="utf-8"), "Added hello.txt.")
         self.assertIn("exit code: 0", (run_dir / "checks.txt").read_text(encoding="utf-8"))
         self.assertEqual((run_dir / "artifacts/note.txt").read_text(encoding="utf-8"), "for the person\n")
         self.assertIn(f"+# Task {task['id']}", (task_dir / "diff.patch").read_text(encoding="utf-8"))
         self.assertEqual(task["runs"][0]["session_id"], "00000000-0000-0000-0000-00000000000f")
-        self.assertIn("fake-model", json.loads((run_dir / "events.jsonl").read_text(encoding="utf-8").splitlines()[0])["argv"])
+        argv = json.loads((run_dir / "events.jsonl").read_text(encoding="utf-8").splitlines()[0])["argv"]
+        self.assertIn("fake-model", argv)
+        self.assertEqual(argv[argv.index("--allowedTools") + 1], "Bash(test -f hello.txt *)")
         self.assertEqual(git(worktree, "log", "-1", "--format=%s"), "hearth: run 01 implement claude\n")
         self.assertEqual(git(worktree, "show", "--name-only", "--format=", "HEAD"), "hello.txt\n")
         self.assertEqual((worktree / "AGENTS.md").read_text(encoding="utf-8"), "Run the check.\n")
@@ -102,6 +105,15 @@ class TaskTests(unittest.TestCase):
         self.assertEqual(status, 1)
         self.assertEqual((task["status"], task["stop_reason"]), ("failed", "provider_error"))
         self.assertIsNone(task["runs"][0]["check_exit_code"])
+
+    def test_a_run_that_changes_nothing_fails_even_when_the_provider_reports_success(self) -> None:
+        os.environ["FAKE_AGENT_SCENARIO"] = "idle"
+
+        status, _ = self.cli("task", "new", "demo", "Add hello.txt")
+
+        task = self.only_task()
+        self.assertEqual(status, 1)
+        self.assertEqual((task["status"], task["stop_reason"]), ("failed", "no_changes"))
 
     def test_an_expired_sign_in_is_named(self) -> None:
         os.environ["FAKE_AGENT_SCENARIO"] = "auth"

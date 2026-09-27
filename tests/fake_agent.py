@@ -1,7 +1,7 @@
 """A stand-in provider CLI for workbench tests.
 
 It reads the prompt on standard input and prints Claude-format stream events.
-The scenario comes from FAKE_AGENT_SCENARIO: edit, fail, auth, or hang.
+The scenario comes from FAKE_AGENT_SCENARIO: edit, idle, fail, auth, or hang.
 """
 
 from __future__ import annotations
@@ -31,6 +31,9 @@ def main() -> int:
     if scenario == "auth":
         emit({"type": "result", "subtype": "success", "is_error": True, "result": "Failed to authenticate: OAuth session expired and could not be refreshed", "session_id": SESSION})
         return 1
+    if scenario == "idle":
+        emit({"type": "result", "subtype": "success", "is_error": False, "result": "", "session_id": SESSION})
+        return 0
     Path("hello.txt").write_text(prompt.splitlines()[0] + "\n", encoding="utf-8")
     Path(".hearth/artifacts").mkdir(parents=True, exist_ok=True)
     Path(".hearth/artifacts/note.txt").write_text("for the person\n", encoding="utf-8")

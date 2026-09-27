@@ -15,9 +15,11 @@ from pathlib import Path
 from . import usage
 
 # Implementer invocations, confirmed against each installed version (see the workbench specification's Run table).
-# "{options}" becomes the model and effort flags; "{prompt}" is for a CLI that cannot read the prompt on standard input.
+# "{options}" becomes the model and effort flags, "{check}" the project's check command,
+# and "{prompt}" is for a CLI that cannot read the prompt on standard input.
 PROVIDERS = {
-    "claude": ["claude", "{options}", "-p", "--output-format", "stream-json", "--verbose", "--permission-mode", "acceptEdits"],
+    "claude": ["claude", "{options}", "-p", "--output-format", "stream-json", "--verbose", "--permission-mode", "acceptEdits",
+               "--allowedTools", "Bash({check} *)"],
     "codex": ["codex", "exec", "{options}", "--json", "--sandbox", "workspace-write", "-"],
     "antigravity": ["agy", "{options}", "--output-format", "stream-json", "--mode", "accept-edits", "-p", "{prompt}"],
 }
@@ -29,6 +31,7 @@ PROMPT = """# Task {id}
 Goal: {goal}
 
 Work only in this directory, and follow AGENTS.md if it exists.
+Run tests only with `{check}`, adding arguments at the end if you need fewer tests, such as `-k NAME`; other forms are refused.
 Do not commit; Hearth commits a checkpoint after this run and then runs the project's check.
 Save anything meant for the person, such as a page or an image, in .hearth/artifacts/.
 End with what changed, which checks you ran and their results, and any open questions.
@@ -161,10 +164,10 @@ def _new(args: argparse.Namespace) -> int:
     task["runs"].append(record)
     run_dir = task_dir / "runs" / f"01-implement-{provider}"
     run_dir.mkdir(parents=True)
-    prompt = PROMPT.format(id=task_id, goal=args.goal)
+    prompt = PROMPT.format(id=task_id, goal=args.goal, check=project["check"])
     (run_dir / "prompt.md").write_text(prompt, encoding="utf-8")
 
-    argv = _argv(provider, prompt, args.model, args.effort)
+    argv = _argv(provider, prompt, project["check"], args.model, args.effort)
     with (run_dir / "events.jsonl").open("w", encoding="utf-8") as events, (run_dir / "stderr.txt").open("w", encoding="utf-8") as errors:
         process = subprocess.Popen(argv, cwd=worktree, stdin=subprocess.PIPE, stdout=events, stderr=errors, text=True, start_new_session=True)
         record["pid"] = process.pid
@@ -184,10 +187,12 @@ def _new(args: argparse.Namespace) -> int:
         shutil.copytree(worktree / ".hearth/artifacts", run_dir / "artifacts", dirs_exist_ok=True)
     _git(worktree, "add", "-A")
     _git(worktree, "reset", "-q", "--", ".hearth", *copied)
-    if subprocess.run(["git", "-C", str(worktree), "diff", "--cached", "--quiet"]).returncode:
+    changed = subprocess.run(["git", "-C", str(worktree), "diff", "--cached", "--quiet"]).returncode != 0
+    if changed:
         _git(worktree, "commit", "-q", "-m", f"hearth: run 01 implement {provider}")
 
     stop_reason = "timeout" if timed_out else parsed["error"] or ("provider_error" if process.returncode else None)
+    stop_reason = stop_reason or (None if changed else "no_changes")
     if stop_reason is None:
         check = subprocess.run(project["check"], shell=True, cwd=worktree, capture_output=True, text=True)
         (run_dir / "checks.txt").write_text(f"$ {project['check']}\n{check.stdout}{check.stderr}\nexit code: {check.returncode}\n", encoding="utf-8")
@@ -201,7 +206,7 @@ def _new(args: argparse.Namespace) -> int:
     return 1 if stop_reason else 0
 
 
-def _argv(provider: str, prompt: str, model: str | None, effort: str | None) -> list[str]:
+def _argv(provider: str, prompt: str, check: str, model: str | None, effort: str | None) -> list[str]:
     options = []
     if model:
         options += ["-m" if provider == "codex" else "--model", model]
@@ -209,7 +214,7 @@ def _argv(provider: str, prompt: str, model: str | None, effort: str | None) -> 
         options += ["-c", f"model_reasoning_effort={effort}"] if provider == "codex" else ["--effort", effort]
     argv = []
     for part in PROVIDERS[provider]:
-        argv += options if part == "{options}" else [prompt if part == "{prompt}" else part]
+        argv += options if part == "{options}" else [prompt if part == "{prompt}" else part.replace("{check}", check)]
     return argv
 
 
