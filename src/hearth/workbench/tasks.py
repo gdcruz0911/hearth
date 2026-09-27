@@ -44,6 +44,9 @@ REVIEW_MODELS = {"antigravity": "gemini-3.1-pro-high"}
 # The spec's slots: how many runs of each kind may be active at once, across all projects.
 SLOTS = {"implement": 2, "support": 1}
 IMPLEMENT_ROLES = {"test", "implement", "fix"}
+# The task board: who an agent may address, and what kind of message it may post.
+RECIPIENTS = {"person", "implement", "review"}  # ponytail: "knowledge" joins once search --json lands in Phase 5.
+KINDS = {"question", "answer", "finding", "handoff", "blocker"}
 GUIDANCE = ["AGENTS.md", "CLAUDE.md", "CODING_REQUIREMENTS.md", "CONTEXT.md", "docs/standards"]
 HEADROOM_LIMIT = 90
 PROMPT = """# Task {id}
@@ -54,6 +57,9 @@ Goal: {goal}
 Run tests only with `{check}`, adding arguments at the end if you need fewer tests, such as `-k NAME`; other forms are refused.
 Do not commit; Hearth commits a checkpoint after this run and then runs the project's check.
 Save anything meant for the person, such as a page or an image, in .hearth/artifacts/.
+To ask the person or hand something to the reviewer, append one JSON line to .hearth/outbox.jsonl, such as
+{{"to": "person", "kind": "question", "body": "..."}}; "to" is person, implement, or review, and "kind" is question, finding, handoff, or blocker.
+A question to the person pauses the task until they answer, so ask only what you cannot decide from the code and docs.
 End with what changed, which checks you ran and their results, and any open questions.
 """)
 REVIEW_PROMPT = """# Review of task {id}
@@ -67,6 +73,7 @@ Approve only when the change meets the goal, is tested, and has no problem you w
 End your reply with this JSON and nothing after it:
 {{"verdict": "approve" or "changes", "findings": [{{"standard": "CLI-3", "file": "path", "line": 1, "problem": "what is wrong and why"}}]}}
 
+{messages}
 The diff from {base} to the task branch:
 
 ```diff
@@ -89,6 +96,9 @@ def add_parser(subcommands: argparse._SubParsersAction) -> None:
     new.add_argument("--interactive", action="store_true", help="Open the CLI in a tmux window instead of running it headlessly; finish with task collect.")
     new.add_argument("--attach", action="append", default=[], metavar="FILE", help="Copy a file or image into the worktree and list it in the brief. May be repeated.")
     new.add_argument("--issue", type=int, metavar="N", help="Start the brief from the project's GitHub issue N.")
+    answer = actions.add_parser("answer", help="Answer the question an agent left for you, so the task can continue.")
+    answer.add_argument("id")
+    answer.add_argument("text")
     collect = actions.add_parser("collect", help="Record an interactive task's work: checkpoint, check, and diff.")
     collect.add_argument("id")
     opener = actions.add_parser("open", help="Open a task's worktree in VS Code.")
@@ -146,7 +156,10 @@ def run(args: argparse.Namespace) -> int:
             print(f"{task['id']} is {task['status']}, not waiting for the person.\nNext: hearth task show {task['id']}", file=sys.stderr)
             return 1
         task["runs"][-1]["finished"] = _now()
+        _drain(task, task_dir, task["runs"][-1])
         return _finish(_projects()[task["project"]], task, task_dir, None)
+    if args.task_command == "answer":
+        return _answer(task, task_dir, args.text)
     return _discard(task, task_dir, args.apply)
 
 
@@ -296,6 +309,7 @@ def _run(task: dict, task_dir: Path, role: str, provider: str, template: list[st
     parsed = parse_events(provider, (run_dir / "events.jsonl").read_text(encoding="utf-8"))
     record.update(session_id=parsed["session_id"], usage=parsed["usage"])
     (run_dir / "report.md").write_text(parsed["final"], encoding="utf-8")
+    _drain(task, task_dir, record)
     parsed["stop"] = "timeout" if timed_out else parsed["error"] or ("provider_error" if process.returncode else None)
     return parsed
 
@@ -306,7 +320,7 @@ def _loop(args: argparse.Namespace) -> int:
         print(f"No task {args.id}.\nNext: hearth task list", file=sys.stderr)
         return 1
     task = _read(task_dir)
-    if task["status"] not in ("done", "failed") or task["stop_reason"] not in (None, "check_failed", "review_unparsed", "rounds_exhausted"):
+    if task["status"] not in ("done", "failed") or task["stop_reason"] not in (None, "check_failed", "no_changes", "review_unparsed", "rounds_exhausted"):
         reason = f" ({task['stop_reason']})" if task["stop_reason"] else ""
         print(f"{task['id']} is {task['status']}{reason}; the loop continues only a finished task whose check ran.\nNext: hearth task show {task['id']}", file=sys.stderr)
         return 1
@@ -323,14 +337,19 @@ def _loop(args: argparse.Namespace) -> int:
     while True:
         if task["stop_reason"] == "check_failed":
             checks = (task_dir / "runs" / task["runs"][-1]["dir"] / "checks.txt").read_text(encoding="utf-8")
-            feedback = f"The project's check failed:\n\n```text\n{checks[-4000:]}\n```\n"
+            feedback = f"The project's check failed; fix it:\n\n```text\n{checks[-4000:]}\n```\n"
+        elif task["stop_reason"] == "no_changes" and not _git(Path(task["worktree"]), "diff", f"{task['base']}..HEAD"):
+            feedback = "The last run changed no files; continue the goal, using the board messages below.\n"
         else:
             _wait_for_slot("support", task, task_dir)
             diff = _git(Path(task["worktree"]), "diff", f"{task['base']}..HEAD")
-            prompt = REVIEW_PROMPT.format(id=task["id"], goal=task["goal"], base=task["base"][:12], diff=diff[:100_000])  # ponytail: a cap, not paging, for very large diffs.
+            prompt = REVIEW_PROMPT.format(id=task["id"], goal=task["goal"], base=task["base"][:12], diff=diff[:100_000],
+                                          messages=_messages(task_dir, "review"))  # ponytail: a cap, not paging, for very large diffs.
             result = _run(task, task_dir, "review", reviewer, REVIEWERS[reviewer], prompt, REVIEW_MODELS.get(reviewer), None, args.timeout, project["check"])
             verdict = None if result["stop"] else _verdict(result["final"])
             task["runs"][-1]["verdict"] = verdict and verdict["verdict"]
+            if not result["stop"] and _hold_for_person(task, task_dir, "done", None):
+                return 1
             if verdict is None:
                 return _end(task, task_dir, result["stop"] or "review_unparsed")
             if verdict["verdict"] == "approve":
@@ -340,17 +359,107 @@ def _loop(args: argparse.Namespace) -> int:
                 print(f"Next: hearth task show {task['id']}", file=sys.stderr)
                 return 0
             findings = "".join(f"- {item.get('standard', '')} {item.get('file', '')}:{item.get('line', '')} {item.get('problem', '')}\n" for item in verdict["findings"])
-            feedback = f"A reviewer from another model family asked for changes:\n\n{findings}"
+            feedback = f"A reviewer from another model family asked for these changes:\n\n{findings}"
         if fixes == args.rounds:
             return _end(task, task_dir, "rounds_exhausted")
         fixes += 1
         _wait_for_slot("implement", task, task_dir)
-        prompt = f"# Task {task['id']}: fix round {fixes}\n\nGoal: {task['goal']}\n\n{feedback}\nFix these.\n" + INSTRUCTIONS.format(check=project["check"])
+        prompt = (f"# Task {task['id']}: fix round {fixes}\n\nGoal: {task['goal']}\n\n{feedback}"
+                  + _messages(task_dir, "implement") + "\n" + INSTRUCTIONS.format(check=project["check"]))
         result = _run(task, task_dir, "fix", implementer["provider"], PROVIDERS[implementer["provider"]], prompt,
                       implementer["model"], implementer["effort"], args.timeout, project["check"])
         _finish(project, task, task_dir, result["stop"])
+        if task["stop_reason"] == "no_changes" and _git(Path(task["worktree"]), "diff", f"{task['base']}..HEAD"):
+            continue  # The implementer disagreed and changed nothing; the reviewer reads its board note next.
         if task["stop_reason"] not in (None, "check_failed"):
             return 1
+
+
+def _drain(task: dict, task_dir: Path, record: dict) -> None:
+    """Move a run's outbox onto the task board, keeping only well-formed messages; agent output is untrusted (CODE-5)."""
+    outbox = Path(task["worktree"]) / ".hearth/outbox.jsonl"
+    if not outbox.exists():
+        return
+    count, rejected = len(_board(task_dir)), 0
+    for line in outbox.read_text(encoding="utf-8", errors="replace").splitlines():
+        try:
+            message = json.loads(line) if line.strip() else None
+        except json.JSONDecodeError:
+            message = {}
+        if message is None:
+            continue
+        body = message.get("body") if isinstance(message, dict) else None
+        if not (isinstance(body, str) and body.strip() and message.get("to") in RECIPIENTS and message.get("kind") in KINDS - {"answer"}):
+            rejected += 1
+            continue
+        count += 1
+        refs = message.get("refs") if isinstance(message.get("refs"), list) else []
+        _post(task_dir, {"id": f"m{count}", "from": record["dir"], "to": message["to"], "kind": message["kind"],
+                         "body": body[:2000], "refs": [str(ref)[:200] for ref in refs[:10]]})
+    outbox.unlink()
+    record["rejected_messages"] = rejected
+
+
+def _board(task_dir: Path) -> list[dict]:
+    path = task_dir / "board.jsonl"
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()] if path.exists() else []
+
+
+def _post(task_dir: Path, message: dict) -> None:
+    with (task_dir / "board.jsonl").open("a", encoding="utf-8") as board:
+        board.write(json.dumps({**message, "at": _now()}) + "\n")
+
+
+def _role(sender: str) -> str:
+    """The board role behind a run directory such as 03-fix-claude; fix runs speak for the implementer."""
+    role = sender.split("-")[1] if "-" in sender else sender
+    return "implement" if role in IMPLEMENT_ROLES else role
+
+
+def _messages(task_dir: Path, role: str) -> str:
+    lines = [f"- {message['kind']} from {message['from']} to {message['to']}: {message['body']}\n"
+             for message in _board(task_dir)
+             # Exchanges with the person refine the goal for every role, so each role sees them.
+             if role in (message["to"], _role(message["from"])) or "person" in (message["to"], message["from"])]
+    return "\nMessages on the task board for you:\n" + "".join(lines) if lines else ""
+
+
+def _open_questions(task_dir: Path) -> list[dict]:
+    board = _board(task_dir)
+    answered = {message.get("reply_to") for message in board if message["kind"] == "answer"}
+    return [message for message in board
+            if message["kind"] != "answer" and (message["to"] == "person" or message["kind"] == "blocker") and message["id"] not in answered]
+
+
+def _hold_for_person(task: dict, task_dir: Path, status: str, stop_reason: str | None) -> bool:
+    """Pause the task while a question to the person is open; the answer restores where it stopped."""
+    questions = _open_questions(task_dir)
+    if not questions:
+        return False
+    task.update(status="waiting", stop_reason="question", resume={"status": status, "stop_reason": stop_reason})
+    _write(task_dir, task)
+    print(f"{task['id']}  waiting  {questions[0]['from']} asks: {questions[0]['body']}")
+    print(f'Next: hearth task answer {task["id"]} "<your answer>"', file=sys.stderr)
+    return True
+
+
+def _answer(task: dict, task_dir: Path, text: str) -> int:
+    questions = _open_questions(task_dir)
+    if task["status"] != "waiting" or not questions:
+        print(f"{task['id']} has no open question.\nNext: hearth task show {task['id']}", file=sys.stderr)
+        return 1
+    question = questions[0]
+    _post(task_dir, {"id": f"m{len(_board(task_dir)) + 1}", "from": "person", "to": _role(question["from"]),
+                     "kind": "answer", "body": text, "refs": [], "reply_to": question["id"]})
+    if len(questions) == 1:
+        task.update(task.pop("resume"))
+        _write(task_dir, task)
+        print(f"Answered {question['id']}; {task['id']} is ready for hearth loop to continue with your answer.")
+        print(f"Next: hearth loop {task['id']}", file=sys.stderr)
+    else:
+        print(f"Answered {question['id']}; {len(questions) - 1} more question(s) open.")
+        print(f"Next: hearth task show {task['id']}", file=sys.stderr)
+    return 0
 
 
 def _verdict(text: str) -> dict | None:
@@ -420,6 +529,8 @@ def _finish(project: dict, task: dict, task_dir: Path, stop_reason: str | None) 
         stop_reason = "check_failed" if check.returncode else None
     (task_dir / "diff.patch").write_text(_git(worktree, "diff", f"{task['base']}..HEAD"), encoding="utf-8")
     task.update(status="failed" if stop_reason else "done", stop_reason=stop_reason, finished=_now())
+    if _hold_for_person(task, task_dir, task["status"], stop_reason):
+        return 1
     _write(task_dir, task)
     print(f"{task['id']}  {task['status']}{f' ({stop_reason})' if stop_reason else ''}  {worktree}")
     print(f"Next: hearth task show {task['id']}", file=sys.stderr)
@@ -516,6 +627,8 @@ def _show(task: dict, task_dir: Path, as_json: bool) -> None:
     print(f"receipts  {task_dir}")
     for run in task["runs"]:
         print(f"run       {run['role']} {run['provider']} {run['model'] or ''} exit {run['exit_code']}, check exit {run['check_exit_code']}")
+    for question in _open_questions(task_dir):
+        print(f"question  {question['id']} from {question['from']}: {question['body']}")
     repo = _repo(task)
     print("To review and publish:")
     print(f"  code {task['worktree']}")
