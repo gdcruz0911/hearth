@@ -124,7 +124,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.command == "usage":
         return usage.run(args)
-    if args.command == "task":
+    if args.command in ("task", "open"):
         return tasks.run(args)
     if args.command == "profile":
         if (args.embedding_model is None) != (args.index_directory is None):

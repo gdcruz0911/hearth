@@ -92,10 +92,14 @@ A test fails when a command is missing from this table.
 | `hearth profile create <path>` | Create a private runtime profile. |
 | `hearth usage` | Show five-hour and weekly plan use for Claude, Codex, and Antigravity. |
 | `hearth usage statusline` | Record Claude's limits from its status line JSON. |
-| `hearth task new <project> "<goal>"` | Run one agent on the goal in a new worktree, with receipts. |
+| `hearth task new <project> "<goal>"` | Run one agent on the goal in a new worktree, with receipts; `--attach FILE` adds files or images, and `--issue N` starts from a GitHub issue. |
 | `hearth task list` | List tasks, newest first. |
 | `hearth task show <id>` | Show a task and the commands to review and publish it. |
 | `hearth task discard <id>` | Preview, or with `--apply` remove, a task's worktree and branch. |
+| `hearth task new <project> "<goal>" --interactive` | Open the agent in a tmux window instead, with the goal as its first message. |
+| `hearth task collect <id>` | After an interactive task, commit its checkpoint, run the check, and save the diff. |
+| `hearth task open <id>` | Open a task's worktree in VS Code. |
+| `hearth open <project>` | Open or attach to the project's tmux session: an editor, a live task list, and interactive tasks. |
 
 ## Local web interface
 
