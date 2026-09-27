@@ -47,6 +47,7 @@ class TaskTestCase(unittest.TestCase):
         for patch in patches:
             patch.start()
             self.addCleanup(patch.stop)
+        os.environ.pop("HEARTH_TASK", None)  # Restored by the patch; set when an agent runs this suite inside a task.
 
     def tearDown(self) -> None:
         self.temporary_directory.cleanup()
@@ -280,7 +281,7 @@ class InteractiveTaskTests(TaskTestCase):
         self.assertEqual([argv[:2] for argv in self.launched], [["tmux", "attach"]])
 
 
-class LoopTests(TaskTestCase):
+class LoopTestCase(TaskTestCase):
     def setUp(self) -> None:
         super().setUp()
         patch = mock.patch.dict(tasks.REVIEWERS, {"codex": FAKE_CODEX})
@@ -296,6 +297,8 @@ class LoopTests(TaskTestCase):
         os.environ["FAKE_REVIEWS"] = reviews
         return self.cli("loop", task["id"], *argv)[0]
 
+
+class LoopTests(LoopTestCase):
     def test_an_approving_review_from_another_model_family_finishes_the_task(self) -> None:
         status = self.loop(self.start(), "approve")
 
@@ -365,6 +368,86 @@ class LoopTests(TaskTestCase):
             self.loop(task, "approve")
 
         self.assertEqual(statuses, ["queued"])
+
+
+class BoardTests(LoopTestCase):
+    def board(self, task: dict) -> list[dict]:
+        path = self.home / ".hearth/tasks" / task["id"] / "board.jsonl"
+        return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+    def test_a_question_for_the_person_waits_until_answered_and_the_answer_reaches_the_next_prompt(self) -> None:
+        os.environ["FAKE_OUTBOX"] = '{"to": "person", "kind": "question", "body": "Which greeting?"}'
+        task = self.start()
+        os.environ.pop("FAKE_OUTBOX")
+
+        self.assertEqual((task["status"], task["stop_reason"]), ("waiting", "question"))
+        self.assertEqual(self.board(task)[0]["from"], "01-implement-claude")
+        self.assertEqual(self.loop(task, "approve"), 1)
+
+        _, shown = self.cli("task", "show", task["id"])
+        self.assertIn("Which greeting?", shown)
+
+        status, _ = self.cli("task", "answer", task["id"], "Say hello to the person.")
+        self.assertEqual((status, self.only_task()["status"]), (0, "done"))
+        self.assertEqual(self.board(task)[-1], self.board(task)[-1] | {"from": "person", "to": "implement", "kind": "answer"})
+
+        self.assertEqual(self.loop(task, "changes,approve"), 0)
+        fix_prompt = (self.home / ".hearth/tasks" / task["id"] / "runs/03-fix-claude/prompt.md").read_text(encoding="utf-8")
+        self.assertIn("Which greeting?", fix_prompt)
+        self.assertIn("Say hello to the person.", fix_prompt)
+        self.assertIn("Say hello to the person.", (self.home / ".fake-last-review-prompt").read_text(encoding="utf-8"))
+
+    def test_an_agent_that_only_asked_continues_after_the_answer(self) -> None:
+        os.environ.update(FAKE_AGENT_SCENARIO="idle", FAKE_OUTBOX='{"to": "person", "kind": "question", "body": "Which flag?"}')
+        task = self.start()
+        os.environ.update(FAKE_AGENT_SCENARIO="edit")
+        os.environ.pop("FAKE_OUTBOX")
+        self.cli("task", "answer", task["id"], "Use --json.")
+
+        status = self.loop(task, "approve")
+
+        task = self.only_task()
+        self.assertEqual((status, [run["role"] for run in task["runs"]]), (0, ["implement", "fix", "review"]))
+        fix_prompt = (self.home / ".hearth/tasks" / task["id"] / "runs/02-fix-claude/prompt.md").read_text(encoding="utf-8")
+        self.assertIn("Use --json.", fix_prompt)
+
+    def test_a_fix_that_changes_nothing_on_finished_work_goes_back_to_review(self) -> None:
+        task = self.start()
+        os.environ["FAKE_AGENT_SCENARIO"] = "idle"
+
+        status = self.loop(task, "changes,approve")
+
+        task = self.only_task()
+        self.assertEqual((status, [run["role"] for run in task["runs"]]), (0, ["implement", "review", "fix", "review"]))
+
+    def test_a_handoff_to_the_reviewer_appears_in_its_prompt(self) -> None:
+        os.environ["FAKE_OUTBOX"] = '{"to": "review", "kind": "handoff", "body": "Check the empty-file case."}'
+        task = self.start()
+        os.environ.pop("FAKE_OUTBOX")
+
+        self.loop(task, "approve")
+
+        self.assertIn("Check the empty-file case.", (self.home / ".fake-last-review-prompt").read_text(encoding="utf-8"))
+
+    def test_malformed_or_misaddressed_messages_are_dropped_and_counted(self) -> None:
+        os.environ["FAKE_OUTBOX"] = '\n'.join([
+            "not json",
+            '{"to": "everyone", "kind": "question", "body": "Hi?"}',
+            '{"to": "review", "kind": "finding", "body": "Fine."}',
+        ])
+        task = self.start()
+        os.environ.pop("FAKE_OUTBOX")
+
+        self.assertEqual([message["body"] for message in self.board(task)], ["Fine."])
+        self.assertEqual(task["runs"][0]["rejected_messages"], 2)
+        self.assertFalse((Path(task["worktree"]) / ".hearth/outbox.jsonl").exists())
+
+    def test_answering_a_task_with_no_open_question_is_refused(self) -> None:
+        task = self.start()
+
+        status, _ = self.cli("task", "answer", task["id"], "Hello?")
+
+        self.assertEqual(status, 1)
 
 
 class ProviderResultTests(unittest.TestCase):

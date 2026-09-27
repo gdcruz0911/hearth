@@ -3,6 +3,7 @@
 It reads the prompt on standard input and prints Claude-format stream events, or Codex-format ones after `--as codex`.
 The scenario comes from FAKE_AGENT_SCENARIO: edit, idle, fail, auth, or hang.
 A prompt that starts with "# Review" is answered with the next verdict in FAKE_REVIEWS: approve, changes, or garbage.
+An editing or idle run also writes FAKE_OUTBOX, if set, to .hearth/outbox.jsonl as board messages.
 """
 
 from __future__ import annotations
@@ -52,6 +53,9 @@ def main() -> int:
         Path.home().joinpath(".fake-last-review-prompt").write_text(prompt, encoding="utf-8")
         finish(VERDICTS[next_review()])
         return 0
+    if os.environ.get("FAKE_OUTBOX"):
+        Path(".hearth").mkdir(exist_ok=True)
+        Path(".hearth/outbox.jsonl").write_text(os.environ["FAKE_OUTBOX"] + "\n", encoding="utf-8")
     if scenario == "hang":
         time.sleep(60)
     if scenario == "fail":

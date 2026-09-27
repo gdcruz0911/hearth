@@ -58,6 +58,7 @@ A test fails when a command is missing from this table.
 | `hearth task show <id>` | Show a task and the commands to review and publish it. |
 | `hearth task discard <id>` | Preview, or with `--apply` remove, a task's worktree and branch. |
 | `hearth task new <project> "<goal>" --interactive` | Open the agent in a tmux window instead, with the goal as its first message. |
+| `hearth task answer <id> "<text>"` | Answer the question an agent left for you; `hearth loop` then continues the task. |
 | `hearth task collect <id>` | After an interactive task, commit its checkpoint, run the check, and save the diff. |
 | `hearth task open <id>` | Open a task's worktree in VS Code. |
 | `hearth loop <id>` | Review a finished task with another model family and fix it, up to `--rounds` times, until approved. |
