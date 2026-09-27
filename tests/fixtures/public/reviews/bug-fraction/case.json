@@ -1,0 +1,1 @@
+{"goal": "Allow fractional values such as 1.5h, which means 5400 seconds.", "expect": "changes", "planted": "The number is truncated before multiplying, so 1.5h returns 3600, and the new test asserts 3600."}

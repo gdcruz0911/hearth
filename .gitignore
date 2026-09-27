@@ -51,9 +51,10 @@ logs/
 !tests/fixtures/public/
 !tests/fixtures/public/**/*.pdf
 
-# Markdown stays on this Mac for now, except the README and the public test fixtures the tests read.
+# Markdown stays on this Mac for now, except the README, the command list, and the public test fixtures the tests read.
 *.md
 !/README.md
+!/docs/commands.md
 !tests/fixtures/public/*.md
 
 # Private question sets and relationship labels (knowledge track) stay on this Mac.

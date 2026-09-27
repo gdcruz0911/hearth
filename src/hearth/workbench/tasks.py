@@ -120,10 +120,16 @@ def add_parser(subcommands: argparse._SubParsersAction) -> None:
     project_opener.add_argument("project", help="A project name from ~/.hearth/projects.json.")
 
 
+def refused_inside_task() -> bool:
+    """ADR-0023: an agent never starts another task or run, so it cannot spend the person's quota on its own."""
+    if not os.environ.get("HEARTH_TASK"):
+        return False
+    print(f"Agents cannot start tasks; this shell belongs to task {os.environ['HEARTH_TASK']}.\nNext: ask the person, through the task board or your final report", file=sys.stderr)
+    return True
+
+
 def run(args: argparse.Namespace) -> int:
-    if (args.command == "loop" or getattr(args, "task_command", None) == "new") and os.environ.get("HEARTH_TASK"):
-        # ADR-0023: an agent never starts another task or run, so it cannot spend the person's quota on its own.
-        print(f"Agents cannot start tasks; this shell belongs to task {os.environ['HEARTH_TASK']}.\nNext: ask the person, through the task board or your final report", file=sys.stderr)
+    if (args.command == "loop" or getattr(args, "task_command", None) == "new") and refused_inside_task():
         return 1
     if args.command == "loop":
         return _loop(args)

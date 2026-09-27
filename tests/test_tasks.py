@@ -450,6 +450,37 @@ class BoardTests(LoopTestCase):
         self.assertEqual(status, 1)
 
 
+class ReviewEvaluationTests(LoopTestCase):
+    CASES = Path(__file__).parent / "fixtures/public/reviews"
+
+    def test_every_case_passes_its_own_tests_so_only_the_reviewer_can_catch_a_planted_bug(self) -> None:
+        for case in sorted(path.parent for path in self.CASES.glob("*/case.json")):
+            with self.subTest(case=case.name), tempfile.TemporaryDirectory() as work:
+                for tree in (self.CASES / "base", case / "after"):
+                    for source in tree.glob("*.py"):
+                        (Path(work) / source.name).write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+                result = subprocess.run([sys.executable, "-m", "unittest", "-q"], cwd=work, capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_each_case_is_scored_and_appended_to_the_evaluation_log(self) -> None:
+        # Cases run in name order: bug-fraction, bug-negative, bug-swallow, clean-days, clean-rename.
+        os.environ["FAKE_REVIEWS"] = "changes,changes,approve,approve,garbage"
+
+        status, output = self.cli("review-eval", str(self.CASES), "--reviewer", "codex")
+
+        rows = [json.loads(line) for line in (self.home / ".hearth/evals/reviews.jsonl").read_text(encoding="utf-8").splitlines()]
+        self.assertEqual(status, 0)
+        self.assertEqual([(row["case"], row["verdict"], row["correct"]) for row in rows], [
+            ("bug-fraction", "changes", True), ("bug-negative", "changes", True), ("bug-swallow", "approve", False),
+            ("clean-days", "approve", True), ("clean-rename", None, False),
+        ])
+        self.assertEqual({row["reviewer"] for row in rows}, {"codex"})
+        self.assertIn("planted bugs caught: 2 of 3", output)
+        self.assertIn("clean changes approved: 1 of 2", output)
+        prompt = (self.home / ".fake-last-review-prompt").read_text(encoding="utf-8")
+        self.assertIn("SECONDS_PER_UNIT", prompt)
+
+
 class ProviderResultTests(unittest.TestCase):
     def test_each_recorded_provider_stream_yields_final_text_and_session(self) -> None:
         cases = {
