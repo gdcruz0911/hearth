@@ -144,6 +144,10 @@ def parse_events(provider: str, text: str) -> dict:
 
 
 def _new(args: argparse.Namespace) -> int:
+    if os.environ.get("HEARTH_TASK"):
+        # ADR-0023: an agent never starts another task, so a run cannot spend the person's quota on its own.
+        print(f"Agents cannot start tasks; this shell belongs to task {os.environ['HEARTH_TASK']}.\nNext: ask the person, through the task board or your final report", file=sys.stderr)
+        return 1
     projects = _projects()
     if args.project not in projects:
         print(f"No project {args.project} in ~/.hearth/projects.json.\nNext: add it there, or use one of: {', '.join(projects)}", file=sys.stderr)
@@ -216,7 +220,7 @@ def _new(args: argparse.Namespace) -> int:
     if args.interactive:
         _ensure_session(args.project, repo)
         argv = _argv(INTERACTIVE[provider], provider, prompt, project["check"], args.model, args.effort)
-        _launch(["tmux", "new-window", "-t", f"=hearth-{args.project}:", "-c", str(worktree), "-n", task_id, *argv])
+        _launch(["tmux", "new-window", "-t", f"=hearth-{args.project}:", "-c", str(worktree), "-n", task_id, "-e", f"HEARTH_TASK={task_id}", *argv])
         _write(task_dir, task)
         print(f"{task_id}  waiting  {worktree}")
         print(f"Next: work with the agent, exit it, then hearth task collect {task_id}", file=sys.stderr)
@@ -225,7 +229,8 @@ def _new(args: argparse.Namespace) -> int:
 
     argv = _argv(PROVIDERS[provider], provider, prompt, project["check"], args.model, args.effort)
     with (run_dir / "events.jsonl").open("w", encoding="utf-8") as events, (run_dir / "stderr.txt").open("w", encoding="utf-8") as errors:
-        process = subprocess.Popen(argv, cwd=worktree, stdin=subprocess.PIPE, stdout=events, stderr=errors, text=True, start_new_session=True)
+        process = subprocess.Popen(argv, cwd=worktree, stdin=subprocess.PIPE, stdout=events, stderr=errors, text=True,
+                                   start_new_session=True, env={**os.environ, "HEARTH_TASK": task_id})
         record["pid"] = process.pid
         _write(task_dir, task)
         timed_out = False

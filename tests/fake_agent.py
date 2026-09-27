@@ -22,7 +22,7 @@ def emit(event: dict) -> None:
 def main() -> int:
     prompt = sys.stdin.read()
     scenario = os.environ.get("FAKE_AGENT_SCENARIO", "edit")
-    emit({"type": "system", "subtype": "init", "session_id": SESSION, "model": "fake-model", "argv": sys.argv[1:]})
+    emit({"type": "system", "subtype": "init", "session_id": SESSION, "model": "fake-model", "argv": sys.argv[1:], "hearth_task": os.environ.get("HEARTH_TASK")})
     if scenario == "hang":
         time.sleep(60)
     if scenario == "fail":
