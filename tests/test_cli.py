@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -280,3 +281,26 @@ class CollectionInspectionCliTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CommandReferenceTests(unittest.TestCase):
+    """The README's command table lists every command and subcommand the parser accepts."""
+
+    @staticmethod
+    def subcommands(*argv: str) -> list[str]:
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output), contextlib.suppress(SystemExit):
+            main([*argv, "--help"])
+        # Subcommands and choice positionals, not option choices such as --agent {a,b}.
+        match = re.search(r"(?:\] |^\s+)\{([\w,-]+)\}", output.getvalue(), re.MULTILINE)
+        return match.group(1).split(",") if match else []
+
+    def test_readme_lists_every_command(self) -> None:
+        readme = (Path(__file__).resolve().parents[1] / "README.md").read_text(encoding="utf-8")
+        commands = []
+        for command in self.subcommands():
+            commands += [f"{command} {sub}" for sub in self.subcommands(command)] or [command]
+
+        missing = [command for command in commands if f"`hearth {command}" not in readme]
+
+        self.assertEqual(missing, [])
