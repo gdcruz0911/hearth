@@ -502,6 +502,56 @@ class ReviewEvaluationTests(LoopTestCase):
         self.assertIn("SECONDS_PER_UNIT", prompt)
 
 
+class GuardTests(LoopTestCase):
+    def test_a_secret_shaped_string_fails_the_guards_without_echoing_the_secret(self) -> None:
+        secret = "AKIA" + "ABCDEFGHIJKLMNOP"
+        os.environ["FAKE_EXTRA"] = f"aws_key = {secret}\n"
+
+        task = self.start()
+
+        guards = (self.home / ".hearth/tasks" / task["id"] / "runs/01-implement-claude/guards.txt").read_text(encoding="utf-8")
+        self.assertEqual((task["status"], task["stop_reason"]), ("failed", "guard_failed"))
+        self.assertIn("hello.txt:2", guards)
+        self.assertIn("AWS access key", guards)
+        self.assertNotIn(secret, guards)
+
+    def test_an_absolute_home_path_fails_the_guards(self) -> None:
+        os.environ["FAKE_EXTRA"] = "see /Users/someone/Documents/notes.txt\n"
+
+        self.assertEqual(self.start()["stop_reason"], "guard_failed")
+
+    def test_a_guard_failure_is_sent_back_as_a_fix_run(self) -> None:
+        os.environ["FAKE_EXTRA"] = "see /Users/someone/notes.txt\n"
+        task = self.start()
+        os.environ.pop("FAKE_EXTRA")
+
+        self.loop(task, "approve", "--rounds", "1")
+
+        fix_prompt = (self.home / ".hearth/tasks" / task["id"] / "runs/02-fix-claude/prompt.md").read_text(encoding="utf-8")
+        self.assertIn("absolute home path", fix_prompt)
+
+    def test_a_diff_over_the_size_limit_fails_the_guards(self) -> None:
+        os.environ["FAKE_EXTRA"] = "line\n" * (tasks.MAX_DIFF_LINES + 1)
+
+        self.assertEqual(self.start()["stop_reason"], "guard_failed")
+
+    def test_changing_a_protected_test_fails_the_guards(self) -> None:
+        task = self.start()
+        task.update(protected_tests=["hello.txt"], protected_commit=_head(Path(task["worktree"])))
+        (self.home / ".hearth/tasks" / task["id"] / "task.json").write_text(json.dumps(task), encoding="utf-8")
+
+        self.loop(task, "changes,approve", "--rounds", "1")
+
+        task = self.only_task()
+        guards = (self.home / ".hearth/tasks" / task["id"] / "runs/03-fix-claude/guards.txt").read_text(encoding="utf-8")
+        self.assertIn("protected test changed: hello.txt", guards)
+        self.assertEqual(task["stop_reason"], "rounds_exhausted")
+
+
+def _head(repo: Path) -> str:
+    return git(repo, "rev-parse", "HEAD").strip()
+
+
 class ProviderResultTests(unittest.TestCase):
     def test_each_recorded_provider_stream_yields_final_text_and_session(self) -> None:
         cases = {

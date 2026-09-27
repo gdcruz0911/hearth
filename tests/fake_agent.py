@@ -3,7 +3,8 @@
 It reads the prompt on standard input and prints Claude-format stream events, or another CLI's after `--as codex` or `--as antigravity`.
 The scenario comes from FAKE_AGENT_SCENARIO: edit, idle, fail, auth, or hang.
 A prompt that starts with "# Review" is answered with the next verdict in FAKE_REVIEWS: approve, changes, or garbage.
-An editing or idle run also writes FAKE_OUTBOX, if set, to .hearth/outbox.jsonl as board messages.
+An editing or idle run also writes FAKE_OUTBOX, if set, to .hearth/outbox.jsonl as board messages,
+and an editing run appends FAKE_EXTRA, if set, to hello.txt.
 """
 
 from __future__ import annotations
@@ -72,7 +73,7 @@ def main() -> int:
         finish("")
         return 0
     with Path("hello.txt").open("a", encoding="utf-8") as file:
-        file.write(prompt.splitlines()[0] + "\n")
+        file.write(prompt.splitlines()[0] + "\n" + os.environ.get("FAKE_EXTRA", ""))
     Path(".hearth/artifacts").mkdir(parents=True, exist_ok=True)
     Path(".hearth/artifacts/note.txt").write_text("for the person\n", encoding="utf-8")
     finish("Added hello.txt.")
