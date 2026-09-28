@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 
 from .domain import (
@@ -209,6 +210,7 @@ def main(argv: list[str] | None = None) -> int:
             if inspection is None:
                 if args.json:
                     print(json.dumps({"error": f"No imported document with ID {args.document_id}."}))
+                    print("Next: run list to review imported documents and their IDs.", file=sys.stderr)
                 else:
                     print(f"No imported document with ID {args.document_id}.")
                     print("Next: run list to review imported documents and their IDs.")

@@ -271,13 +271,15 @@ class CollectionInspectionCliTests(unittest.TestCase):
 
     def test_inspect_json_returns_one_json_value_for_unknown_document(self) -> None:
         output = io.StringIO()
+        error = io.StringIO()
 
-        with contextlib.redirect_stdout(output):
+        with contextlib.redirect_stdout(output), contextlib.redirect_stderr(error):
             exit_code = main(["--database", str(self.database), "inspect", "999", "--json"])
 
         self.assertEqual(exit_code, 1)
         payload = json.loads(output.getvalue())
         self.assertEqual(payload, {"error": "No imported document with ID 999."})
+        self.assertIn("Next: run list to review imported documents and their IDs.", error.getvalue())
 
     def test_search_abstention_suggests_safe_next_actions(self) -> None:
         output = io.StringIO()
