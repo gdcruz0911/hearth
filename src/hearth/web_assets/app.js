@@ -285,6 +285,7 @@ function renderSemanticBenchmark(detail, job) {
   if (!benchmark) return;
   const section = make("section", "semantic-benchmark");
   section.append(make("h3", "", "This rebuild"));
+  if (job.warning && !["running", "cancelling"].includes(job.status)) section.append(make("p", "empty-state", job.warning));
   const metrics = make("dl", "benchmark-metrics");
   const rows = [
     ["Elapsed", formatDuration(benchmark.elapsed_seconds)],
@@ -613,7 +614,7 @@ async function pollSemanticIndex() {
       } else if (state.semanticJob.status === "completed") {
         await refresh();
         setStatus(state.semanticJob.warning
-          ? `The local semantic map is ready. ${state.semanticJob.warning}`
+          ? "The semantic map is ready, but this rebuild was not memory-checked. See This rebuild."
           : "The local semantic map is ready.", state.semanticJob.warning ? "error" : undefined);
       } else if (state.semanticJob.status === "cancelled") {
         setStatus("The incomplete semantic-index rebuild was cancelled.");
