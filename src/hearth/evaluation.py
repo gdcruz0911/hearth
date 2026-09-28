@@ -80,6 +80,19 @@ def evaluate_corpus(service: HearthService, corpus: EvaluationCorpus) -> tuple[E
     return tuple(_evaluate_case(service, case) for case in corpus.cases)
 
 
+def append_outcomes(service: HearthService, corpus_path: Path, outcomes: tuple[EvaluationOutcome, ...]) -> Path:
+    """Append one JSON line per case to ~/.hearth/evals/<corpus>.jsonl, so runs can be compared over time."""
+    run = {"at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "code": _code_revision(),
+           "corpus": {"path": str(corpus_path), "sha256": hashlib.sha256(corpus_path.read_bytes()).hexdigest()},
+           **service.run_description()}
+    log = Path.home() / ".hearth/evals" / f"{corpus_path.stem}.jsonl"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    with log.open("a", encoding="utf-8") as file:
+        file.writelines(json.dumps({**run, "case": outcome.case_id, "passed": outcome.passed, "errors": list(outcome.errors)}) + "\n"
+                        for outcome in outcomes)
+    return log
+
+
 def _parse_case(value: object, index: int) -> EvaluationCase:
     if not isinstance(value, dict):
         raise EvaluationCorpusError(f"Evaluation case {index} must be a JSON object.")
