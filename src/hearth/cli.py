@@ -98,7 +98,10 @@ def main(argv: list[str] | None = None) -> int:
     evals.add_parser(subcommands)
     stats.add_parser(subcommands)
     subcommands.add_parser("list", help="List imported documents without document text or source paths.")
-    subcommands.add_parser("health", help="Summarize private collection health without document text or source paths.")
+    healther = subcommands.add_parser(
+        "health", help="Summarize private collection health without document text or source paths."
+    )
+    healther.add_argument("--json", action="store_true", help="Print the collection health report as one JSON value.")
     inspector = subcommands.add_parser("inspect", help="Inspect one document's local provenance metadata.")
     inspector.add_argument("document_id", type=int)
     inspector.add_argument("--json", action="store_true", help="Print the document's provenance metadata as one JSON value.")
@@ -207,7 +210,11 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "list":
             _print_documents(service.list_documents())
         elif args.command == "health":
-            _print_collection_health(service.collection_health())
+            health = service.collection_health()
+            if args.json:
+                print(json.dumps(_collection_health_json(health)))
+            else:
+                _print_collection_health(health)
         elif args.command == "inspect":
             inspection = service.inspect_document(args.document_id)
             if inspection is None:
@@ -369,6 +376,28 @@ def _print_collection_health(health: CollectionHealth) -> None:
         print("Next: reindex the affected source document before searching semantically.")
     if not (health.ocr_page_count or health.source_attention or health.semantic_index_status == "needs reindex"):
         print("Next: import a document, or search the current collection.")
+
+
+def _collection_health_json(health: CollectionHealth) -> dict:
+    return {
+        "document_count": health.document_count,
+        "page_count": health.page_count,
+        "chunk_count": health.chunk_count,
+        "ocr_page_count": health.ocr_page_count,
+        "unavailable_source_count": health.unavailable_source_count,
+        "changed_source_count": health.changed_source_count,
+        "baseline_reindex_count": health.baseline_reindex_count,
+        "stale_chunking_count": health.stale_chunking_count,
+        "semantic_index_status": health.semantic_index_status,
+        "source_attention": [
+            {
+                "document_id": attention.document_id,
+                "document_name": attention.document_name,
+                "status": attention.status,
+            }
+            for attention in health.source_attention
+        ],
+    }
 
 
 def _print_answer(answer) -> None:
