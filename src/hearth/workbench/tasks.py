@@ -12,6 +12,7 @@ import signal
 import subprocess
 import sys
 import time
+import tomllib
 from pathlib import Path
 
 from . import usage
@@ -54,6 +55,8 @@ VERIFY_ORDER = ["codex", "claude"]
 TEST_ORDER = VERIFY_ORDER  # Test writers must run the tests they write, which headless agy cannot.
 # ponytail: a path heuristic for "test file"; a per-project test glob if a project's layout needs one.
 TEST_PATH = re.compile(r"(^|/)(tests?|spec|__tests__)/|(^|/)test_[^/]*$|_test\.[^/]+$|\.(test|spec)\.[^/]+$")
+# Effort per role when none is given: judgment roles think harder than the runs that write code.
+ROLE_EFFORT = {"test": "high", "verify": "high", "review": "high", "implement": "medium", "fix": "medium"}
 # The spec's slots: how many runs of each kind may be active at once, across all projects.
 SLOTS = {"implement": 2, "support": 1}
 IMPLEMENT_ROLES = {"test", "implement", "fix"}
@@ -238,7 +241,7 @@ def run(args: argparse.Namespace) -> int:
 
 def parse_events(provider: str, text: str) -> dict:
     """Reduce a provider's event stream to final text, session ID, usage, and a named error."""
-    result = {"final": "", "session_id": None, "usage": None, "error": None}
+    result = {"final": "", "session_id": None, "usage": None, "error": None, "model": None}
     for line in text.splitlines():
         try:
             event = json.loads(line)
@@ -246,6 +249,8 @@ def parse_events(provider: str, text: str) -> dict:
             continue
         if provider == "claude":
             result["session_id"] = event.get("session_id") or result["session_id"]
+            if event.get("subtype") == "init":
+                result["model"] = event.get("model")
             if event.get("type") == "result":
                 result.update(final=event.get("result") or "", usage=event.get("usage"))
                 if event.get("is_error"):
@@ -411,6 +416,9 @@ def _record(task: dict, task_dir: Path, role: str, provider: str, model: str | N
 def _run(task: dict, task_dir: Path, role: str, provider: str, template: list[str], prompt: str,
          model: str | None, effort: str | None, timeout: int, check: str, verify: str = "") -> dict:
     """Run one headless provider turn in the task's worktree and record it; returns the parsed result and a stop reason."""
+    effort = effort or ROLE_EFFORT.get(role)
+    if provider == "antigravity" and model and re.search(r"-(low|high)$", model):
+        model = re.sub(r"-(low|high)$", "-low" if effort == "low" else "-high", model)  # agy names its thinking level in the model.
     record = _record(task, task_dir, role, provider, model, effort, prompt)
     run_dir = task_dir / "runs" / record["dir"]
     argv = _argv(template, provider, prompt, check, model, effort, verify)
@@ -428,7 +436,9 @@ def _run(task: dict, task_dir: Path, role: str, provider: str, template: list[st
             _stop(process)
     record.update(exit_code=process.returncode, finished=_now())
     parsed = parse_events(provider, (run_dir / "events.jsonl").read_text(encoding="utf-8"))
-    record.update(session_id=parsed["session_id"], usage=parsed["usage"])
+    # What actually ran, for later statistics: the CLI's own report, else the requested model, else Codex's configured default.
+    record.update(session_id=parsed["session_id"], usage=parsed["usage"],
+                  model_used=parsed["model"] or model or (_codex_model() if provider == "codex" else None))
     (run_dir / "report.md").write_text(parsed["final"], encoding="utf-8")
     _drain(task, task_dir, record)
     parsed["stop"] = "timeout" if timed_out else parsed["error"] or ("provider_error" if process.returncode else None)
@@ -478,6 +488,9 @@ def _loop(args: argparse.Namespace) -> int:
                     task.update(stop_reason="verify_failed", verify_feedback=outcome["feedback"])
                     continue
                 verification = outcome["summary"]
+            if task.get("protected_tests"):
+                verification += ("\nProtected tests, which the implementer cannot change: " + ", ".join(task["protected_tests"])
+                                 + ".\nRaise any problem with them as a finding on that file; Hearth asks the person about it.\n")
             _wait_for_slot("support", task, task_dir)
             diff = _git(Path(task["worktree"]), "diff", f"{task['base']}..HEAD")
             prompt = REVIEW_PROMPT.format(id=task["id"], goal=task["goal"], base=task["base"][:12], diff=diff[:100_000],
@@ -498,6 +511,15 @@ def _loop(args: argparse.Namespace) -> int:
                 print(f"{task['id']}  done  approved by {reviewer} after {fixes} fix run{'s' if fixes != 1 else ''}")
                 print(f"Next: hearth task show {task['id']}", file=sys.stderr)
                 return 0
+            disputed = [item for item in verdict["findings"] if item.get("file") in task.get("protected_tests", [])]
+            if disputed:
+                # The implementer may not change protected tests, so only the person can settle an objection to them.
+                problems = "; ".join(f"{item.get('file')}: {item.get('problem', '')}" for item in disputed)
+                _post(task_dir, {"id": f"m{len(_board(task_dir)) + 1}", "from": task["runs"][-1]["dir"], "to": "person", "kind": "question",
+                                 "body": f"The reviewer objects to protected tests the implementer cannot change: {problems} "
+                                         "Answer to keep them, which the reviewer will see, or discard the task to write new ones.", "refs": []})
+                _hold_for_person(task, task_dir, "done", None)
+                return 1
             findings = "".join(f"- {item.get('standard', '')} {item.get('file', '')}:{item.get('line', '')} {item.get('problem', '')}\n" for item in verdict["findings"])
             feedback = f"A reviewer from another model family asked for these changes:\n\n{findings}"
         if fixes == args.rounds:
@@ -695,6 +717,13 @@ def _answer(task: dict, task_dir: Path, text: str) -> int:
         print(f"Answered {question['id']}; {len(questions) - 1} more question(s) open.")
         print(f"Next: hearth task show {task['id']}", file=sys.stderr)
     return 0
+
+
+def _codex_model() -> str | None:
+    try:
+        return tomllib.loads((Path.home() / ".codex/config.toml").read_text(encoding="utf-8")).get("model")
+    except (FileNotFoundError, tomllib.TOMLDecodeError):
+        return None
 
 
 def _verdict(text: str, verdicts: tuple[str, str] = ("approve", "changes"), items: str = "findings") -> dict | None:

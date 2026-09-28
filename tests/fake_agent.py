@@ -2,7 +2,7 @@
 
 It reads the prompt on standard input and prints Claude-format stream events, or another CLI's after `--as codex` or `--as antigravity`.
 The scenario comes from FAKE_AGENT_SCENARIO: edit, idle, fail, auth, or hang.
-A prompt that starts with "# Review" is answered with the next verdict in FAKE_REVIEWS: approve, changes, or garbage.
+A prompt that starts with "# Review" is answered with the next verdict in FAKE_REVIEWS: approve, changes, elsewhere, or garbage.
 A prompt that starts with "# Verify" follows the next scenario in FAKE_VERIFY: verified, failed, missing, edit, or garbage.
 A test-writing prompt writes tests/test_hello.txt, plus notes.txt when FAKE_TESTS is "source".
 An editing or idle run also writes FAKE_OUTBOX, if set, to .hearth/outbox.jsonl as board messages,
@@ -22,6 +22,7 @@ FORMAT = sys.argv[sys.argv.index("--as") + 1] if "--as" in sys.argv else "claude
 VERDICTS = {
     "approve": 'Looks good.\n{"verdict": "approve", "findings": []}',
     "changes": 'One problem.\n{"verdict": "changes", "findings": [{"standard": "CLI-3", "file": "hello.txt", "line": 1, "problem": "Say hello."}]}',
+    "elsewhere": 'One problem.\n{"verdict": "changes", "findings": [{"standard": "CLI-3", "file": "notes.txt", "line": 1, "problem": "Add notes."}]}',
     "garbage": "I think it is fine.",
 }
 

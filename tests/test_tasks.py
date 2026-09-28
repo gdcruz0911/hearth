@@ -625,12 +625,26 @@ class GuardTests(LoopTestCase):
 
         self.assertEqual(self.start()["stop_reason"], "guard_failed")
 
+    def test_a_review_objecting_to_protected_tests_asks_the_person_instead_of_the_implementer(self) -> None:
+        task = self.start()
+        task.update(protected_tests=["hello.txt"], protected_commit=_head(Path(task["worktree"])))
+        (self.home / ".hearth/tasks" / task["id"] / "task.json").write_text(json.dumps(task), encoding="utf-8")
+
+        self.assertEqual(self.loop(task, "changes,approve"), 1)
+        task = self.only_task()
+        self.assertEqual((task["status"], [run["role"] for run in task["runs"]]), ("waiting", ["implement", "review"]))
+        self.assertIn("Protected tests, which the implementer cannot change: hello.txt", (self.home / ".fake-last-review-prompt").read_text(encoding="utf-8"))
+
+        self.cli("task", "answer", task["id"], "Keep the tests as they are.")
+        self.assertEqual(self.cli("loop", task["id"])[0], 0)
+        self.assertIn("Keep the tests as they are.", (self.home / ".fake-last-review-prompt").read_text(encoding="utf-8"))
+
     def test_changing_a_protected_test_fails_the_guards(self) -> None:
         task = self.start()
         task.update(protected_tests=["hello.txt"], protected_commit=_head(Path(task["worktree"])))
         (self.home / ".hearth/tasks" / task["id"] / "task.json").write_text(json.dumps(task), encoding="utf-8")
 
-        self.loop(task, "changes,approve", "--rounds", "1")
+        self.loop(task, "elsewhere,approve", "--rounds", "1")
 
         task = self.only_task()
         guards = (self.home / ".hearth/tasks" / task["id"] / "runs/03-fix-claude/guards.txt").read_text(encoding="utf-8")
@@ -752,6 +766,47 @@ class TestsFirstTests(LoopTestCase):
 
         self.assertEqual(status, 1)
         self.assertFalse((self.home / ".hearth/tasks").exists())
+
+
+class EffortTests(LoopTestCase):
+    def first_event(self, task: dict, run: str) -> dict:
+        path = self.home / ".hearth/tasks" / task["id"] / "runs" / run / "events.jsonl"
+        return json.loads(path.read_text(encoding="utf-8").splitlines()[0])
+
+    def test_each_role_runs_at_its_default_effort_and_records_what_was_used(self) -> None:
+        task = self.start()
+        self.loop(task, "approve")
+
+        task = self.only_task()
+        implement, review = task["runs"]
+        self.assertEqual((implement["effort"], review["effort"]), ("medium", "high"))
+        self.assertIn("--effort", self.first_event(task, "01-implement-claude")["argv"])
+        self.assertIn("model_reasoning_effort=high", self.first_event(task, "02-review-codex")["argv"])
+        self.assertEqual(implement["model_used"], "fake-model")
+
+    def test_an_explicit_effort_overrides_the_implement_default(self) -> None:
+        self.write_projects(check="test -f hello.txt", providers=("claude", "codex"))
+
+        self.cli("task", "new", "demo", "Add hello.txt", "--effort", "low")
+
+        self.assertEqual(self.only_task()["runs"][0]["effort"], "low")
+
+    def test_codex_records_its_configured_default_model(self) -> None:
+        (self.home / ".codex").mkdir()
+        (self.home / ".codex/config.toml").write_text('model = "gpt-test"\nmodel_reasoning_effort = "medium"\n', encoding="utf-8")
+        task = self.start()
+        self.loop(task, "approve")
+
+        self.assertEqual(self.only_task()["runs"][1]["model_used"], "gpt-test")
+
+    def test_review_eval_runs_at_the_chosen_effort_and_antigravity_picks_the_matching_model(self) -> None:
+        os.environ["FAKE_REVIEWS"] = ",".join(["approve"] * 6)
+        cases = Path(__file__).parent / "fixtures/public/reviews"
+
+        self.cli("review-eval", str(cases), "--reviewer", "antigravity", "--effort", "low")
+
+        rows = [json.loads(line) for line in (self.home / ".hearth/evals/reviews.jsonl").read_text(encoding="utf-8").splitlines()]
+        self.assertEqual({(row["effort"], row["model"]) for row in rows}, {("low", "gemini-3.1-pro-low")})
 
 
 class ProviderResultTests(unittest.TestCase):
