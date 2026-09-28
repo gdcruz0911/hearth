@@ -43,7 +43,10 @@ class TaskTestCase(unittest.TestCase):
         self.write_projects(check="test -f hello.txt")
         patches = [
             mock.patch.dict(os.environ, {"HOME": str(self.home), "FAKE_AGENT_SCENARIO": "edit"}),
-            mock.patch.dict(tasks.PROVIDERS, {"claude": FAKE_AGENT}),
+            # Every agent a task can reach is a fake, so no test launches a real CLI or spends the person's quota.
+            mock.patch.dict(tasks.PROVIDERS, {"claude": FAKE_AGENT, "codex": FAKE_CODEX, "antigravity": FAKE_AGY}),
+            mock.patch.dict(tasks.REVIEWERS, {"claude": FAKE_AGENT, "codex": FAKE_CODEX, "antigravity": FAKE_AGY}),
+            mock.patch.dict(tasks.VERIFIERS, {"claude": FAKE_AGENT, "codex": FAKE_CODEX}),
             mock.patch.object(tasks.usage, "report", return_value=[]),
         ]
         for patch in patches:
