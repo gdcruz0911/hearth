@@ -71,6 +71,30 @@ class KeywordIndexTests(unittest.TestCase):
         service.remove_document(str(self.decision))
         self.assertEqual(service.answer("What does ADR-0024 decide?").status, "abstained")
 
+    def test_keyword_only_search_skips_the_semantic_index(self) -> None:
+        from hearth.embedding import IndexCompatibilityError
+
+        class StaleSemanticIndex:
+            searched = 0
+
+            def rebuild(self, chunks, **options) -> None:
+                pass
+
+            def search(self, question, chunks, limit=20):
+                StaleSemanticIndex.searched += 1
+                raise IndexCompatibilityError("The active local semantic index does not match.")
+
+        service = HearthService(self.database, semantic_index=StaleSemanticIndex())
+        self.addCleanup(service.close)
+        service.import_document(str(self.decision))
+
+        answer = service.answer("ADR-0024", keyword_only=True)
+
+        self.assertEqual((answer.status, answer.citations[0].document_name), ("supported", "decision.md"))
+        self.assertEqual(StaleSemanticIndex.searched, 0)
+        with self.assertRaises(IndexCompatibilityError):
+            service.answer("ADR-0024")
+
     def test_a_collection_imported_before_the_keyword_index_is_backfilled(self) -> None:
         service = HearthService(self.database)
         service.import_document(str(self.decision))
