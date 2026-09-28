@@ -511,7 +511,7 @@ def _loop(args: argparse.Namespace) -> int:
                 print(f"{task['id']}  done  approved by {reviewer} after {fixes} fix run{'s' if fixes != 1 else ''}")
                 print(f"Next: hearth task show {task['id']}", file=sys.stderr)
                 return 0
-            disputed = [item for item in verdict["findings"] if item.get("file") in task.get("protected_tests", [])]
+            disputed = [item for item in verdict["findings"] if _protected_line(task, item)]
             if disputed:
                 # The implementer may not change protected tests, so only the person can settle an objection to them.
                 problems = "; ".join(f"{item.get('file')}: {item.get('problem', '')}" for item in disputed)
@@ -532,7 +532,11 @@ def _loop(args: argparse.Namespace) -> int:
                       implementer["model"], implementer["effort"], args.timeout, project["check"])
         _finish(project, task, task_dir, result["stop"])
         if task["stop_reason"] == "no_changes" and _git(Path(task["worktree"]), "diff", f"{task['base']}..HEAD"):
-            continue  # The implementer disagreed and changed nothing; the reviewer reads its board note next.
+            # The implementer changed nothing, but the branch must still pass the gates before any review sees it.
+            reason = _gates(project, task, task_dir)
+            task.update(stop_reason=reason, status="failed" if reason else "done")
+            _write(task_dir, task)
+            continue
         if task["stop_reason"] not in (None, "check_failed", "guard_failed"):
             return 1
 
@@ -612,8 +616,14 @@ def _guards(task: dict) -> list[str]:
     repo = Path(task["worktree"])
     problems = []
     if task.get("protected_tests"):
-        changed = _git(repo, "diff", "--name-only", f"{task['protected_commit']}..HEAD", "--", *task["protected_tests"]).split()
-        problems += [f"protected test changed: {path}" for path in changed]
+        # New tests may be added beside protected ones; changing or deleting a protected line is what counts.
+        changed, current = set(), None
+        for row in _git(repo, "diff", "-U0", f"{task['protected_commit']}..HEAD", "--", *task["protected_tests"]).splitlines():
+            if row.startswith("--- "):
+                current = row[6:] if row.startswith("--- a/") else None
+            elif row.startswith("-") and current:
+                changed.add(current)
+        problems += [f"protected test changed: {path}" for path in sorted(changed)]
     numstat = [row.split("\t") for row in _git(repo, "diff", "--numstat", f"{task['base']}..HEAD").splitlines()]
     changed_lines = sum(int(added) + int(deleted) for added, deleted, _ in numstat if added != "-")
     if changed_lines > MAX_DIFF_LINES:
@@ -779,14 +789,7 @@ def _finish(project: dict, task: dict, task_dir: Path, stop_reason: str | None) 
     run_dir = task_dir / "runs" / record["dir"]
     worktree = Path(task["worktree"])
     changed = bool(_checkpoint(task, task_dir))
-    stop_reason = stop_reason or (None if changed else "no_changes")
-    if stop_reason is None:
-        stop_reason = "check_failed" if _check(project, task, task_dir) else None
-    if stop_reason is None:
-        problems = _guards(task)
-        (run_dir / "guards.txt").write_text(("\n".join(problems) or "All guards passed.") + "\n", encoding="utf-8")
-        record["guards"] = "fail" if problems else "pass"
-        stop_reason = "guard_failed" if problems else None
+    stop_reason = stop_reason or (None if changed else "no_changes") or _gates(project, task, task_dir)
     (task_dir / "diff.patch").write_text(_git(worktree, "diff", f"{task['base']}..HEAD"), encoding="utf-8")
     task.update(status="failed" if stop_reason else "done", stop_reason=stop_reason, finished=_now())
     if _hold_for_person(task, task_dir, task["status"], stop_reason):
@@ -795,6 +798,35 @@ def _finish(project: dict, task: dict, task_dir: Path, stop_reason: str | None) 
     print(f"{task['id']}  {task['status']}{f' ({stop_reason})' if stop_reason else ''}  {worktree}")
     print(f"Next: hearth task show {task['id']}", file=sys.stderr)
     return 1 if stop_reason else 0
+
+
+def _protected_line(task: dict, finding: dict) -> bool:
+    """Whether a finding points at a line of a protected test that existed when the tests were protected.
+
+    Lines added afterwards belong to the implementer, who may change them; a finding without a usable line counts as protected.
+    """
+    path, line = finding.get("file"), finding.get("line")
+    if path not in task.get("protected_tests", []):
+        return False
+    if not isinstance(line, int) or line < 1:
+        return True
+    blame = subprocess.run(["git", "-C", task["worktree"], "blame", "-L", f"{line},{line}", "--porcelain", "HEAD", "--", path],
+                           capture_output=True, text=True)
+    if blame.returncode:
+        return True
+    commit = blame.stdout.split(maxsplit=1)[0]
+    return subprocess.run(["git", "-C", task["worktree"], "merge-base", "--is-ancestor", commit, task["protected_commit"]]).returncode == 0
+
+
+def _gates(project: dict, task: dict, task_dir: Path) -> str | None:
+    """Run the project's check, then the guards, on the task branch as it stands; returns a stop reason or None."""
+    if _check(project, task, task_dir):
+        return "check_failed"
+    record = task["runs"][-1]
+    problems = _guards(task)
+    (task_dir / "runs" / record["dir"] / "guards.txt").write_text(("\n".join(problems) or "All guards passed.") + "\n", encoding="utf-8")
+    record["guards"] = "fail" if problems else "pass"
+    return "guard_failed" if problems else None
 
 
 def _checkpoint(task: dict, task_dir: Path) -> list[str]:
@@ -909,8 +941,9 @@ def _show(task: dict, task_dir: Path, as_json: bool) -> None:
     print(f"branch    {task['branch']}")
     print(f"worktree  {task['worktree']}")
     print(f"receipts  {task_dir}")
-    for run in task["runs"]:
-        print(f"run       {run['role']} {run['provider']} {run['model'] or ''} exit {run['exit_code']}, check exit {run['check_exit_code']}")
+    for index, run in enumerate(task["runs"], 1):
+        model = run.get("model_used") or run.get("model") or "-"
+        print(f"run       {run.get('dir', f'{index:02d}')[:2]} {run['role']:<10} {run['provider']:<12} {model:<22} {run.get('effort') or '-':<7} {_outcome(run)}")
     for path in task.get("protected_tests", []):
         print(f"protected {path}")
     for question in _open_questions(task_dir):
@@ -919,7 +952,28 @@ def _show(task: dict, task_dir: Path, as_json: bool) -> None:
     print("To review and publish:")
     print(f"  code {task['worktree']}")
     print(f"  git -C {repo} push -u origin {task['branch']}")
-    print(f"  (cd {repo} && gh pr create --head {task['branch']} --fill)")
+    review = task.get("review")
+    summary = (f"approved by {review['reviewer']} after {review['fixes']} fix run{'s' if review['fixes'] != 1 else ''}" if review else f"status {task['status']}")
+    title = task["goal"] if len(task["goal"]) <= 72 else task["goal"][:72].rsplit(" ", 1)[0] + "…"
+    body = f"Hearth task {task['id']}: {len(task['runs'])} runs, {summary}. Receipts stay on the person's Mac."
+    print(f"  (cd {repo} && gh pr create --head {task['branch']} --title {shlex.quote(title)} --body {shlex.quote(body)})")
+
+
+def _outcome(run: dict) -> str:
+    """One short phrase for what a run produced, for task show."""
+    if run.get("verdict"):
+        return run["verdict"]
+    if run["role"] in ("review", "verify"):
+        return "no usable verdict"
+    if run.get("interactive") and run["exit_code"] is None and run["check_exit_code"] is None:
+        return "interactive"
+    parts = [f"exit {run['exit_code']}"] if run["exit_code"] else []
+    if run["check_exit_code"] is not None:
+        passed = run["check_exit_code"] == 0
+        parts.append(("check pass" if passed else "check fail") if run["role"] != "test" else ("tests pass" if passed else "tests fail, as required"))
+    if run.get("guards"):
+        parts.append(f"guards {run['guards']}")
+    return ", ".join(parts) or "no check"
 
 
 def _discard(task: dict, task_dir: Path, apply: bool, discard_uncommitted: bool) -> int:

@@ -189,6 +189,20 @@ class TaskTests(TaskTestCase):
         _, output = self.cli("task", "show", task["id"])
 
         self.assertIn(f"git -C {self.repo} push -u origin {task['branch']}", output)
+        self.assertIn("gh pr create --head", output)
+        self.assertIn("--title 'Add hello.txt'", output)
+        self.assertNotIn("--fill", output)
+
+    def test_show_lists_each_run_with_its_model_effort_and_outcome(self) -> None:
+        self.cli("task", "new", "demo", "Add hello.txt")
+        task = self.only_task()
+
+        _, output = self.cli("task", "show", task["id"])
+
+        self.assertIn("01 implement  claude       fake-model", output)
+        self.assertIn("medium", output)
+        self.assertIn("check pass, guards pass", output)
+        self.assertNotIn("check exit None", output)
 
 
 class InteractiveTaskTests(TaskTestCase):
@@ -639,11 +653,43 @@ class GuardTests(LoopTestCase):
         self.assertEqual(self.cli("loop", task["id"])[0], 0)
         self.assertIn("Keep the tests as they are.", (self.home / ".fake-last-review-prompt").read_text(encoding="utf-8"))
 
+    def test_a_finding_on_a_line_added_after_protection_goes_to_the_implementer(self) -> None:
+        task = self.start()
+        task.update(protected_tests=["hello.txt"], protected_commit=_head(Path(task["worktree"])))
+        (self.home / ".hearth/tasks" / task["id"] / "task.json").write_text(json.dumps(task), encoding="utf-8")
+
+        status = self.loop(task, "elsewhere,second-line,approve")
+
+        task = self.only_task()
+        self.assertEqual((status, [run["role"] for run in task["runs"]]),
+                         (0, ["implement", "review", "fix", "review", "fix", "review"]))
+
+    def test_adding_to_a_protected_test_file_passes_the_guards(self) -> None:
+        task = self.start()
+        task.update(protected_tests=["hello.txt"], protected_commit=_head(Path(task["worktree"])))
+        (self.home / ".hearth/tasks" / task["id"] / "task.json").write_text(json.dumps(task), encoding="utf-8")
+
+        self.assertEqual(self.loop(task, "elsewhere,approve"), 0)
+        self.assertEqual(self.only_task()["runs"][2]["guards"], "pass")
+
+    def test_a_fix_that_changes_nothing_reruns_the_check_and_guards_on_the_branch(self) -> None:
+        os.environ["FAKE_EXTRA"] = "see /Users/someone/notes.txt\n"
+        task = self.start()
+        os.environ.pop("FAKE_EXTRA")
+        os.environ["FAKE_AGENT_SCENARIO"] = "idle"
+
+        status = self.loop(task, "approve", "--rounds", "1")
+
+        task = self.only_task()
+        self.assertEqual((status, task["stop_reason"]), (1, "rounds_exhausted"))
+        self.assertNotIn("review", [run["role"] for run in task["runs"]])
+
     def test_changing_a_protected_test_fails_the_guards(self) -> None:
         task = self.start()
         task.update(protected_tests=["hello.txt"], protected_commit=_head(Path(task["worktree"])))
         (self.home / ".hearth/tasks" / task["id"] / "task.json").write_text(json.dumps(task), encoding="utf-8")
 
+        os.environ["FAKE_AGENT_SCENARIO"] = "rewrite"
         self.loop(task, "elsewhere,approve", "--rounds", "1")
 
         task = self.only_task()
