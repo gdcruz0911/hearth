@@ -109,7 +109,7 @@ def for_provider(home: Path, task: dict, task_dir: Path, project: dict, provider
     return block(record)
 
 
-def save(task_dir: Path, record: dict) -> None:
-    path = task_dir / "recall" / f"{record['provider']}.json"
+def save(task_dir: Path, record: dict, name: str | None = None) -> None:
+    path = task_dir / "recall" / f"{name or record['provider']}.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(record, indent=1), encoding="utf-8")

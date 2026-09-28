@@ -1241,8 +1241,8 @@ if __name__ == "__main__":
     unittest.main()
 
 
-class RecallBriefTests(LoopTestCase):
-    """Recall in briefs follows ADR-0024: each destination provider gets only its own permitted excerpts."""
+class RecallFixture(LoopTestCase):
+    """A small knowledge collection: notes under Hearth/, and a more relevant document outside it."""
 
     def setUp(self) -> None:
         super().setUp()
@@ -1280,6 +1280,11 @@ class RecallBriefTests(LoopTestCase):
 
     def saved(self, task: dict, provider: str) -> dict:
         return json.loads((self.home / ".hearth/tasks" / task["id"] / "recall" / f"{provider}.json").read_text(encoding="utf-8"))
+
+
+
+class RecallBriefTests(RecallFixture):
+    """Recall in briefs follows ADR-0024: each destination provider gets only its own permitted excerpts."""
 
     def test_an_allowed_provider_gets_scoped_labeled_excerpts_with_their_sources_saved(self) -> None:
         self.configure({"claude": [str(self.vault)]}, [str(self.vault)])
@@ -1356,3 +1361,99 @@ class RecallBriefTests(LoopTestCase):
         record = self.saved(task, "claude")
         self.assertNotIn("/Users/someone", self.prompt(task, "01-implement-claude"))
         self.assertEqual([item["kinds"] for item in record["withheld"]], [["absolute home path"]])
+
+
+class KnowledgeBoardTests(RecallFixture):
+    """Board questions to knowledge are answered by scoped recall and delivered only to the provider that asked."""
+
+    QUESTION = '{"to": "knowledge", "kind": "question", "body": "How should hello files greet the person?"}'
+
+    def ask(self, *argv: str) -> tuple[dict, Path]:
+        os.environ["FAKE_OUTBOX"] = self.QUESTION
+        self.addCleanup(os.environ.pop, "FAKE_OUTBOX", None)
+        self.cli("task", "new", "demo", "Add hello.txt", *argv)
+        task = self.only_task()
+        return task, self.home / ".hearth/tasks" / task["id"]
+
+    def test_the_answer_reaches_only_the_provider_that_asked(self) -> None:
+        self.configure({"claude": [str(self.vault)], "codex": [str(self.vault)]}, [str(self.vault)])
+
+        task, task_dir = self.ask("--recall", "keyword")
+
+        answer = next(message for message in tasks._board(task_dir) if message["from"] == "knowledge")
+        self.assertEqual((answer["to"], answer["provider"], answer["reply_to"]), ("implement", "claude", "m1"))
+        self.assertIn("greet the person warmly", tasks._messages(task_dir, "implement", "claude"))
+        for role, provider in (("implement", "codex"), ("review", "codex"), ("review", "claude"), ("implement", None)):
+            self.assertNotIn("greet the person warmly", tasks._messages(task_dir, role, provider), (role, provider))
+        saved = json.loads((task_dir / "recall/knowledge-m1-claude.json").read_text(encoding="utf-8"))
+        self.assertEqual((saved["query"], saved["mode"]), ("How should hello files greet the person?", "keyword"))
+
+    def test_a_reviewer_from_another_provider_never_sees_the_answer(self) -> None:
+        self.configure({"claude": [str(self.vault)], "codex": [str(self.vault)]}, [str(self.vault)])
+        task, task_dir = self.ask("--recall", "keyword")
+        os.environ.pop("FAKE_OUTBOX")
+
+        self.loop(task, "approve")
+
+        review = next(run for run in self.only_task()["runs"] if run["role"] == "review")
+        self.assertEqual(review["provider"], "codex")
+        self.assertNotIn("greet the person warmly", (task_dir / "runs" / review["dir"] / "prompt.md").read_text(encoding="utf-8"))
+
+    def test_a_provider_without_permission_is_told_recall_is_not_available(self) -> None:
+        self.configure({"codex": [str(self.vault)]}, [str(self.vault)])
+
+        _, task_dir = self.ask("--recall", "keyword")
+
+        answer = next(message for message in tasks._board(task_dir) if message["from"] == "knowledge")
+        self.assertEqual(answer["body"], "Hearth recall is not available to this agent for this project.")
+
+    def test_hybrid_that_cannot_run_is_reported_not_replaced_by_keyword_search(self) -> None:
+        self.configure({"claude": [str(self.vault)]}, [str(self.vault)])
+
+        _, task_dir = self.ask()
+
+        answer = next(message for message in tasks._board(task_dir) if message["from"] == "knowledge")
+        self.assertIn("Recall could not run", answer["body"])
+        self.assertIn("did not switch to another kind of search", answer["body"])
+        self.assertNotIn("greet the person", answer["body"])
+
+    def test_a_fallback_reviewer_does_not_inherit_the_first_reviewers_recall_answer(self) -> None:
+        self.configure({"claude": [str(self.vault)]}, [str(self.vault)], members=("claude", "codex", "antigravity"))
+        self.cli("task", "new", "demo", "Add hello.txt")
+        task = self.only_task()
+        task_dir = self.home / ".hearth/tasks" / task["id"]
+        tasks._post(task_dir, {"id": "m9", "from": "knowledge", "to": "review", "kind": "answer", "body": "ANSWER-FOR-AGY-ONLY",
+                               "refs": [], "reply_to": "m8", "provider": "antigravity"})
+
+        self.loop(task, "garbage,approve")
+
+        reviews = [run for run in self.only_task()["runs"] if run["role"] == "review"]
+        prompts = {run["provider"]: (task_dir / "runs" / run["dir"] / "prompt.md").read_text(encoding="utf-8") for run in reviews}
+        self.assertEqual([run["provider"] for run in reviews], ["antigravity", "codex"])
+        self.assertIn("ANSWER-FOR-AGY-ONLY", prompts["antigravity"])
+        self.assertNotIn("ANSWER-FOR-AGY-ONLY", prompts["codex"])
+
+    def test_a_fallback_verifier_does_not_inherit_the_first_verifiers_recall_answer(self) -> None:
+        (self.repo / "VERIFY.md").write_text("Run the program and save its output as evidence.\n", encoding="utf-8")
+        git(self.repo, "add", "VERIFY.md")
+        git(self.repo, "commit", "-q", "-m", "add VERIFY.md")
+        self.configure({"claude": [str(self.vault)]}, [str(self.vault)], members=("antigravity", "codex", "claude"))
+        patches = [mock.patch.dict(tasks.PROVIDERS, {"antigravity": FAKE_AGY}),
+                   mock.patch.dict(tasks.VERIFIERS, {"codex": FAKE_CODEX, "claude": FAKE_AGENT})]
+        for patch in patches:
+            patch.start()
+            self.addCleanup(patch.stop)
+        self.cli("task", "new", "demo", "Add hello.txt", "--agent", "antigravity")
+        task = self.only_task()
+        task_dir = self.home / ".hearth/tasks" / task["id"]
+        tasks._post(task_dir, {"id": "m9", "from": "knowledge", "to": "verify", "kind": "answer", "body": "ANSWER-FOR-CODEX-ONLY",
+                               "refs": [], "reply_to": "m8", "provider": "codex"})
+        os.environ["FAKE_VERIFY"] = "missing,verified"
+
+        self.loop(task, "approve")
+
+        verifies = [run for run in self.only_task()["runs"] if run["role"] == "verify"]
+        prompts = {run["provider"]: (task_dir / "runs" / run["dir"] / "prompt.md").read_text(encoding="utf-8") for run in verifies}
+        self.assertEqual([run["provider"] for run in verifies], ["codex", "claude"])
+        self.assertIn("ANSWER-FOR-CODEX-ONLY", prompts["codex"])
+        self.assertNotIn("ANSWER-FOR-CODEX-ONLY", prompts["claude"])

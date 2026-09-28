@@ -68,7 +68,7 @@ ROLE_EFFORT = {"test": "high", "verify": "high", "review": "high", "retro": "hig
 SLOTS = {"implement": 2, "support": 1}
 IMPLEMENT_ROLES = {"test", "implement", "fix"}
 # The task board: who an agent may address, and what kind of message it may post.
-RECIPIENTS = {"person", "implement", "review"}  # ponytail: "knowledge" joins once search --json lands in Phase 5.
+RECIPIENTS = {"person", "implement", "review", "knowledge"}  # "knowledge" is answered by Hearth recall, not an agent.
 KINDS = {"question", "answer", "finding", "handoff", "blocker"}
 # Guards: deterministic checks on the task's whole diff after the project's check passes.
 MAX_DIFF_LINES = 1500  # ponytail: one limit for all projects; a per-project setting once one needs it.
@@ -95,7 +95,8 @@ Run tests only with `{check}`, adding arguments at the end if you need fewer tes
 Do not commit; Hearth commits a checkpoint after this run and then runs the project's check.
 Save anything meant for the person, such as a page or an image, in .hearth/artifacts/.
 To ask the person or hand something to the reviewer, append one JSON line to .hearth/outbox.jsonl, such as
-{{"to": "person", "kind": "question", "body": "..."}}; "to" is person, implement, or review, and "kind" is question, finding, handoff, or blocker.
+{{"to": "person", "kind": "question", "body": "..."}}; "to" is person, implement, review, or knowledge, and "kind" is question, finding, handoff, or blocker.
+A question to knowledge searches the keeper's notes, limited to what you may receive; its answer reaches you in your next run on this task.
 A question to the person pauses the task until they answer, so ask only what you cannot decide from the code and docs.
 End with what changed, which checks you ran and their results, and any open questions.
 If something failed or you could not check it, say so plainly; never claim a check you did not run.
@@ -576,9 +577,9 @@ def _loop(args: argparse.Namespace) -> int:
                                  + " raise a problem with what they test as a finding on that file, and Hearth asks the person about it.\n")
             _wait_for_slot("support", task, task_dir)
             diff = _git(Path(task["worktree"]), "diff", f"{task['base']}..HEAD")
-            prompt = REVIEW_PROMPT.format(id=task["id"], goal=task["goal"], base=task["base"][:12], diff=diff[:100_000],
-                                          messages=_messages(task_dir, "review"), verification=verification)  # ponytail: a cap, not paging, for very large diffs.
             for reviewer in reviewers:
+                prompt = REVIEW_PROMPT.format(id=task["id"], goal=task["goal"], base=task["base"][:12], diff=diff[:100_000],
+                                              messages=_messages(task_dir, "review", reviewer), verification=verification)  # ponytail: a cap, not paging, for very large diffs.
                 result = _run(task, task_dir, "review", reviewer, REVIEWERS[reviewer], prompt, None, None, args.timeout, project["check"])
                 verdict = None if result["stop"] else _verdict(result["final"])
                 task["runs"][-1]["verdict"] = verdict and verdict["verdict"]
@@ -633,9 +634,9 @@ def _verify(task: dict, task_dir: Path, project: dict, family: str, timeout: int
         return {"stop": "no_verifier", "feedback": None, "summary": ""}
     diff = _git(worktree, "diff", f"{task['base']}..HEAD")
     verify = project.get("verify", project["check"])
-    prompt = VERIFY_PROMPT.format(id=task["id"], goal=task["goal"], base=task["base"][:12], diff=diff[:100_000],
-                                  check=project["check"], verify=verify, messages=_messages(task_dir, "verify"))
     for verifier in verifiers:
+        prompt = VERIFY_PROMPT.format(id=task["id"], goal=task["goal"], base=task["base"][:12], diff=diff[:100_000],
+                                      check=project["check"], verify=verify, messages=_messages(task_dir, "verify", verifier))
         _wait_for_slot("support", task, task_dir)
         if (worktree / ".hearth/evidence").exists():  # Left by a crashed run: kept as a receipt, never deleted or reused.
             shutil.move(worktree / ".hearth/evidence", task_dir / f"leftover-evidence-{time.strftime('%Y%m%d-%H%M%S')}")
@@ -750,8 +751,27 @@ def _drain(task: dict, task_dir: Path, record: dict) -> None:
         refs = message.get("refs") if isinstance(message.get("refs"), list) else []
         _post(task_dir, {"id": f"m{count}", "from": record["dir"], "to": message["to"], "kind": message["kind"],
                          "body": body[:2000], "refs": [str(ref)[:200] for ref in refs[:10]]})
+        if message["to"] == "knowledge" and message["kind"] == "question":
+            count += 1
+            _post(task_dir, _knowledge_answer(task, task_dir, record, f"m{count - 1}", f"m{count}", body[:2000]))
     shutil.move(outbox, task_dir / "runs" / record["dir"] / "outbox.jsonl")  # The raw lines, rejected ones included, stay as a receipt.
     record["rejected_messages"] = rejected
+
+
+def _knowledge_answer(task: dict, task_dir: Path, record: dict, question_id: str, answer_id: str, question: str) -> dict:
+    """Answer a board question to knowledge with recall scoped to the provider that asked, and save what was sent."""
+    provider, mode = record["provider"], (task.get("recall") or {}).get("mode", "hybrid")
+    name = f"knowledge-{question_id}-{provider}"
+    try:
+        found = recall.build(_home(), _projects()[task["project"]], provider, question, mode)
+        text = recall.block(found) or "Hearth recall is not available to this agent for this project."
+    except recall.RecallError as exc:
+        found = {"provider": provider, "mode": mode, "query": question, "error": str(exc).splitlines()[0]}
+        text = f"Recall could not run ({found['error']}); Hearth did not switch to another kind of search."
+    recall.save(task_dir, found, name)
+    # "provider" keeps the answer for the agent that asked; _messages shows it to no other provider.
+    return {"id": answer_id, "from": "knowledge", "to": _role(record["dir"]), "kind": "answer", "body": text,
+            "refs": [f"recall/{name}.json"], "reply_to": question_id, "provider": provider}
 
 
 def _board(task_dir: Path) -> list[dict]:
@@ -770,11 +790,13 @@ def _role(sender: str) -> str:
     return "implement" if role in IMPLEMENT_ROLES else role
 
 
-def _messages(task_dir: Path, role: str) -> str:
+def _messages(task_dir: Path, role: str, provider: str | None = None) -> str:
+    """Board messages for a prompt to `provider` in `role`; recall answers go only to the provider that asked."""
     lines = [f"- {message['kind']} from {message['from']} to {message['to']}: {message['body']}\n"
              for message in _board(task_dir)
+             if (message["from"] != "knowledge" or (provider is not None and message.get("provider") == provider))
              # Exchanges with the person refine the goal for every role, so each role sees them.
-             if role in (message["to"], _role(message["from"])) or "person" in (message["to"], message["from"])]
+             and (role in (message["to"], _role(message["from"])) or "person" in (message["to"], message["from"]))]
     return "\nMessages on the task board for you:\n" + "".join(lines) if lines else ""
 
 
@@ -924,7 +946,7 @@ def _fix(project: dict, task: dict, task_dir: Path, label: str, feedback: str, t
     implementer = next(run for run in task["runs"] if run["role"] == "implement")
     _wait_for_slot("implement", task, task_dir)
     prompt = (f"# Task {task['id']}: {label}\n\nGoal: {task['goal']}\n\n{feedback}"
-              + _messages(task_dir, "implement") + "\n" + INSTRUCTIONS.format(check=project["check"]))
+              + _messages(task_dir, "implement", implementer["provider"]) + "\n" + INSTRUCTIONS.format(check=project["check"]))
     result = _run(task, task_dir, "fix", implementer["provider"], PROVIDERS[implementer["provider"]], prompt,
                   implementer["model"], implementer["effort"], timeout, project["check"])
     _finish(project, task, task_dir, result["stop"])
