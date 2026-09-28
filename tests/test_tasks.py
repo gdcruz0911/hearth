@@ -85,7 +85,7 @@ class TaskTests(TaskTestCase):
         self.assertEqual(task["status"], "done")
         self.assertIn("Add hello.txt", (run_dir / "prompt.md").read_text(encoding="utf-8"))
         self.assertIn("`test -f hello.txt`", (run_dir / "prompt.md").read_text(encoding="utf-8"))
-        self.assertEqual((run_dir / "report.md").read_text(encoding="utf-8"), "Added hello.txt.")
+        self.assertEqual((run_dir / "report.md").read_text(encoding="utf-8"), "Added hello.txt.\nPR title: feat: add hello.txt\nPR summary: hello.txt now greets the person.")
         self.assertIn("exit code: 0", (run_dir / "checks.txt").read_text(encoding="utf-8"))
         self.assertEqual((run_dir / "artifacts/note.txt").read_text(encoding="utf-8"), "for the person\n")
         self.assertIn(f"+# Task {task['id']}", (task_dir / "diff.patch").read_text(encoding="utf-8"))
@@ -971,6 +971,166 @@ class RetroTests(LoopTestCase):
         task = self.start()
 
         self.assertEqual(self.cli("task", "retro", task["id"])[0], 1)
+
+
+class PullRequestTests(LoopTestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.pushed: list[str] = []
+        self.gh: list[list[str]] = []
+        self.gh_replies: dict[str, str] = {"list": "[]", "create": "https://github.com/person/demo/pull/7\n"}
+        patches = [
+            mock.patch.object(tasks, "_push", side_effect=lambda task: self.pushed.append(task["branch"])),
+            mock.patch.object(tasks, "_gh", side_effect=self.fake_gh),
+        ]
+        for patch in patches:
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def fake_gh(self, args: list[str], cwd: Path) -> str:
+        self.gh.append(args)
+        key = "run" if args[0] == "run" else args[1]
+        return self.gh_replies.get(key, "")
+
+    def start_pr_project(self, pr: bool = True) -> dict:
+        self.write_projects(check="test -f hello.txt", providers=("claude", "codex"))
+        config = self.home / ".hearth/projects.json"
+        projects = json.loads(config.read_text(encoding="utf-8"))
+        projects["demo"]["pr"] = pr
+        config.write_text(json.dumps(projects), encoding="utf-8")
+        self.cli("task", "new", "demo", "Add hello.txt")
+        return self.only_task()
+
+    def created(self) -> list[str]:
+        return next(args for args in self.gh if args[:2] == ["pr", "create"])
+
+    def test_an_approved_task_is_pushed_and_opened_as_a_draft_following_del_7(self) -> None:
+        task = self.start_pr_project()
+
+        self.assertEqual(self.loop(task, "approve"), 0)
+
+        args = self.created()
+        title, body = args[args.index("--title") + 1], args[args.index("--body") + 1]
+        self.assertEqual(self.pushed, [task["branch"]])
+        self.assertIn("--draft", args)
+        self.assertEqual(title, "feat: add hello.txt")
+        sections = ["## Why", "## What changed", "## Risk", "## Checks"]
+        self.assertEqual(sorted(sections, key=body.index), sections)
+        self.assertIn("## Why\nAdd hello.txt\n", body)
+        self.assertIn("## What changed\nhello.txt now greets the person.\nFiles: hello.txt\n", body)
+        self.assertIn("## Risk\nlow: only adds hello.txt (codex)\n", body)
+        self.assertIn("- Reviewed: approved by codex (gpt-6-luna, high)", body)
+        self.assertIn("- CI: runs on this pull request", body)
+        self.assertIn(f"Built by Hearth task {task['id']}: implement claude, review codex.", body)
+        self.assertNotIn(str(self.home), body)
+        self.assertEqual(self.only_task()["pr"]["url"], "https://github.com/person/demo/pull/7")
+        _, shown = self.cli("task", "show", task["id"])
+        self.assertIn("pull req  https://github.com/person/demo/pull/7 (draft)", shown)
+        self.assertNotIn("gh pr create", shown)
+
+    def test_the_body_credits_the_reviewer_that_approved_not_one_that_fell_back(self) -> None:
+        self.write_projects(check="test -f hello.txt", providers=("claude", "codex", "antigravity"))
+        config = self.home / ".hearth/projects.json"
+        projects = json.loads(config.read_text(encoding="utf-8"))
+        projects["demo"]["pr"] = True
+        config.write_text(json.dumps(projects), encoding="utf-8")
+        self.cli("task", "new", "demo", "Add hello.txt")
+
+        self.loop(self.only_task(), "garbage,approve")
+
+        body = self.created()[self.created().index("--body") + 1]
+        self.assertIn("implement claude, review codex.", body)
+
+    def test_a_branch_that_conflicts_with_main_is_not_published(self) -> None:
+        task = self.start_pr_project()
+        (self.repo / "hello.txt").write_text("main's own hello\n", encoding="utf-8")
+        git(self.repo, "add", "hello.txt")
+        git(self.repo, "commit", "-q", "-m", "main changes hello.txt")
+
+        status = self.loop(task, "approve")
+
+        self.assertEqual((status, self.pushed), (1, []))
+        self.assertEqual([args for args in self.gh if args[:2] == ["pr", "create"]], [])
+
+    def test_projects_without_pr_are_never_pushed(self) -> None:
+        self.loop(self.start_pr_project(pr=False), "approve")
+
+        self.assertEqual((self.pushed, self.gh), ([], []))
+
+    def test_what_the_verifier_could_not_check_is_listed_under_risk(self) -> None:
+        (self.repo / "VERIFY.md").write_text("Run the program.\n", encoding="utf-8")
+        git(self.repo, "add", "VERIFY.md")
+        git(self.repo, "commit", "-q", "-m", "add VERIFY.md")
+        with mock.patch.dict(tasks.VERIFIERS, {"codex": FAKE_CODEX}):
+            self.loop(self.start_pr_project(), "approve")
+
+        body = self.created()[self.created().index("--body") + 1]
+        self.assertIn("Not checked: the web interface: no loopback port here", body)
+        self.assertIn("- Verified: 1 claim with evidence from codex (", body)
+
+    def test_a_rerun_edits_the_open_pull_request_instead_of_opening_another(self) -> None:
+        self.gh_replies["list"] = '[{"number": 7, "url": "https://github.com/person/demo/pull/7"}]'
+
+        self.loop(self.start_pr_project(), "approve")
+
+        self.assertEqual([args[:2] for args in self.gh if args[0] == "pr"], [["pr", "list"], ["pr", "edit"]])
+
+    def test_a_missing_title_falls_back_to_chore_and_says_so(self) -> None:
+        os.environ["FAKE_TITLE"] = "none"
+
+        self.loop(self.start_pr_project(), "approve")
+
+        args = self.created()
+        self.assertEqual(args[args.index("--title") + 1], "chore: Add hello.txt")
+        self.assertIn("gave no valid PR title", args[args.index("--body") + 1])
+
+    def test_a_home_path_in_the_pull_request_stops_publishing(self) -> None:
+        self.write_projects(check="test -f hello.txt", providers=("claude", "codex"))
+        config = self.home / ".hearth/projects.json"
+        projects = json.loads(config.read_text(encoding="utf-8"))
+        projects["demo"]["pr"] = True
+        config.write_text(json.dumps(projects), encoding="utf-8")
+        self.cli("task", "new", "demo", "Add hello.txt like /Users/someone/notes.txt")
+
+        self.loop(self.only_task(), "approve")
+
+        self.assertEqual((self.pushed, [args for args in self.gh if args[:2] == ["pr", "create"]]), ([], []))
+
+    def test_ci_marks_the_pull_request_ready_when_every_check_passes(self) -> None:
+        task = self.start_pr_project()
+        self.loop(task, "approve")
+        self.gh_replies["checks"] = '[{"name": "check", "bucket": "pass", "link": "https://github.com/p/d/actions/runs/5/job/6"}]'
+
+        status, _ = self.cli("task", "ci", task["id"])
+
+        self.assertEqual(status, 0)
+        self.assertIn(["pr", "ready", "7"], self.gh)
+
+    def test_ci_waits_while_checks_are_pending(self) -> None:
+        task = self.start_pr_project()
+        self.loop(task, "approve")
+        self.gh_replies["checks"] = '[{"name": "check", "bucket": "pending", "link": ""}]'
+
+        status, output = self.cli("task", "ci", task["id"])
+
+        self.assertEqual(status, 0)
+        self.assertNotIn(["pr", "ready", "7"], self.gh)
+        self.assertIn("pending", output)
+
+    def test_a_failed_ci_run_becomes_a_fix_run_with_the_failing_log(self) -> None:
+        task = self.start_pr_project()
+        self.loop(task, "approve")
+        self.gh_replies["checks"] = '[{"name": "check", "bucket": "fail", "link": "https://github.com/p/d/actions/runs/55/job/66"}]'
+        self.gh_replies["run"] = "FAIL: test_hello (tests.HelloTests)\nAssertionError: expected a greeting\n"
+
+        status, _ = self.cli("task", "ci", task["id"])
+
+        task = self.only_task()
+        self.assertEqual(task["runs"][-1]["role"], "fix")
+        self.assertIn(["run", "view", "55", "--log-failed"], self.gh)
+        fix_prompt = (self.home / ".hearth/tasks" / task["id"] / "runs" / task["runs"][-1]["dir"] / "prompt.md").read_text(encoding="utf-8")
+        self.assertIn("AssertionError: expected a greeting", fix_prompt)
+        self.assertNotIn(["pr", "ready", "7"], self.gh)
 
 
 class ProviderResultTests(unittest.TestCase):

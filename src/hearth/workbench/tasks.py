@@ -47,6 +47,8 @@ REVIEW_ORDER = ["antigravity", "claude", "codex"]
 # agy also runs Claude and GPT-OSS models, so its pin names a Gemini model to stay in another family.
 CHECK_MODELS = {"codex": "gpt-6-luna", "claude": "sonnet", "antigravity": "gemini-3.1-pro-high"}
 CHECK_ROLES = {"test", "verify", "review", "retro"}
+# DEL-7: a Conventional Commit title the implementer proposes, which becomes the squash commit on main.
+TITLE_PATTERN = re.compile(r"^(feat|fix|docs|test|refactor|chore|perf|ci)(\([^)]+\))?: \S.*$")
 RETRO_KINDS = ("guard", "test", "verify", "standard", "eval")  # In order of preference: guards and tests are deterministic.
 # Verifiers run the real program, so they need commands: Codex in its workspace sandbox, and Claude limited to the
 # project's check and its "verify" command prefix. Headless agy refuses unlisted commands, so it cannot verify.
@@ -96,6 +98,8 @@ To ask the person or hand something to the reviewer, append one JSON line to .he
 A question to the person pauses the task until they answer, so ask only what you cannot decide from the code and docs.
 End with what changed, which checks you ran and their results, and any open questions.
 If something failed or you could not check it, say so plainly; never claim a check you did not run.
+Finish with one line `PR title: type: summary`, where type is feat, fix, docs, test, refactor, chore, perf, or ci, in 72 characters at most,
+and one line `PR summary: <one sentence saying what changed>`.
 """)
 VERIFY_PROMPT = """# Verify task {id}
 
@@ -159,7 +163,8 @@ Check it against the goal and, where they exist, AGENTS.md and the standards in 
 Approve only when the change meets the goal, is tested, and has no problem you would block a merge for.
 Ask for changes to any edit the goal did not call for, especially one that weakens or skips a test.
 End your reply with this JSON and nothing after it:
-{{"verdict": "approve" or "changes", "findings": [{{"standard": "CLI-3", "file": "path", "line": 1, "problem": "what is wrong and why"}}]}}
+{{"verdict": "approve" or "changes", "findings": [{{"standard": "CLI-3", "file": "path", "line": 1, "problem": "what is wrong and why"}}],
+ "risk": "low, medium, or high: one sentence on what this change could break"}}
 
 {messages}{verification}
 The diff from {base} to the task branch:
@@ -191,6 +196,11 @@ def add_parser(subcommands: argparse._SubParsersAction) -> None:
     escape.add_argument("text", help="What was missed.")
     retro = actions.add_parser("retro", help="Have another model family propose one permanent fix per escape, for you to approve.")
     retro.add_argument("id")
+    publish = actions.add_parser("publish", help="Push an approved task and open or update its draft pull request, for a project with pr enabled.")
+    publish.add_argument("id")
+    ci = actions.add_parser("ci", help="Read the task's pull request checks: wait, mark it ready, or send a failure to a fix run.")
+    ci.add_argument("id")
+    ci.add_argument("--timeout", type=int, default=1800, help="Seconds before a fix run is stopped. Defaults to 1800.")
     retro.add_argument("--approve", type=int, metavar="N", help="Start escape N's stored proposal as a tests-first task instead of running a retro.")
     approve = actions.add_parser("approve-tests", help="Approve a tests-first task's tests, then start implementing.")
     approve.add_argument("id")
@@ -263,6 +273,13 @@ def run(args: argparse.Namespace) -> int:
         task["runs"][-1]["finished"] = _now()
         _drain(task, task_dir, task["runs"][-1])
         return _finish(_projects()[task["project"]], task, task_dir, None)
+    if args.task_command == "publish":
+        if not _projects()[task["project"]].get("pr") or task["status"] != "done" or not task.get("review"):
+            print(f"{task['id']} can be published only when approved, in a project with \"pr\": true.\nNext: hearth loop {task['id']}", file=sys.stderr)
+            return 1
+        return _publish(task, task_dir)
+    if args.task_command == "ci":
+        return _ci(task, task_dir, args.timeout)
     if args.task_command == "escape":
         task.setdefault("escapes", []).append({"at": _now(), "text": args.text})
         _write(task_dir, task)
@@ -385,7 +402,7 @@ def _new(args: argparse.Namespace) -> int:
     task = {
         "id": task_id, "project": args.project, "goal": goal, "base": base, "branch": f"hearth/{task_id}",
         "worktree": str(worktree), "status": "waiting" if args.interactive else "running", "stop_reason": None,
-        "created": _now(), "finished": None, "discarded": None, "copied": copied, "context": context, "runs": [],
+        "created": _now(), "finished": None, "discarded": None, "copied": copied, "context": context, "issue": args.issue, "runs": [],
         "implementer": {"provider": provider, "model": args.model, "effort": args.effort, "timeout": args.timeout},
     }
     prompt = PROMPT.format(id=task_id, goal=goal, check=project["check"]) + context
@@ -547,6 +564,7 @@ def _loop(args: argparse.Namespace) -> int:
                 result = _run(task, task_dir, "review", reviewer, REVIEWERS[reviewer], prompt, None, None, args.timeout, project["check"])
                 verdict = None if result["stop"] else _verdict(result["final"])
                 task["runs"][-1]["verdict"] = verdict and verdict["verdict"]
+                task["runs"][-1]["risk"] = verdict.get("risk") if verdict and isinstance(verdict.get("risk"), str) else None
                 if verdict or result["stop"] == "timeout":
                     break  # An empty or failed review falls back to the next reviewer; a slow one does not.
             if not result["stop"] and _hold_for_person(task, task_dir, "done", None):
@@ -557,6 +575,8 @@ def _loop(args: argparse.Namespace) -> int:
                 task.update(status="done", stop_reason=None, finished=_now(), review={"verdict": "approve", "reviewer": reviewer, "fixes": fixes})
                 _write(task_dir, task)
                 print(f"{task['id']}  done  approved by {reviewer} after {fixes} fix run{'s' if fixes != 1 else ''}")
+                if project.get("pr"):
+                    return _publish(task, task_dir)
                 print(f"Next: hearth task show {task['id']}", file=sys.stderr)
                 return 0
             disputed = [item for item in verdict["findings"] if _protected_line(task, item)]
@@ -573,12 +593,7 @@ def _loop(args: argparse.Namespace) -> int:
         if fixes == args.rounds:
             return _end(task, task_dir, "rounds_exhausted")
         fixes += 1
-        _wait_for_slot("implement", task, task_dir)
-        prompt = (f"# Task {task['id']}: fix round {fixes}\n\nGoal: {task['goal']}\n\n{feedback}"
-                  + _messages(task_dir, "implement") + "\n" + INSTRUCTIONS.format(check=project["check"]))
-        result = _run(task, task_dir, "fix", implementer["provider"], PROVIDERS[implementer["provider"]], prompt,
-                      implementer["model"], implementer["effort"], args.timeout, project["check"])
-        _finish(project, task, task_dir, result["stop"])
+        _fix(project, task, task_dir, f"fix round {fixes}", feedback, args.timeout)
         if task["stop_reason"] == "no_changes" and _git(Path(task["worktree"]), "diff", f"{task['base']}..HEAD"):
             # The implementer changed nothing, but the branch must still pass the gates before any review sees it.
             reason = _gates(project, task, task_dir)
@@ -619,6 +634,8 @@ def _verify(task: dict, task_dir: Path, project: dict, family: str, timeout: int
         problems = ["no readable verdict"] if verdict is None else _evidence_problems(run_dir, verdict)
         (run_dir / "verify.txt").write_text(("\n".join(problems) or "Every claim cites evidence.") + "\n", encoding="utf-8")
         task["runs"][-1]["verdict"] = verdict["verdict"] if verdict and not problems else None
+        task["runs"][-1]["claims"] = len(verdict["claims"]) if verdict and not problems else None
+        task["runs"][-1]["not_checked"] = [item for item in verdict.get("not_checked", []) if isinstance(item, str)] if verdict else []
         if not problems:
             break
     else:
@@ -880,6 +897,141 @@ def _proposals(text: str, count: int) -> dict[int, dict] | None:
     return None
 
 
+def _fix(project: dict, task: dict, task_dir: Path, label: str, feedback: str, timeout: int) -> None:
+    """One fix run by the task's implementer, given what failed, followed by a checkpoint and the gates."""
+    implementer = next(run for run in task["runs"] if run["role"] == "implement")
+    _wait_for_slot("implement", task, task_dir)
+    prompt = (f"# Task {task['id']}: {label}\n\nGoal: {task['goal']}\n\n{feedback}"
+              + _messages(task_dir, "implement") + "\n" + INSTRUCTIONS.format(check=project["check"]))
+    result = _run(task, task_dir, "fix", implementer["provider"], PROVIDERS[implementer["provider"]], prompt,
+                  implementer["model"], implementer["effort"], timeout, project["check"])
+    _finish(project, task, task_dir, result["stop"])
+
+
+def _pull_request(task: dict, task_dir: Path) -> tuple[str, str]:
+    """The title and four-line body DEL-7 asks for, built only from the task's own record and reports."""
+    reports = [(task_dir / "runs" / run["dir"] / "report.md") for run in reversed(task["runs"])
+               if run["role"] in ("implement", "fix") and run.get("dir")]
+    texts = [path.read_text(encoding="utf-8") for path in reports if path.exists()]
+    proposed = [match.group(1).strip() for text in texts for match in [re.search(r"^PR title:\s*(.+)$", text, re.M)] if match]
+    title = next((line for line in proposed if TITLE_PATTERN.match(line) and len(line) <= 72), None)
+    summaries = [match.group(1).strip() for text in texts for match in [re.search(r"^PR summary:\s*(.+)$", text, re.M)] if match]
+    lines_of = [line.strip() for text in texts[-1:] for line in text.splitlines()]
+    what = (summaries[0] if summaries else next(
+        (line for line in lines_of if line and not line.startswith(("#", "PR title:", "PR summary:"))), task["goal"]))[:200]
+    fallback = f"chore: {task['goal']}"
+    fallback = fallback if len(fallback) <= 72 else fallback[:71].rsplit(" ", 1)[0] + "…"
+    review = next(run for run in reversed(task["runs"]) if run["role"] == "review" and run.get("verdict") == "approve")
+    verify = next((run for run in reversed(task["runs"]) if run["role"] == "verify" and run.get("claims")), None)
+    # Credit the runs whose results counted: the first test and implement runs, the verifier whose claims held,
+    # and the reviewer that approved, not one whose empty reply fell back to the next.
+    first = {role: next((run for run in task["runs"] if run["role"] == role), None) for role in ("test", "implement")}
+    counted = {**first, "verify": verify, "review": review}
+    agents = {role: run["provider"] for role, run in counted.items() if run}
+
+    def who(run: dict) -> str:
+        return f"{run['provider']} ({run.get('model_used') or run.get('model') or 'default model'}, {run.get('effort') or 'default effort'})"
+
+    files = _git(_repo(task), "diff", "--name-only", f"{task['base']}..{task['branch']}").split()
+    risk = f"{review['risk']} ({review['provider']})" if review.get("risk") else "Not assessed by the reviewer."
+    lines = ["## Why", task["goal"], "", "## What changed", what, "Files: " + (", ".join(files) or "none"), "", "## Risk", risk]
+    if verify and verify.get("not_checked"):
+        lines.append("Not checked: " + "; ".join(verify["not_checked"]))
+    lines += ["", "## Checks", "- Project check and guards: passed"]
+    if verify:
+        lines.append(f"- Verified: {verify['claims']} claim{'s' if verify['claims'] != 1 else ''} with evidence from {who(verify)}")
+    lines += [f"- Reviewed: approved by {who(review)}", "- CI: runs on this pull request; Hearth marks it ready when it passes", "",
+              f"Built by Hearth task {task['id']}: " + ", ".join(f"{role} {provider}" for role, provider in agents.items()) + "."]
+    if task.get("issue"):
+        lines.append(f"Closes #{task['issue']}")
+    if title is None:
+        lines.append("Title fallback: the implementer gave no valid PR title.")
+    return title or fallback, "\n".join(lines)
+
+
+def _publish(task: dict, task_dir: Path) -> int:
+    """Push the task branch and open its draft pull request, or update the open one; never merges (ADR-0023)."""
+    title, body = _pull_request(task, task_dir)
+    leaks = sorted({kind for kind, pattern in GUARD_PATTERNS if re.search(pattern, f"{title}\n{body}")})
+    if leaks:
+        print(f"Not publishing {task['id']}: the pull request text would contain {', '.join(leaks)} (CODE-6).", file=sys.stderr)
+        print(f"Next: push it yourself with an edited description, from hearth task show {task['id']}", file=sys.stderr)
+        return 1
+    repo = _repo(task)
+    base = _base(repo)
+    if subprocess.run(["git", "-C", str(repo), "merge-tree", "--write-tree", base, task["branch"]], capture_output=True).returncode:
+        print(f"Not publishing {task['id']}: {task['branch']} conflicts with {base}, so its pull request could not be merged.", file=sys.stderr)
+        print(f"Next: rerun the goal as a fresh task on the current {base}, or merge {base} into {task['branch']} yourself", file=sys.stderr)
+        return 1
+    _push(task)
+    existing = json.loads(_gh(["pr", "list", "--head", task["branch"], "--state", "open", "--json", "number,url"], repo) or "[]")
+    if existing:
+        pull = existing[0]
+        _gh(["pr", "edit", str(pull["number"]), "--title", title, "--body", body], repo)
+    else:
+        url = _gh(["pr", "create", "--draft", "--head", task["branch"], "--title", title, "--body", body], repo).strip()
+        pull = {"number": int(url.rstrip("/").rsplit("/", 1)[-1]), "url": url}
+    task["pr"] = {"number": pull["number"], "url": pull["url"], "ready": False}
+    _write(task_dir, task)
+    print(f"{task['id']}  draft pull request {pull['url']}")
+    print(f"Next: hearth task ci {task['id']} once CI has run", file=sys.stderr)
+    return 0
+
+
+def _ci(task: dict, task_dir: Path, timeout: int) -> int:
+    """Read the pull request's checks: wait while pending, mark it ready when all pass, or send a failure to a fix run."""
+    if not task.get("pr"):
+        print(f"{task['id']} has no pull request.\nNext: hearth task publish {task['id']}", file=sys.stderr)
+        return 1
+    repo, number = _repo(task), str(task["pr"]["number"])
+    checks = json.loads(_gh(["pr", "checks", number, "--json", "name,bucket,link"], repo) or "[]")
+    buckets = {check["bucket"] for check in checks}
+    if not checks or "pending" in buckets:
+        print(f"{task['id']}  CI pending on {task['pr']['url']}")
+        print(f"Next: hearth task ci {task['id']} again in a minute", file=sys.stderr)
+        return 0
+    if buckets <= {"pass", "skipping"}:
+        _gh(["pr", "ready", number], repo)
+        task["pr"]["ready"] = True
+        _write(task_dir, task)
+        print(f"{task['id']}  CI passed; {task['pr']['url']} is ready for your review")
+        print("Next: review and merge it yourself; Hearth never merges", file=sys.stderr)
+        return 0
+    failed = next(check for check in checks if check["bucket"] in ("fail", "cancel"))
+    run_id = re.search(r"/runs/(\d+)", failed.get("link", ""))
+    log = _gh(["run", "view", run_id.group(1), "--log-failed"], repo) if run_id else f"{failed['name']} failed; no log link."
+    (task_dir / "ci.txt").write_text(log, encoding="utf-8")
+    if not Path(task["worktree"]).exists():
+        print(f"{task['id']}  CI failed, and its worktree was discarded; see {task_dir / 'ci.txt'}", file=sys.stderr)
+        return 1
+    project = _projects()[task["project"]]
+    _fix(project, task, task_dir, "fix for CI", f"CI failed on the pull request; fix it:\n\n```text\n{log[-4000:]}\n```\n", timeout)
+    print(f"Next: hearth loop {task['id']}, which verifies, reviews, and pushes the fix", file=sys.stderr)
+    return 1 if task["stop_reason"] else 0
+
+
+def _base(repo: Path) -> str:
+    """The branch a pull request would merge into, freshly fetched when the project has a remote."""
+    subprocess.run(["git", "-C", str(repo), "fetch", "-q", "origin"], capture_output=True)
+    head = subprocess.run(["git", "-C", str(repo), "rev-parse", "--abbrev-ref", "origin/HEAD"], capture_output=True, text=True)
+    return head.stdout.strip() if head.returncode == 0 else "main"
+
+
+def _push(task: dict) -> None:
+    _git(_repo(task), "push", "-u", "origin", task["branch"])
+
+
+def _gh(args: list[str], cwd: Path) -> str:
+    """Run gh, keeping its output even when it exits non-zero, as gh pr checks does for failing or pending checks."""
+    try:
+        result = subprocess.run(["gh", *args], cwd=cwd, capture_output=True, text=True)
+    except FileNotFoundError:
+        raise SystemExit("gh is not installed.\nNext: brew install gh, then gh auth login")
+    if result.returncode and not result.stdout.strip():
+        raise SystemExit(f"gh {' '.join(args[:2])} failed: {result.stderr.strip()}")
+    return result.stdout
+
+
 def _verdict(text: str, verdicts: tuple[str, str] = ("approve", "changes"), items: str = "findings") -> dict | None:
     """Find the last JSON object in a reply that is a well-formed review or verification verdict."""
     decoder = json.JSONDecoder()
@@ -1097,6 +1249,9 @@ def _show(task: dict, task_dir: Path, as_json: bool) -> None:
     for question in _open_questions(task_dir):
         print(f"question  {question['id']} from {question['from']}: {question['body']}")
     repo = _repo(task)
+    if task.get("pr"):
+        print(f"pull req  {task['pr']['url']} ({'ready for review' if task['pr'].get('ready') else 'draft'})")
+        return
     print("To review and publish:")
     print(f"  code {task['worktree']}")
     print(f"  git -C {repo} push -u origin {task['branch']}")

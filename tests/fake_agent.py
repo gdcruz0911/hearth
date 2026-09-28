@@ -7,7 +7,7 @@ A prompt that starts with "# Verify" follows the next scenario in FAKE_VERIFY: v
 A test-writing prompt writes tests/test_hello.txt, plus notes.txt when FAKE_TESTS is "source".
 A prompt that starts with "# Retro" is answered with the next reply in FAKE_RETRO: proposal, guard, or garbage.
 An editing or idle run also writes FAKE_OUTBOX, if set, to .hearth/outbox.jsonl as board messages,
-and an editing run appends FAKE_EXTRA, if set, to hello.txt.
+and an editing run appends FAKE_EXTRA, if set, to hello.txt, and ends with a PR title line unless FAKE_TITLE is none.
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ from pathlib import Path
 SESSION = "00000000-0000-0000-0000-00000000000f"
 FORMAT = sys.argv[sys.argv.index("--as") + 1] if "--as" in sys.argv else "claude"
 VERDICTS = {
-    "approve": 'Looks good.\n{"verdict": "approve", "findings": []}',
+    "approve": 'Looks good.\n{"verdict": "approve", "findings": [], "risk": "low: only adds hello.txt"}',
     "changes": 'One problem.\n{"verdict": "changes", "findings": [{"standard": "CLI-3", "file": "hello.txt", "line": 1, "problem": "Say hello."}]}',
     "elsewhere": 'One problem.\n{"verdict": "changes", "findings": [{"standard": "CLI-3", "file": "notes.txt", "line": 1, "problem": "Add notes."}]}',
     "second-line": 'One problem.\n{"verdict": "changes", "findings": [{"standard": "CLI-3", "file": "hello.txt", "line": 2, "problem": "Line two is wrong."}]}',
@@ -119,7 +119,8 @@ def main() -> int:
         file.write(prompt.splitlines()[0] + "\n" + os.environ.get("FAKE_EXTRA", ""))
     Path(".hearth/artifacts").mkdir(parents=True, exist_ok=True)
     Path(".hearth/artifacts/note.txt").write_text("for the person\n", encoding="utf-8")
-    finish("Added hello.txt.")
+    title = "" if os.environ.get("FAKE_TITLE") == "none" else "\nPR title: feat: add hello.txt\nPR summary: hello.txt now greets the person."
+    finish("Added hello.txt." + title)
     return 0
 
 
