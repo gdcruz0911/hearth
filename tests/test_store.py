@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 import tempfile
 import unittest
@@ -138,6 +139,8 @@ class KeywordIndexTests(unittest.TestCase):
 
         self.assertEqual({item["document"] for item in report["evidence"] + report["candidates"]}, {"garden.md"})
         self.assertEqual(report["scope"], {"recall_roots": ["notes"]})
+        self.assertEqual({item["location"] for item in report["evidence"] + report["candidates"]}, {"notes/garden.md"})
+        self.assertNotIn(str(self.directory), json.dumps(report))
         self.assertNotIn("garden.md", [item["document"] for item in everything["candidates"]])
 
     def test_semantic_results_outside_the_folder_are_dropped_before_the_limit(self) -> None:
@@ -160,6 +163,61 @@ class KeywordIndexTests(unittest.TestCase):
 
         self.assertEqual(len(record["semantic"]), 1)
         self.assertEqual(record["within"], ["notes"])
+
+    def test_an_outside_document_never_reaches_the_reranker_or_the_evidence(self) -> None:
+        from hearth.domain import Evidence
+        from hearth.retrieval import IdentityReranker
+
+        class SpyReranker(IdentityReranker):
+            seen: list[str] = []
+
+            def rerank(self, question, candidates, limit=6):
+                SpyReranker.seen += [item.chunk.document_name for item in candidates]
+                return super().rerank(question, candidates, limit)
+
+        class OutsideIsBest:
+            def rebuild(self, chunks, **options) -> None:
+                pass
+
+            def is_current(self, chunks) -> bool:
+                return True
+
+            def search(self, question, chunks, limit=20):
+                ranked = sorted(chunks, key=lambda chunk: chunk.document_name != "secret-plan.md")
+                return [Evidence(chunk=chunk, score=1.0 - rank / 100) for rank, chunk in enumerate(ranked)][:limit]
+
+        inside, outside = self.directory / "notes", self.directory / "private"
+        inside.mkdir(); outside.mkdir()
+        (inside / "garden.md").write_text("The garden owner is Ada.", encoding="utf-8")
+        (outside / "secret-plan.md").write_text("The garden owner question: the garden owner is secretly Lin.", encoding="utf-8")
+        (inside / "linked-plan.md").symlink_to(outside / "secret-plan.md")
+        sibling = self.directory / "notes-archive"
+        sibling.mkdir()
+        (sibling / "old.md").write_text("The garden owner was Ada's neighbour.", encoding="utf-8")
+        service = HearthService(self.database, semantic_index=OutsideIsBest(), reranker=SpyReranker())
+        self.addCleanup(service.close)
+        for path in (inside / "garden.md", outside / "secret-plan.md", inside / "linked-plan.md", sibling / "old.md"):
+            service._import_document(str(path), rebuild_index=False)
+
+        report = service.search_report("Who is the garden owner?", within=(inside,))
+        _, record = service.trace("Who is the garden owner?", within=(inside,))
+        allowed = {chunk.id for chunk in service._store.list_chunks() if chunk.document_name == "garden.md"}
+
+        self.assertEqual(set(SpyReranker.seen), {"garden.md"})
+        self.assertEqual({item["document"] for item in report["evidence"] + report["candidates"]}, {"garden.md"})
+        self.assertNotIn("Lin", json.dumps(report))
+        for stage in ("keyword", "semantic", "fused", "reranked"):
+            ids = [entry if isinstance(entry, int) else entry[0] for entry in record[stage]]
+            self.assertTrue(set(ids) <= allowed, stage)
+
+    def test_no_recall_roots_retrieves_nothing(self) -> None:
+        service = HearthService(self.database)
+        self.addCleanup(service.close)
+        service.import_document(str(self.decision))
+
+        report = service.search_report("What does ADR-0024 decide?", within=())
+
+        self.assertEqual((report["status"], report["evidence"], report["candidates"]), ("abstained", [], []))
 
     def test_a_collection_imported_before_the_keyword_index_is_backfilled(self) -> None:
         service = HearthService(self.database)
