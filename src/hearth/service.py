@@ -260,6 +260,45 @@ class HearthService:
         record["status"] = answer.status
         return answer, record
 
+    def search_report(self, question: str, *, keyword_only: bool = False) -> dict[str, object]:
+        """The answer as data for agents: accepted evidence with provenance, kept apart from unaccepted candidates.
+
+        Evidence is what the current gate accepted and the answer cites; candidates are everything retrieval
+        returned, without text. Passing the gate shows term overlap only, and the report says so.
+        """
+        answer, record = self.trace(question, keyword_only=keyword_only)
+        chunks = {chunk.id: chunk for chunk in self._store.list_chunks()}
+        health = self.collection_health()
+        freshness = {item.document_id: item.status for item in health.source_attention}
+        cited = [citation.chunk_id for citation in answer.citations]
+        semantic = self._semantic_index is not None and not keyword_only
+        return {
+            "question": question,
+            "status": answer.status,
+            "retrieval": {"mode": "hybrid" if semantic else "keyword", "semantic_index": health.semantic_index_status,
+                          "candidate_scores": record["reranker"] if record["reranker"] != "IdentityReranker"
+                          else "reciprocal rank fusion"},
+            "gate": {
+                "rule": "ADR-0009: a cited excerpt shares at least one non-stopword term with the question",
+                "passed": record["lexical_support"],
+                "note": "Passing shows term overlap only. It does not show that the evidence answers the question.",
+            },
+            "evidence": [
+                {"rank": rank, "chunk_id": citation.chunk_id, "document_id": chunks[citation.chunk_id].document_id,
+                 "document": citation.document_name, "page": citation.page_number, "section": citation.section,
+                 "char_start": chunks[citation.chunk_id].char_start, "char_end": chunks[citation.chunk_id].char_end,
+                 "extraction": citation.extraction_method, "ocr_confidence": citation.ocr_confidence,
+                 "source": freshness.get(chunks[citation.chunk_id].document_id, "current"), "excerpt": citation.quote}
+                for rank, citation in enumerate(answer.citations, start=1)
+            ],
+            "candidates": [
+                {"rank": rank, "chunk_id": chunk_id, "document_id": chunks[chunk_id].document_id,
+                 "document": chunks[chunk_id].document_name, "page": chunks[chunk_id].page_number, "score": score,
+                 "cited": chunk_id in cited, "source": freshness.get(chunks[chunk_id].document_id, "current")}
+                for rank, (chunk_id, score) in enumerate(record["reranked"], start=1)
+            ],
+        }
+
     def run_description(self) -> dict[str, object]:
         """What produces answers: retrieval settings, index and model identity, reranker, and the evidence gate."""
         describe = getattr(self._reranker, "describe", None)

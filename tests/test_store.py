@@ -95,6 +95,29 @@ class KeywordIndexTests(unittest.TestCase):
         with self.assertRaises(IndexCompatibilityError):
             service.answer("ADR-0024")
 
+    def test_search_report_lists_a_retrieved_candidate_but_no_evidence_when_the_gate_abstains(self) -> None:
+        from hearth.domain import Evidence
+
+        class UnrelatedSemanticIndex:
+            def rebuild(self, chunks, **options) -> None:
+                pass
+
+            def search(self, question, chunks, limit=20):
+                return [Evidence(chunk=chunks[0], score=0.31)]
+
+            def is_current(self, chunks) -> bool:
+                return True
+
+        service = HearthService(self.database, semantic_index=UnrelatedSemanticIndex())
+        self.addCleanup(service.close)
+        service.import_document(str(self.directory / "other.md"))
+
+        report = service.search_report("Which zebra won?")
+
+        self.assertEqual((report["status"], report["evidence"], report["gate"]["passed"]), ("abstained", [], False))
+        self.assertEqual([(c["document"], c["cited"]) for c in report["candidates"]], [("other.md", False)])
+        self.assertEqual(report["retrieval"]["mode"], "hybrid")
+
     def test_a_collection_imported_before_the_keyword_index_is_backfilled(self) -> None:
         service = HearthService(self.database)
         service.import_document(str(self.decision))

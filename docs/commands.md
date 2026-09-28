@@ -7,7 +7,7 @@ A test fails when a command is missing from this table, so it grows with every p
 | Command | What it does |
 | --- | --- |
 | `hearth import <path>` | Import one note or PDF. |
-| `hearth search "<question>"` | Answer from cited evidence, or abstain. Add `--keyword` to search exact words only, skipping semantic search. |
+| `hearth search "<question>"` | Answer from cited evidence, or abstain. Add `--keyword` to search exact words only, skipping semantic search, and `--json` for one JSON value that separates accepted evidence from retrieved candidates. |
 | `hearth list` | List imported documents and their IDs. |
 | `hearth inspect <id>` | Show one document's provenance metadata. |
 | `hearth health` | Summarize collection attention items and next actions. |
