@@ -134,7 +134,7 @@ def main(argv: list[str] | None = None) -> int:
         return usage.run(args)
     if args.command in ("task", "open", "loop"):
         return tasks.run(args)
-    if args.command == "review-eval":
+    if args.command in ("review-eval", "verify-eval"):
         return evals.run(args)
     if args.command == "stats":
         return stats.run(args)
