@@ -99,6 +99,27 @@ class CollectionInspectionCliTests(unittest.TestCase):
         self.assertNotIn("The deployment owner is Ada.", output.getvalue())
         self.assertNotIn(str(self.root), output.getvalue())
 
+    def test_health_json_reports_collection_metadata_without_document_text(self) -> None:
+        output = io.StringIO()
+
+        with contextlib.redirect_stdout(output):
+            exit_code = main(["--database", str(self.database), "health", "--json"])
+
+        self.assertEqual(exit_code, 0)
+        payload = json.loads(output.getvalue())
+        self.assertEqual(payload["document_count"], 1)
+        self.assertEqual(payload["page_count"], 1)
+        self.assertEqual(payload["chunk_count"], 1)
+        self.assertEqual(payload["ocr_page_count"], 0)
+        self.assertEqual(payload["unavailable_source_count"], 0)
+        self.assertEqual(payload["semantic_index_status"], "not configured")
+        self.assertEqual(payload["source_attention"], [])
+        for record in _metadata_objects(payload):
+            for value in record.values():
+                if isinstance(value, str):
+                    self.assertNotIn("The deployment owner is Ada.", value)
+                    self.assertNotIn(str(self.root), value)
+
     def test_health_reports_unavailable_source_without_rendering_its_path(self) -> None:
         self.note.rename(self.root / "operations-moved.md")
         output = io.StringIO()
