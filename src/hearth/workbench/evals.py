@@ -16,6 +16,7 @@ def add_parser(subcommands: argparse._SubParsersAction) -> None:
     parser.add_argument("cases", type=Path, help="A directory with base/ and one folder per case, such as tests/fixtures/public/reviews.")
     parser.add_argument("--reviewer", required=True, choices=sorted(REVIEWERS))
     parser.add_argument("--model", help="Reviewer model. Defaults to the one hearth loop uses.")
+    parser.add_argument("--effort", choices=("low", "medium", "high"), help="Reviewer effort. Defaults to the review role's.")
     parser.add_argument("--timeout", type=int, default=600, help="Seconds before each review is stopped. Defaults to 600.")
 
 
@@ -38,9 +39,10 @@ def run(args: argparse.Namespace) -> int:
         task = {"id": f"eval-{case_dir.name}", "goal": case["goal"], "base": base, "worktree": str(repo), "runs": [], "status": "running"}
         prompt = REVIEW_PROMPT.format(id=task["id"], goal=case["goal"], base=base[:12], diff=_git(repo, "diff", f"{base}..HEAD"), messages="", verification="")
         started = time.monotonic()
-        result = _run(task, work, "review", args.reviewer, REVIEWERS[args.reviewer], prompt, model, None, args.timeout, "")
+        result = _run(task, work, "review", args.reviewer, REVIEWERS[args.reviewer], prompt, model, args.effort, args.timeout, "")
+        record = task["runs"][-1]
         verdict = None if result["stop"] else _verdict(result["final"])
-        rows.append({"at": _now(), "reviewer": args.reviewer, "model": model, "case": case_dir.name, "expect": case["expect"],
+        rows.append({"at": _now(), "reviewer": args.reviewer, "model": record["model_used"], "effort": record["effort"], "case": case_dir.name, "expect": case["expect"],
                      "verdict": verdict and verdict["verdict"], "correct": bool(verdict) and verdict["verdict"] == case["expect"],
                      "seconds": round(time.monotonic() - started), "stop": result["stop"], "usage": result["usage"]})
         print(f"{case_dir.name:<14} expected {case['expect']:<8} got {rows[-1]['verdict'] or result['stop'] or 'unreadable':<11} {'ok' if rows[-1]['correct'] else 'MISS'}")
