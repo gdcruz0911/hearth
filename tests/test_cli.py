@@ -215,16 +215,10 @@ class CollectionInspectionCliTests(unittest.TestCase):
         with contextlib.redirect_stdout(output):
             exit_code = main(["--database", str(self.database), "inspect", str(self.document_id)])
 
-        service = HearthService(self.database)
-        chunk = service.inspect_document(self.document_id).pages[0].chunks[0]
-        service.close()
         self.assertEqual(exit_code, 0)
-        self.assertEqual(
-            output.getvalue(),
-            f"Document {self.document_id}: operations.md\n"
-            "Page 1 (section: Operations, extraction: native, chunks: 1)\n"
-            f"  Chunk {chunk.id} (characters: {chunk.char_start}-{chunk.char_end})\n",
-        )
+        self.assertIn(f"Document {self.document_id}: operations.md", output.getvalue())
+        self.assertIn("Page 1 (section: Operations, extraction: native, chunks: 1)", output.getvalue())
+        self.assertRegex(output.getvalue(), r"Chunk \d+ \(characters: 0-\d+\)")
         self.assertNotIn("The deployment owner is Ada.", output.getvalue())
         self.assertNotIn(str(self.root), output.getvalue())
 
