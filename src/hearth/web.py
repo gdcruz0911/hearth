@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from .embedding import IndexBuildCancelled
+from .embedding import IndexBuildCancelled, IndexBusy, IndexBuildStopped
 from .domain import (
     Answer,
     CollectionHealth,
@@ -75,6 +75,7 @@ class _SemanticIndexJob:
     phase: str = "preparing local model"
     semantic_index_status: str | None = None
     error: str | None = None
+    warning: str | None = None
 
 
 @dataclass(frozen=True)
@@ -317,22 +318,32 @@ class HearthWebApplication:
                     job.total = total
                     job.phase = "finalizing derived index" if completed >= total else "embedding evidence"
 
+        def on_warning(message: str) -> None:
+            with self._semantic_index_job_lock:
+                if self._semantic_index_job is job:
+                    job.warning = message
+
         try:
             semantic_index_status = self._service.rebuild_semantic_index(
                 on_progress=on_progress,
                 is_cancelled=job.cancellation_requested.is_set,
+                on_warning=on_warning,
             )
         except IndexBuildCancelled:
             with self._semantic_index_job_lock:
                 if self._semantic_index_job is job:
                     job.status = "cancelled"
                     job.phase = "cancelled"
-        except Exception:
+        except Exception as exc:
             with self._semantic_index_job_lock:
                 if self._semantic_index_job is job:
                     job.status = "failed"
                     job.phase = "failed"
-                    job.error = "The local semantic-index rebuild stopped before completion."
+                    job.error = (
+                        str(exc)
+                        if isinstance(exc, (IndexBusy, IndexBuildStopped))
+                        else "The local semantic-index rebuild stopped before completion."
+                    )
         else:
             with self._semantic_index_job_lock:
                 if self._semantic_index_job is job:
@@ -366,6 +377,7 @@ class HearthWebApplication:
                 "phase": job.phase,
                 "semantic_index_status": job.semantic_index_status,
                 "error": job.error,
+                "warning": job.warning,
                 "benchmark": {
                     "elapsed_seconds": round(elapsed_seconds, 2),
                     "cpu_seconds": round(cpu_seconds, 2),

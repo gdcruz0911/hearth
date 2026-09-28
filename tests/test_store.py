@@ -49,6 +49,43 @@ class SQLiteStoreMigrationTests(unittest.TestCase):
         self.assertEqual(service.collection_health().baseline_reindex_count, 0)
 
 
+class KeywordIndexTests(unittest.TestCase):
+    def setUp(self) -> None:
+        temporary_directory = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary_directory.cleanup)
+        self.directory = Path(temporary_directory.name)
+        self.database = self.directory / "hearth.sqlite"
+        self.decision = self.directory / "decision.md"
+        self.decision.write_text("ADR-0024 keeps outbound data per destination.", encoding="utf-8")
+        (self.directory / "other.md").write_text("The garden needs water on Tuesdays.", encoding="utf-8")
+
+    def test_an_exact_identifier_is_found_and_forgotten_when_its_document_is_removed(self) -> None:
+        service = HearthService(self.database)
+        self.addCleanup(service.close)
+        service.import_document(str(self.decision))
+        service.import_document(str(self.directory / "other.md"))
+
+        answer = service.answer("What does ADR-0024 decide?")
+
+        self.assertEqual((answer.status, answer.citations[0].document_name), ("supported", "decision.md"))
+        service.remove_document(str(self.decision))
+        self.assertEqual(service.answer("What does ADR-0024 decide?").status, "abstained")
+
+    def test_a_collection_imported_before_the_keyword_index_is_backfilled(self) -> None:
+        service = HearthService(self.database)
+        service.import_document(str(self.decision))
+        service.close()
+        connection = sqlite3.connect(self.database)
+        connection.executescript(
+            "DROP TRIGGER chunks_fts_insert; DROP TRIGGER chunks_fts_delete; DROP TABLE chunks_fts;"
+        )
+        connection.close()
+
+        store = SQLiteStore(self.database)
+        self.addCleanup(store.close)
+
+        self.assertEqual(len(store.keyword_search({"0024"})), 1)
+
 
 if __name__ == "__main__":
     unittest.main()
