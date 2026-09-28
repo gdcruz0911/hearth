@@ -65,6 +65,9 @@ class TaskTestCase(unittest.TestCase):
             status = main(list(argv))
         return status, output.getvalue()
 
+    def only_task_by_id(self, task_id: str) -> dict:
+        return json.loads((self.home / ".hearth/tasks" / task_id / "task.json").read_text(encoding="utf-8"))
+
     def only_task(self) -> dict:
         (task_dir,) = (self.home / ".hearth/tasks").iterdir()
         return json.loads((task_dir / "task.json").read_text(encoding="utf-8"))
@@ -181,6 +184,17 @@ class TaskTests(TaskTestCase):
         self.assertNotIn(task["branch"], git(self.repo, "branch", "--list"))
         self.assertEqual(len(git(self.repo, "worktree", "list").splitlines()), 1)
         self.assertIsNotNone(self.only_task()["discarded"])
+
+    def test_a_task_can_be_named_by_last_or_a_unique_ending_of_its_id(self) -> None:
+        self.cli("task", "new", "demo", "Add hello.txt")
+        task = self.only_task()
+
+        _, by_last = self.cli("task", "show", "last")
+        _, by_ending = self.cli("task", "show", task["id"][-6:])
+
+        self.assertIn(task["id"], by_last)
+        self.assertIn(task["id"], by_ending)
+        self.assertEqual(self.cli("task", "show", "999999")[0], 1)
 
     def test_show_prints_the_commands_to_review_and_publish(self) -> None:
         self.cli("task", "new", "demo", "Add hello.txt")
@@ -656,7 +670,9 @@ class GuardTests(LoopTestCase):
         self.assertEqual(self.loop(task, "changes,approve"), 1)
         task = self.only_task()
         self.assertEqual((task["status"], [run["role"] for run in task["runs"]]), ("waiting", ["implement", "review"]))
-        self.assertIn("Protected tests, which the implementer cannot change: hello.txt", (self.home / ".fake-last-review-prompt").read_text(encoding="utf-8"))
+        review_prompt = (self.home / ".fake-last-review-prompt").read_text(encoding="utf-8")
+        self.assertIn("Protected tests, which the implementer cannot change: hello.txt", review_prompt)
+        self.assertIn("first on purpose as part of this change, so adding them is in scope", review_prompt)
 
         self.cli("task", "answer", task["id"], "Keep the tests as they are.")
         self.assertEqual(self.cli("loop", task["id"])[0], 0)
@@ -916,6 +932,19 @@ class RetroTests(LoopTestCase):
         prompt = (self.home / ".fake-last-retro-prompt").read_text(encoding="utf-8")
         self.assertIn("a guard in Hearth's own code", prompt)
         self.assertIn("already covers", prompt)
+
+    def test_approving_a_stored_proposal_starts_its_tests_first_task(self) -> None:
+        task = self.escaped()
+        self.cli("task", "retro", task["id"])
+
+        with mock.patch.dict(tasks.PROVIDERS, {"codex": FAKE_CODEX}):
+            status, _ = self.cli("task", "retro", task["id"], "--approve", "1")
+
+        new = json.loads(max((self.home / ".hearth/tasks").glob("*/task.json")).read_text(encoding="utf-8"))
+        self.assertEqual(status, 0)
+        self.assertEqual(new["goal"], "Add a regression test that hello.txt greets by name.")
+        self.assertEqual(new["runs"][0]["role"], "test")
+        self.assertEqual(self.only_task_by_id(task["id"])["escapes"][0]["approved_as"], new["id"])
 
     def test_a_retro_works_after_the_worktree_is_discarded(self) -> None:
         task = self.escaped()

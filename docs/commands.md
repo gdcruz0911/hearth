@@ -1,6 +1,7 @@
 # Hearth commands
 
-Run these as `.venv/bin/hearth`, or put `.venv/bin` on your `PATH`; `hearth <command> --help` shows every option.
+Link the command once with `ln -s "$PWD/.venv/bin/hearth" ~/.local/bin/hearth` from the repository, then run `hearth` from anywhere; `hearth <command> --help` shows every option.
+Wherever a command takes a task ID, `last` or a unique ending of the ID also works, such as `hearth task show last`.
 A test fails when a command is missing from this table, so it grows with every pull request that adds one.
 
 | Command | What it does |
@@ -28,6 +29,7 @@ A test fails when a command is missing from this table, so it grows with every p
 | `hearth task new <project> "<goal>" --tests-first` | Have another model family write failing tests first; the implementer must pass them unchanged. Add `--approve-tests` to read them before implementation starts. |
 | `hearth task approve-tests <id>` | Approve a tests-first task's tests and start implementing. |
 | `hearth task escape <id> "<text>"` | Record a problem found after the task passed every gate. |
+| `hearth task retro <id> --approve N` | Approve escape N's stored proposal by starting it as a tests-first task. |
 | `hearth task retro <id>` | Have another model family propose one permanent fix per escape; you approve by running or editing the printed command. |
 | `hearth task collect <id>` | After an interactive task, commit its checkpoint, run the check, and save the diff. |
 | `hearth task open <id>` | Open a task's worktree in VS Code. |
