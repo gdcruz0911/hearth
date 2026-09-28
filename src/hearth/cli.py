@@ -207,8 +207,11 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "inspect":
             inspection = service.inspect_document(args.document_id)
             if inspection is None:
-                print(f"No imported document with ID {args.document_id}.")
-                print("Next: run list to review imported documents and their IDs.")
+                if args.json:
+                    print(json.dumps({"error": f"No imported document with ID {args.document_id}."}))
+                else:
+                    print(f"No imported document with ID {args.document_id}.")
+                    print("Next: run list to review imported documents and their IDs.")
                 return 1
             if args.json:
                 print(json.dumps(_document_inspection_json(inspection)))
