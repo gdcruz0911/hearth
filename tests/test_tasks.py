@@ -1091,6 +1091,41 @@ class PullRequestTests(LoopTestCase):
 
         self.assertEqual([args[:2] for args in self.gh if args[0] == "pr"], [["pr", "list"], ["pr", "edit"]])
 
+    def published_task(self) -> dict:
+        task = self.start_pr_project()
+        self.loop(task, "approve")
+        return task
+
+    def publish_again(self, task: dict, state: str) -> tuple[int, str]:
+        self.gh_replies["view"] = state
+        self.pushed.clear()
+        self.gh.clear()
+        stderr = io.StringIO()
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(stderr):
+            status = main(["task", "publish", task["id"]])
+        return status, stderr.getvalue()
+
+    def test_a_merged_closed_or_unreadable_recorded_pull_request_stops_before_any_push(self) -> None:
+        task = self.published_task()
+        for state, says in (("MERGED\n", "#7 was merged"), ("CLOSED\n", "#7 was closed"),
+                            ("", "#7 has a state Hearth could not read"), ("HTTP 502: Bad Gateway", "could not read")):
+            with self.subTest(state=state):
+                status, stderr = self.publish_again(task, state)
+
+                self.assertEqual((status, self.pushed), (1, []))
+                self.assertEqual([args[:2] for args in self.gh], [["pr", "view"]])
+                self.assertIn(says, stderr)
+                self.assertIn("nothing was pushed", stderr)
+
+    def test_an_open_recorded_pull_request_is_pushed_and_edited(self) -> None:
+        self.gh_replies["list"] = '[{"number": 7, "url": "https://github.com/person/demo/pull/7"}]'
+
+        status, _ = self.publish_again(self.published_task(), "OPEN\n")
+
+        self.assertEqual(status, 0)
+        self.assertEqual(len(self.pushed), 1)
+        self.assertEqual([args[:2] for args in self.gh if args[0] == "pr"], [["pr", "view"], ["pr", "list"], ["pr", "edit"]])
+
     def test_a_missing_title_falls_back_to_chore_and_says_so(self) -> None:
         os.environ["FAKE_TITLE"] = "none"
 

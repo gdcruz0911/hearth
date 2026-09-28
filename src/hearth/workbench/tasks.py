@@ -957,13 +957,24 @@ def _pull_request(task: dict, task_dir: Path) -> tuple[str, str]:
 
 def _publish(task: dict, task_dir: Path) -> int:
     """Push the task branch and open its draft pull request, or update the open one; never merges (ADR-0023)."""
+    repo = _repo(task)
+    if task.get("pr"):
+        # A merged or closed pull request must not turn a push into a new pull request that re-proposes finished work.
+        number = task["pr"]["number"]
+        state = _gh(["pr", "view", str(number), "--json", "state", "--jq", ".state"], repo).strip()
+        if state != "OPEN":
+            known = {"MERGED": "was merged", "CLOSED": "was closed"}
+            print(f"Not publishing {task['id']}: pull request #{number} {known.get(state, 'has a state Hearth could not read')}, "
+                  "so nothing was pushed.", file=sys.stderr)
+            print("Next: run what remains as a new task from the current main" if state in known
+                  else f"Next: check it with gh pr view {number}, then hearth task publish {task['id']} again", file=sys.stderr)
+            return 1
     title, body = _pull_request(task, task_dir)
     leaks = sorted({kind for kind, pattern in GUARD_PATTERNS if re.search(pattern, f"{title}\n{body}")})
     if leaks:
         print(f"Not publishing {task['id']}: the pull request text would contain {', '.join(leaks)} (CODE-6).", file=sys.stderr)
         print(f"Next: push it yourself with an edited description, from hearth task show {task['id']}", file=sys.stderr)
         return 1
-    repo = _repo(task)
     base = _base(repo)
     if subprocess.run(["git", "-C", str(repo), "merge-tree", "--write-tree", base, task["branch"]], capture_output=True).returncode:
         print(f"Not publishing {task['id']}: {task['branch']} conflicts with {base}, so its pull request could not be merged.", file=sys.stderr)
