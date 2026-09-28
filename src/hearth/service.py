@@ -276,6 +276,16 @@ class HearthService:
         return {document_id for document_id, _, path, *_ in self._store.source_records()
                 if any(path.is_relative_to(root) for root in resolved)}
 
+    def _locations_within(self, roots: tuple[Path, ...]) -> dict[int, str]:
+        """Each in-scope document's path relative to its recall root, prefixed with the root's name."""
+        resolved = [root.expanduser().resolve() for root in roots]
+        locations = {}
+        for document_id, _, path, *_ in self._store.source_records():
+            root = next((root for root in resolved if path.is_relative_to(root)), None)
+            if root is not None:
+                locations[document_id] = str(Path(root.name) / path.relative_to(root))
+        return locations
+
     def search_report(
         self, question: str, *, keyword_only: bool = False, within: tuple[Path, ...] | None = None
     ) -> dict[str, object]:
@@ -290,6 +300,9 @@ class HearthService:
         freshness = {item.document_id: item.status for item in health.source_attention}
         cited = [citation.chunk_id for citation in answer.citations]
         semantic = self._semantic_index is not None and not keyword_only
+        # Inside recall roots, each item names its place relative to its root (never the full path), so an agent
+        # can tell a dated snapshot folder from a live one.
+        location = self._locations_within(within) if within is not None else {}
         return {
             "question": question,
             "status": answer.status,
@@ -307,13 +320,16 @@ class HearthService:
                  "document": citation.document_name, "page": citation.page_number, "section": citation.section,
                  "char_start": chunks[citation.chunk_id].char_start, "char_end": chunks[citation.chunk_id].char_end,
                  "extraction": citation.extraction_method, "ocr_confidence": citation.ocr_confidence,
-                 "source": freshness.get(chunks[citation.chunk_id].document_id, "current"), "excerpt": citation.quote}
+                 "source": freshness.get(chunks[citation.chunk_id].document_id, "current"),
+                 **({"location": location[chunks[citation.chunk_id].document_id]} if location else {}),
+                 "excerpt": citation.quote}
                 for rank, citation in enumerate(answer.citations, start=1)
             ],
             "candidates": [
                 {"rank": rank, "chunk_id": chunk_id, "document_id": chunks[chunk_id].document_id,
                  "document": chunks[chunk_id].document_name, "page": chunks[chunk_id].page_number, "score": score,
-                 "cited": chunk_id in cited, "source": freshness.get(chunks[chunk_id].document_id, "current")}
+                 "cited": chunk_id in cited, "source": freshness.get(chunks[chunk_id].document_id, "current"),
+                 **({"location": location[chunks[chunk_id].document_id]} if location else {})}
                 for rank, (chunk_id, score) in enumerate(record["reranked"], start=1)
             ],
         }
