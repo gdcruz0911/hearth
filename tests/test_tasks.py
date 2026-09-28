@@ -626,6 +626,15 @@ class GuardTests(LoopTestCase):
         self.assertEqual(task["stop_reason"], "guard_failed")
         self.assertIn("test skip in hello.txt:2 (TEST-7)", guards)
 
+    def test_raising_unittest_skiptest_fails_the_guards(self) -> None:
+        os.environ["FAKE_EXTRA"] = "        raise unittest.SkipTest('flaky here')\n"
+
+        task = self.start()
+
+        guards = (self.home / ".hearth/tasks" / task["id"] / "runs/01-implement-claude/guards.txt").read_text(encoding="utf-8")
+        self.assertEqual(task["stop_reason"], "guard_failed")
+        self.assertIn("test skip in hello.txt:2 (TEST-7)", guards)
+
     def test_a_skip_the_goal_asks_for_passes_the_guards(self) -> None:
         os.environ["FAKE_EXTRA"] = "@unittest.skipIf(sys.platform == 'win32', 'POSIX only')\n"
         self.write_projects(check="test -f hello.txt", providers=("claude", "codex"))

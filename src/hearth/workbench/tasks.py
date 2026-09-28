@@ -80,7 +80,7 @@ GUARD_PATTERNS = [
     ("absolute home path", r"/(?:Users|home)/[A-Za-z0-9._-]+/"),  # CODE-6: real local paths reveal names and layout.
 ]
 # TEST-7: a new skip silences a test instead of passing it, so it fails the guards unless the goal asks for one.
-SKIP_PATTERN = re.compile(r"\bskipTest\(|@(?:unittest\.)?skip(?:If|Unless)?\b|\bpytest\.(?:mark\.)?skip|\b(?:it|describe|test)\.skip\(|\bxit\(|\bt\.Skip")
+SKIP_PATTERN = re.compile(r"\bskipTest\(|\bSkipTest\b|@(?:unittest\.)?skip(?:If|Unless)?\b|\bpytest\.(?:mark\.)?skip|\b(?:it|describe|test)\.skip\(|\bxit\(|\bt\.Skip")
 GUIDANCE = ["AGENTS.md", "CLAUDE.md", "CODING_REQUIREMENTS.md", "CONTEXT.md", "VERIFY.md", "docs/standards"]
 HEADROOM_LIMIT = 90
 PROMPT = """# Task {id}
