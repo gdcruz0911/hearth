@@ -896,6 +896,18 @@ class RetroTests(LoopTestCase):
         self.assertIn("hello.txt never says the person's name.", prompt)
         self.assertIn("02 review", prompt)
 
+    def test_a_guard_proposal_is_approved_as_a_task_on_hearth_itself(self) -> None:
+        task = self.escaped()
+        os.environ["FAKE_RETRO"] = "guard"
+
+        _, output = self.cli("task", "retro", task["id"])
+
+        self.assertIn("proposal (guard", output)
+        self.assertIn("hearth task new hearth 'Add a regression test that hello.txt greets by name.' --tests-first", output)
+        prompt = (self.home / ".fake-last-retro-prompt").read_text(encoding="utf-8")
+        self.assertIn("a guard in Hearth's own code", prompt)
+        self.assertIn("already covers", prompt)
+
     def test_a_retro_works_after_the_worktree_is_discarded(self) -> None:
         task = self.escaped()
         self.cli("task", "discard", task["id"], "--apply")
@@ -904,6 +916,9 @@ class RetroTests(LoopTestCase):
 
         self.assertEqual(status, 0)
         self.assertIn(f"+# Task {task['id']}", (self.home / ".fake-last-retro-prompt").read_text(encoding="utf-8"))
+        # Read-only in the main checkout, so it sees the project's current standards and guards.
+        self.assertEqual(Path((self.home / ".fake-last-retro-cwd").read_text(encoding="utf-8")).resolve(), self.repo.resolve())
+        self.assertEqual(git(self.repo, "status", "--porcelain"), "")
 
     def test_an_unreadable_retro_is_reported_without_a_proposal(self) -> None:
         task = self.escaped()
