@@ -30,7 +30,7 @@ from .runtime import (
 )
 from .service import HearthService
 from .web import HearthWebServer
-from .workbench import evals, tasks, usage
+from .workbench import evals, stats, tasks, usage
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -96,6 +96,7 @@ def main(argv: list[str] | None = None) -> int:
     usage.add_parser(subcommands)
     tasks.add_parser(subcommands)
     evals.add_parser(subcommands)
+    stats.add_parser(subcommands)
     subcommands.add_parser("list", help="List imported documents without document text or source paths.")
     subcommands.add_parser("health", help="Summarize private collection health without document text or source paths.")
     inspector = subcommands.add_parser("inspect", help="Inspect one document's local provenance metadata.")
@@ -132,6 +133,8 @@ def main(argv: list[str] | None = None) -> int:
         return tasks.run(args)
     if args.command == "review-eval":
         return evals.run(args)
+    if args.command == "stats":
+        return stats.run(args)
     if args.command == "profile":
         if (args.embedding_model is None) != (args.index_directory is None):
             parser.error("--embedding-model and --index-directory must be provided together.")
