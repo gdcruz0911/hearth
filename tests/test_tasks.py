@@ -830,6 +830,16 @@ class EffortTests(LoopTestCase):
         self.assertIn("model_reasoning_effort=high", self.first_event(task, "02-review-codex")["argv"])
         self.assertEqual(implement["model_used"], "fake-model")
 
+    def test_checking_roles_run_on_pinned_models_and_implementation_on_the_default(self) -> None:
+        task = self.start()
+        self.loop(task, "approve")
+
+        task = self.only_task()
+        implement, review = task["runs"]
+        self.assertIsNone(implement["model"])
+        self.assertEqual(review["model"], "gpt-6-luna")
+        self.assertIn("gpt-6-luna", self.first_event(task, "02-review-codex")["argv"])
+
     def test_an_explicit_effort_overrides_the_implement_default(self) -> None:
         self.write_projects(check="test -f hello.txt", providers=("claude", "codex"))
 
@@ -837,13 +847,15 @@ class EffortTests(LoopTestCase):
 
         self.assertEqual(self.only_task()["runs"][0]["effort"], "low")
 
-    def test_codex_records_its_configured_default_model(self) -> None:
+    def test_a_codex_implementer_records_its_configured_default_model(self) -> None:
         (self.home / ".codex").mkdir()
         (self.home / ".codex/config.toml").write_text('model = "gpt-test"\nmodel_reasoning_effort = "medium"\n', encoding="utf-8")
-        task = self.start()
-        self.loop(task, "approve")
+        self.write_projects(check="test -f hello.txt", providers=("claude", "codex"))
 
-        self.assertEqual(self.only_task()["runs"][1]["model_used"], "gpt-test")
+        with mock.patch.dict(tasks.PROVIDERS, {"codex": FAKE_CODEX}):
+            self.cli("task", "new", "demo", "Add hello.txt", "--agent", "codex")
+
+        self.assertEqual(self.only_task()["runs"][0]["model_used"], "gpt-test")
 
     def test_review_eval_runs_at_the_chosen_effort_and_antigravity_picks_the_matching_model(self) -> None:
         os.environ["FAKE_REVIEWS"] = ",".join(["approve"] * 6)
