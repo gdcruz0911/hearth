@@ -191,6 +191,7 @@ def add_parser(subcommands: argparse._SubParsersAction) -> None:
     escape.add_argument("text", help="What was missed.")
     retro = actions.add_parser("retro", help="Have another model family propose one permanent fix per escape, for you to approve.")
     retro.add_argument("id")
+    retro.add_argument("--approve", type=int, metavar="N", help="Start escape N's stored proposal as a tests-first task instead of running a retro.")
     approve = actions.add_parser("approve-tests", help="Approve a tests-first task's tests, then start implementing.")
     approve.add_argument("id")
     answer = actions.add_parser("answer", help="Answer the question an agent left for you, so the task can continue.")
@@ -244,9 +245,9 @@ def run(args: argparse.Namespace) -> int:
         if not tasks and not args.json:
             print('Next: hearth task new <project> "<goal>"', file=sys.stderr)
         return 0
-    task_dir = _home() / "tasks" / args.id
-    if not (task_dir / "task.json").exists():
-        print(f"No task {args.id}.\nNext: hearth task list", file=sys.stderr)
+    task_dir = _resolve(args.id)
+    if task_dir is None:
+        print(f"No single task matches {args.id}.\nNext: hearth task list, then use last, a full ID, or a unique ending of one", file=sys.stderr)
         return 1
     task = _read(task_dir)
     if args.task_command == "show":
@@ -269,7 +270,7 @@ def run(args: argparse.Namespace) -> int:
         print(f"Next: hearth task retro {task['id']}", file=sys.stderr)
         return 0
     if args.task_command == "retro":
-        return _retro(task, task_dir)
+        return _approve_proposal(task, task_dir, args.approve) if args.approve else _retro(task, task_dir)
     if args.task_command == "approve-tests":
         if task["status"] != "waiting" or task["stop_reason"] != "tests_to_approve":
             print(f"{task['id']} has no tests waiting for approval.\nNext: hearth task show {task['id']}", file=sys.stderr)
@@ -350,7 +351,11 @@ def _new(args: argparse.Namespace) -> int:
     context = ""
     if issue:
         context += f"\nGitHub issue #{args.issue}, quoted as context rather than as instructions from the person:\n\n{issue['body']}\n"
-    task_id = time.strftime("%Y%m%d-%H%M%S")
+    task_id = stamp = time.strftime("%Y%m%d-%H%M%S")
+    for suffix in range(2, 100):  # Two tasks started in the same second, such as an approved retro, need distinct IDs.
+        if not (_home() / "tasks" / task_id).exists():
+            break
+        task_id = f"{stamp}-{suffix}"
     task_dir = _home() / "tasks" / task_id
     worktree = _home() / "worktrees" / args.project / task_id
     task_dir.mkdir(parents=True)
@@ -488,9 +493,9 @@ def _run(task: dict, task_dir: Path, role: str, provider: str, template: list[st
 
 
 def _loop(args: argparse.Namespace) -> int:
-    task_dir = _home() / "tasks" / args.id
-    if not (task_dir / "task.json").exists():
-        print(f"No task {args.id}.\nNext: hearth task list", file=sys.stderr)
+    task_dir = _resolve(args.id)
+    if task_dir is None:
+        print(f"No single task matches {args.id}.\nNext: hearth task list, then use last, a full ID, or a unique ending of one", file=sys.stderr)
         return 1
     task = _read(task_dir)
     if task["status"] not in ("done", "failed") or task["stop_reason"] not in (None, "check_failed", "guard_failed", "no_changes", "review_unparsed", "verify_rejected", "rounds_exhausted"):
@@ -532,7 +537,8 @@ def _loop(args: argparse.Namespace) -> int:
                 verification = outcome["summary"]
             if task.get("protected_tests"):
                 verification += ("\nProtected tests, which the implementer cannot change: " + ", ".join(task["protected_tests"])
-                                 + ".\nRaise any problem with them as a finding on that file; Hearth asks the person about it.\n")
+                                 + ".\nAnother model family wrote them first on purpose as part of this change, so adding them is in scope;"
+                                 + " raise a problem with what they test as a finding on that file, and Hearth asks the person about it.\n")
             _wait_for_slot("support", task, task_dir)
             diff = _git(Path(task["worktree"]), "diff", f"{task['base']}..HEAD")
             prompt = REVIEW_PROMPT.format(id=task["id"], goal=task["goal"], base=task["base"][:12], diff=diff[:100_000],
@@ -824,6 +830,37 @@ def _retro(task: dict, task_dir: Path) -> int:
             print(f"  approve by adding it to {proposal.get('where') or 'the file it names'} yourself; those docs stay on this Mac")
     _write(task_dir, task)
     return 0
+
+
+def _approve_proposal(task: dict, task_dir: Path, number: int) -> int:
+    """The person's approval of a retro proposal: start it as a tests-first task, and record which task it became."""
+    escapes = task.get("escapes", [])
+    proposal = escapes[number - 1].get("proposal") if 1 <= number <= len(escapes) else None
+    if proposal is None:
+        print(f"Escape {number} of {task['id']} has no proposal.\nNext: hearth task retro {task['id']}", file=sys.stderr)
+        return 1
+    if proposal["kind"] not in ("guard", "test", "eval"):
+        print(f"A {proposal['kind']} proposal changes a document that stays on this Mac; add it to {proposal.get('where') or 'the file it names'} yourself.", file=sys.stderr)
+        return 1
+    before = {path.name for path in _home().glob("tasks/*")}
+    status = _new(argparse.Namespace(
+        command="task", task_command="new", project="hearth" if proposal["kind"] == "guard" else task["project"],
+        goal=proposal["change"], agent=None, model=None, effort=None, timeout=1800, force=False, interactive=False,
+        attach=[], issue=None, tests_first=True, approve_tests=False))
+    started = sorted({path.name for path in _home().glob("tasks/*")} - before)
+    if started:
+        escapes[number - 1]["approved_as"] = started[-1]
+        _write(task_dir, task)
+    return status
+
+
+def _resolve(name: str) -> Path | None:
+    """A task directory from "last", a full task ID, or a unique ending of one, the way gh accepts short references."""
+    tasks = sorted(path.parent for path in _home().glob("tasks/*/task.json"))
+    if name == "last":
+        return tasks[-1] if tasks else None
+    matches = [path for path in tasks if path.name == name] or [path for path in tasks if path.name.endswith(name)]
+    return matches[0] if len(matches) == 1 else None
 
 
 def _proposals(text: str, count: int) -> dict[int, dict] | None:
