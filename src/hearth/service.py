@@ -6,7 +6,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from .answering import EvidenceAnswerer, validate_answer
-from .chunking import chunk_page
+from .chunking import CHUNKING_VERSION, chunk_page
 from .domain import (
     Answer,
     CollectionHealth,
@@ -25,8 +25,15 @@ from .domain import (
 )
 from .embedding import FlatVectorIndex, IndexBusy
 from .extraction import OCRmyPDFFallback, PageExtractor, PdfExtractor, PopplerPdfExtractor, TextNoteExtractor
-from .retrieval import IdentityReranker, Reranker, has_lexical_support, reciprocal_rank_fusion, terms
+from .retrieval import RRF_K, STOP_WORDS, IdentityReranker, Reranker, has_lexical_support, reciprocal_rank_fusion, terms
 from .store import SQLiteStore
+
+
+# Retrieval settings; trace() uses these and every evaluation record reports them.
+KEYWORD_CANDIDATES = 20
+SEMANTIC_CANDIDATES = 20
+FUSED_CANDIDATES = 20
+CITATIONS = 6
 
 
 class HearthService:
@@ -231,19 +238,19 @@ class HearthService:
         chunks = self._store.list_chunks()
         # Hybrid retrieval: BM25 finds exact words such as flags and ADR numbers, embeddings find paraphrases.
         chunks_by_id = {chunk.id: chunk for chunk in chunks}
-        keyword = [Evidence(chunk=chunks_by_id[chunk_id], score=0.0) for chunk_id in self._store.keyword_search(terms(question))]
+        keyword = [Evidence(chunk=chunks_by_id[chunk_id], score=0.0) for chunk_id in self._store.keyword_search(terms(question), limit=KEYWORD_CANDIDATES)]
         record["keyword"] = [item.chunk.id for item in keyword]
         rankings = [keyword]
         if self._semantic_index is not None and not keyword_only:
-            semantic = self._semantic_index.search(question, chunks, limit=20)
+            semantic = self._semantic_index.search(question, chunks, limit=SEMANTIC_CANDIDATES)
             record["semantic"] = _scored(semantic)
             rankings.append(semantic)
-        candidates = reciprocal_rank_fusion(rankings, limit=20)
+        candidates = reciprocal_rank_fusion(rankings, limit=FUSED_CANDIDATES)
         record["fused"] = _scored(candidates)
         # Rerank every candidate so each score is recorded; the six cited are the same six a limit of six returns.
         reranked = self._reranker.rerank(question, candidates, limit=len(candidates))
         record["reranked"] = _scored(reranked)
-        evidence = reranked[:6]
+        evidence = reranked[:CITATIONS]
         answer = validate_answer(self._answerer.answer(question, evidence), evidence)
         if answer.status == "supported":
             record["lexical_support"] = has_lexical_support(question, [citation.quote for citation in answer.citations])
@@ -252,6 +259,21 @@ class HearthService:
         record["citations"] = [citation.chunk_id for citation in answer.citations]
         record["status"] = answer.status
         return answer, record
+
+    def run_description(self) -> dict[str, object]:
+        """What produces answers: retrieval settings, index and model identity, reranker, and the evidence gate."""
+        describe = getattr(self._reranker, "describe", None)
+        return {
+            "retrieval": {
+                "keyword_candidates": KEYWORD_CANDIDATES, "semantic_candidates": SEMANTIC_CANDIDATES,
+                "fused_candidates": FUSED_CANDIDATES, "citations": CITATIONS, "fusion": "reciprocal rank fusion",
+                "rrf_k": RRF_K, "keyword_index": "SQLite FTS5 BM25, porter unicode61", "chunking_version": CHUNKING_VERSION,
+            },
+            "semantic_index": self._semantic_index.describe() if self._semantic_index is not None else None,
+            "reranker": describe() if describe is not None else {"name": type(self._reranker).__name__},
+            "gate": {"rule": "ADR-0009: a cited quote shares a non-stopword term with the question",
+                     "stop_words": sorted(STOP_WORDS)},
+        }
 
     def document_relationships(self, *, limit: int = 12) -> list[DocumentRelationship]:
         """Return only relationships substantiated by the active local semantic index."""

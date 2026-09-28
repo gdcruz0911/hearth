@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -152,6 +155,12 @@ def record_question_set(service: HearthService, path: Path) -> list[dict[str, ob
     cases = payload.get("cases") if isinstance(payload, dict) else None
     if not isinstance(cases, list) or not cases:
         raise EvaluationCorpusError("The question set requires at least one case.")
+    run = {
+        "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "code": _code_revision(),
+        "question_set": {"path": str(path), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()},
+        **service.run_description(),
+    }
     records = []
     for index, case in enumerate(cases, start=1):
         if not isinstance(case, dict) or case.get("label") not in LABELS:
@@ -167,5 +176,18 @@ def record_question_set(service: HearthService, path: Path) -> list[dict[str, ob
         else:
             outcome = "success" if answer.status == "abstained" else "failure"
         records.append({"id": case_id, "label": case["label"], "excluded": bool(case.get("excluded")),
-                        "expected_quote": quote, "outcome": outcome, **trace})
+                        "expected_quote": quote, "outcome": outcome, **trace, "run": run})
     return records
+
+
+def _code_revision() -> dict[str, object]:
+    """The Git commit Hearth ran from, and whether its source had uncommitted changes; unknown outside a checkout."""
+    root = Path(__file__).resolve().parents[2]
+    try:
+        commit = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"],
+                                capture_output=True, text=True, check=True, timeout=10).stdout.strip()
+        changes = subprocess.run(["git", "-C", str(root), "status", "--porcelain", "--untracked-files=no", "--", "src"],
+                                 capture_output=True, text=True, check=True, timeout=10).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return {"commit": None, "source_modified": None}
+    return {"commit": commit, "source_modified": bool(changes)}

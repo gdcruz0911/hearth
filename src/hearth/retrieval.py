@@ -7,7 +7,13 @@ from pathlib import Path
 from typing import Callable, Protocol
 
 from .domain import Evidence
-from .embedding import MLX_LOCK
+from .embedding import MLX_LOCK, _sha256_file
+
+STOP_WORDS = frozenset({
+    "a", "an", "and", "are", "at", "be", "for", "from", "in", "is", "it", "of", "on",
+    "or", "the", "to", "was", "what", "where", "who", "with",
+})
+RRF_K = 60  # The published default for reciprocal rank fusion.
 
 
 class LocalIndex(Protocol):
@@ -26,7 +32,7 @@ class RerankerError(RuntimeError):
     """Raised when local reranking cannot safely score an evidence candidate."""
 
 
-def reciprocal_rank_fusion(rankings: list[list[Evidence]], limit: int = 20, k: int = 60) -> list[Evidence]:
+def reciprocal_rank_fusion(rankings: list[list[Evidence]], limit: int = 20, k: int = RRF_K) -> list[Evidence]:
     """Merge ranked lists by rank alone, so scores on different scales need no calibration.
 
     Each chunk scores the sum of 1 / (k + rank) over the lists it appears in; k = 60 is the published default.
@@ -89,6 +95,11 @@ class MLXLocalReranker:
     def rerank(self, question: str, candidates: list[Evidence], limit: int = 6) -> list[Evidence]:
         return self._reranker.rerank(question, candidates, limit)
 
+    def describe(self) -> dict[str, object]:
+        """Which reranker model scored the candidates, by directory name and weights hash."""
+        return {"name": type(self).__name__, "model": self._model_directory.name,
+                "weights_sha256": _sha256_file(self._model_directory / "model.safetensors")}
+
     def _score(self, question: str, document: str) -> float:
         if not question.strip() or not document.strip():
             raise RerankerError("Local reranker inputs must be non-empty.")
@@ -128,14 +139,10 @@ class MLXLocalReranker:
 
 
 def terms(text: str) -> set[str]:
-    stop_words = {
-        "a", "an", "and", "are", "at", "be", "for", "from", "in", "is", "it", "of", "on",
-        "or", "the", "to", "was", "what", "where", "who", "with",
-    }
     return {
         term.lower()
         for term in re.findall(r"[A-Za-z0-9]+", text)
-        if len(term) > 1 and term.lower() not in stop_words
+        if len(term) > 1 and term.lower() not in STOP_WORDS
     }
 
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import tempfile
 import unittest
@@ -121,6 +122,7 @@ class QuestionSetRecordTests(unittest.TestCase):
                 {"id": "held", "question": "Who is the deployment owner?", "label": "supported", "quote_contains": "Ada", "excluded": True},
             ]}), encoding="utf-8")
 
+            question_set_bytes = question_set.read_bytes()
             records = {record["id"]: record for record in record_question_set(service, question_set)}
             answer = service.answer("Who is the deployment owner?")
 
@@ -132,6 +134,14 @@ class QuestionSetRecordTests(unittest.TestCase):
         self.assertEqual(owner["citations"], [citation.chunk_id for citation in answer.citations])
         self.assertEqual(records["none"]["status"], "abstained")
         self.assertNotIn("Ada", json.dumps(owner["reranked"]))
+        run = owner["run"]
+        self.assertRegex(run["code"]["commit"] or "", r"^[0-9a-f]{40}$")
+        self.assertIsInstance(run["code"]["source_modified"], bool)
+        self.assertEqual(run["question_set"]["sha256"], hashlib.sha256(question_set_bytes).hexdigest())
+        self.assertEqual((run["retrieval"]["citations"], run["retrieval"]["fused_candidates"], run["retrieval"]["rrf_k"]), (6, 20, 60))
+        self.assertEqual((run["semantic_index"], run["reranker"]), (None, {"name": "IdentityReranker"}))
+        self.assertIn("the", run["gate"]["stop_words"])
+        self.assertTrue(all(record["run"] == run for record in records.values()))
 
     def test_answers_cite_six_chunks_while_the_record_keeps_every_candidate(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
