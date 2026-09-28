@@ -4,7 +4,7 @@ import math
 import unittest
 
 from hearth.domain import Chunk, Evidence
-from hearth.retrieval import RerankerError, ScoringReranker, reciprocal_rank_fusion
+from hearth.retrieval import MLXLocalReranker, RerankerError, ScoringReranker, reciprocal_rank_fusion
 
 
 def _evidence(chunk_id: int, text: str) -> Evidence:
@@ -44,3 +44,20 @@ class ScoringRerankerTests(unittest.TestCase):
                 invalid_reranker = ScoringReranker(lambda question, document: invalid_score)
                 with self.assertRaisesRegex(RerankerError, "invalid relevance score"):
                     invalid_reranker.rerank("query", [_evidence(1, "first")])
+
+
+class MLXLocalRerankerDescriptionTests(unittest.TestCase):
+    def test_describe_identifies_the_model_by_weights_hash(self) -> None:
+        import hashlib
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as directory:
+            for name, content in (("config.json", b"{}"), ("tokenizer.json", b"{}"), ("model.safetensors", b"weights")):
+                (Path(directory) / name).write_bytes(content)
+
+            description = MLXLocalReranker(Path(directory)).describe()
+
+        self.assertEqual(description["weights_sha256"], hashlib.sha256(b"weights").hexdigest())
+        self.assertEqual(description["name"], "MLXLocalReranker")
+

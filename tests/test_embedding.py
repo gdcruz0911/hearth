@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 import types
@@ -159,6 +160,15 @@ class FlatVectorIndexTests(unittest.TestCase):
         self.assertTrue(self.index.is_current([_chunk(1, "first")]))
         other.rebuild([_chunk(1, "first")])
         self.assertTrue(other.is_current([_chunk(1, "first")]))
+
+    def test_describe_names_the_model_and_the_active_index_version(self) -> None:
+        self.index.rebuild([_chunk(1, "first")])
+
+        description = self.index.describe()
+
+        self.assertEqual((description["model_name"], description["model_fingerprint"], description["pooling"]),
+                         ("synthetic-embedding-model", "synthetic-fingerprint", "last-token"))
+        self.assertEqual(description["active_version"], json.loads((self.index_directory / "active.json").read_text())["version"])
 
     def test_the_lock_is_released_after_a_failed_or_cancelled_build(self) -> None:
         with self.assertRaises(KeyError):

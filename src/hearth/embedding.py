@@ -277,6 +277,13 @@ class FlatVectorIndex:
         ]
         return sorted(results, key=lambda item: (-item.score, item.chunk.id))[:limit]
 
+    def describe(self) -> dict[str, object]:
+        """The embedding model and active index version that semantic results came from."""
+        spec = self._embedder.spec
+        return {"format": self._FORMAT, "model_name": spec.model_name, "model_fingerprint": spec.model_fingerprint,
+                "dimension": spec.dimension, "pooling": spec.pooling, "normalization": spec.normalization,
+                "active_version": self._active_version()}
+
     def is_current(self, chunks: list[Chunk]) -> bool:
         """Returns whether the active derived index matches the current local chunks."""
         try:
