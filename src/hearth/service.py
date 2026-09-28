@@ -11,6 +11,7 @@ from .domain import (
     Answer,
     CollectionHealth,
     DocumentRelationship,
+    Evidence,
     DocumentInspection,
     ImportedDocument,
     ImportError,
@@ -22,9 +23,9 @@ from .domain import (
     SourceImportResult,
     SourceRoot,
 )
-from .embedding import FlatVectorIndex
+from .embedding import FlatVectorIndex, IndexBusy
 from .extraction import OCRmyPDFFallback, PageExtractor, PdfExtractor, PopplerPdfExtractor, TextNoteExtractor
-from .retrieval import HashingVectorIndex, IdentityReranker, Reranker, has_lexical_support
+from .retrieval import IdentityReranker, Reranker, has_lexical_support, reciprocal_rank_fusion, terms
 from .store import SQLiteStore
 
 
@@ -214,11 +215,12 @@ class HearthService:
         if not question.strip():
             return Answer.abstain()
         chunks = self._store.list_chunks()
-        candidates = (
-            self._semantic_index.search(question, chunks, limit=20)
-            if self._semantic_index is not None
-            else HashingVectorIndex(chunks).search(question, limit=20)
-        )
+        # Hybrid retrieval: BM25 finds exact words such as flags and ADR numbers, embeddings find paraphrases.
+        chunks_by_id = {chunk.id: chunk for chunk in chunks}
+        rankings = [[Evidence(chunk=chunks_by_id[chunk_id], score=0.0) for chunk_id in self._store.keyword_search(terms(question))]]
+        if self._semantic_index is not None:
+            rankings.append(self._semantic_index.search(question, chunks, limit=20))
+        candidates = reciprocal_rank_fusion(rankings, limit=20)
         evidence = self._reranker.rerank(question, candidates, limit=6)
         answer = validate_answer(self._answerer.answer(question, evidence), evidence)
         if answer.status == "supported" and not has_lexical_support(
@@ -241,18 +243,22 @@ class HearthService:
         *,
         on_progress: Callable[[int, int], None] | None = None,
         is_cancelled: Callable[[], bool] | None = None,
+        on_warning: Callable[[str], None] | None = None,
     ) -> str:
         """Rebuild derived vectors from existing local evidence without changing source files."""
         if self._semantic_index is None:
             raise ImportError("Configure a local embedding model and index directory before building a semantic map.")
         self._semantic_index.rebuild(
-            self._store.list_chunks(), on_progress=on_progress, is_cancelled=is_cancelled
+            self._store.list_chunks(), on_progress=on_progress, is_cancelled=is_cancelled, on_warning=on_warning
         )
         return self.collection_health().semantic_index_status
 
     def _rebuild_semantic_index(self) -> None:
         if self._semantic_index is not None:
-            self._semantic_index.rebuild(self._store.list_chunks())
+            try:
+                self._semantic_index.rebuild(self._store.list_chunks())
+            except IndexBusy:
+                pass  # Another build is running; its manifest will not match these chunks, so health reports "needs reindex".
 
     def _import_summary(self, document_id: int) -> ImportSummary:
         inspection = self.inspect_document(document_id)

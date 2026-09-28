@@ -230,7 +230,21 @@ class SQLiteStore:
             for row in rows
         ]
 
+    def keyword_search(self, terms: set[str], limit: int = 20) -> list[int]:
+        """Chunk IDs ranked by BM25 over any of the terms, best first."""
+        if not terms or limit < 1:
+            return []
+        # Terms are letters and digits only, so quoting each one keeps FTS5 query syntax out of the question.
+        query = " OR ".join(f'"{term}"' for term in sorted(terms))
+        rows = self._connection.execute(
+            "SELECT rowid FROM chunks_fts WHERE chunks_fts MATCH ? ORDER BY rank, rowid LIMIT ?", (query, limit)
+        ).fetchall()
+        return [row[0] for row in rows]
+
     def _create_schema(self) -> None:
+        keyword_index_exists = self._connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE name = 'chunks_fts'"
+        ).fetchone() is not None
         with self._connection:
             self._connection.executescript(
                 """CREATE TABLE IF NOT EXISTS documents (
@@ -257,8 +271,19 @@ class SQLiteStore:
                     char_start INTEGER NOT NULL CHECK(char_start >= 0),
                     char_end INTEGER NOT NULL CHECK(char_end > char_start)
                 );
-                CREATE INDEX IF NOT EXISTS chunks_page_id_idx ON chunks(page_id);"""
+                CREATE INDEX IF NOT EXISTS chunks_page_id_idx ON chunks(page_id);
+                CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
+                    text, content='chunks', content_rowid='id', tokenize='porter unicode61'
+                );
+                CREATE TRIGGER IF NOT EXISTS chunks_fts_insert AFTER INSERT ON chunks BEGIN
+                    INSERT INTO chunks_fts(rowid, text) VALUES (new.id, new.text);
+                END;
+                CREATE TRIGGER IF NOT EXISTS chunks_fts_delete AFTER DELETE ON chunks BEGIN
+                    INSERT INTO chunks_fts(chunks_fts, rowid, text) VALUES ('delete', old.id, old.text);
+                END;"""
             )
+            if not keyword_index_exists:  # Collections imported before the keyword index existed.
+                self._connection.execute("INSERT INTO chunks_fts(chunks_fts) VALUES ('rebuild')")
             document_columns = {row["name"] for row in self._connection.execute("PRAGMA table_info(documents)")}
             for column, definition in (
                 ("source_fingerprint", "TEXT"),

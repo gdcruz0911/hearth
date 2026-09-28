@@ -249,6 +249,7 @@ function renderSemanticJob(detail, job) {
         ? "Finalizing the derived index before it becomes active."
         : "Embedding evidence locally in the background.";
   detail.append(make("p", "subtle", activity));
+  if (job.warning) detail.append(make("p", "empty-state", job.warning));
   const progress = document.createElement("progress");
   progress.className = "semantic-progress";
   progress.max = Math.max(job.total || 1, 1);
@@ -611,7 +612,9 @@ async function pollSemanticIndex() {
         pollSemanticIndex();
       } else if (state.semanticJob.status === "completed") {
         await refresh();
-        setStatus("The local semantic map is ready.");
+        setStatus(state.semanticJob.warning
+          ? `The local semantic map is ready. ${state.semanticJob.warning}`
+          : "The local semantic map is ready.", state.semanticJob.warning ? "error" : undefined);
       } else if (state.semanticJob.status === "cancelled") {
         setStatus("The incomplete semantic-index rebuild was cancelled.");
       } else if (state.semanticJob.status === "failed") {

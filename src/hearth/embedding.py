@@ -4,11 +4,18 @@ from dataclasses import dataclass
 import hashlib
 import json
 import math
+import fcntl
 import os
 from pathlib import Path
+import re
 import shutil
 import struct
-from collections.abc import Callable
+import subprocess
+import sys
+import tempfile
+import threading
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from typing import Protocol
 from uuid import uuid4
 
@@ -34,6 +41,14 @@ class IndexBuildCancelled(IndexError):
     """Raised when a user stops an in-progress derived index rebuild."""
 
 
+class IndexBusy(IndexError):
+    """Raised when another Hearth process or thread is already building a semantic index."""
+
+
+class IndexBuildStopped(IndexError):
+    """Raised when a rebuild stops itself because macOS reports memory pressure."""
+
+
 @dataclass(frozen=True)
 class EmbeddingSpec:
     model_name: str
@@ -48,6 +63,21 @@ class Embedder(Protocol):
     def spec(self) -> EmbeddingSpec: ...
 
     def embed(self, texts: list[str]) -> list[list[float]]: ...
+
+
+_MAX_EMBEDDING_TOKENS = 2048
+# Hearth's MLX classes share one allocator, cache setting, and default stream per process, so every model load and
+# every forward pass, through evaluation and the copy back to Python, holds this lock: one at a time per process.
+# It does not reach other processes or code that calls MLX directly.
+MLX_LOCK = threading.Lock()
+# One semantic-index build at a time for this user, across Hearth processes, threads, and index folders:
+# on 2026-09-28 two overlapping builds exhausted a 16 GB Mac. Scripts that call the embedder directly bypass it.
+_BUILD_LOCK_PATH = Path(tempfile.gettempdir()) / "hearth-semantic-index-build.lock"
+# A staging folder holding this file was made by a build that took the build lock, so while we hold the lock it is abandoned.
+_STAGING_MARKER = "hearth-build-staging"
+_STAGING_NAME = re.compile(r"\.staging-[0-9a-f]{32}")
+# ponytail: checked between batches only, so a spike inside one batch (8 chunks of at most 2,048 tokens) is not interrupted.
+_SWAP_GROWTH_LIMIT_MB = 1024
 
 
 class MLXEmbedder:
@@ -71,7 +101,7 @@ class MLXEmbedder:
             model_name=self._model_directory.name,
             model_fingerprint=model_fingerprint,
             dimension=dimension,
-            pooling="last-token",
+            pooling="last-token-after-endoftext",
             normalization="l2",
         )
         self._model = None
@@ -91,20 +121,31 @@ class MLXEmbedder:
         except ImportError as exc:
             raise EmbeddingError("Local embeddings require the optional MLX runtime.") from exc
         try:
-            if self._model is None or self._tokenizer is None:
-                self._model, self._tokenizer = load(str(self._model_directory))
+            with MLX_LOCK:
+                if self._model is None or self._tokenizer is None:
+                    # MLX keeps freed GPU buffers for reuse; with chunks of every length that cache grew past 10 GB.
+                    mx.set_cache_limit(256 * 1024 * 1024)
+                    self._model, self._tokenizer = load(str(self._model_directory))
             hidden_model = getattr(self._model, "model", None)
             if hidden_model is None:
                 raise EmbeddingError("The local MLX model does not expose embedding hidden states.")
+            # Qwen3 embeddings pool the hidden state at <|endoftext|>; without it the vector describes only the last word.
+            tokenizer = getattr(self._tokenizer, "_tokenizer", self._tokenizer)
+            end_of_text = tokenizer.convert_tokens_to_ids("<|endoftext|>")
+            if not isinstance(end_of_text, int):
+                raise EmbeddingError("The local embedding tokenizer has no <|endoftext|> token.")
             vectors = []
             for text in texts:
-                token_ids = self._tokenizer.encode(text, add_special_tokens=False)
+                # Bounded input keeps activation memory bounded; the longest chunk today is 1,894 tokens.
+                token_ids = self._tokenizer.encode(text, add_special_tokens=False)[: _MAX_EMBEDDING_TOKENS - 1] + [end_of_text]
                 if not token_ids:
                     raise EmbeddingError("Embedding input produced no tokens.")
-                hidden_states = hidden_model(mx.array(token_ids)[None])
-                vector = hidden_states[0, -1].astype(mx.float32)
-                mx.eval(vector)
-                vectors.append(_normalize_vector(vector.tolist(), self._spec.dimension))
+                with MLX_LOCK:
+                    hidden_states = hidden_model(mx.array(token_ids)[None])
+                    vector = hidden_states[0, -1].astype(mx.float32)
+                    mx.eval(vector)
+                    values = vector.tolist()
+                vectors.append(_normalize_vector(values, self._spec.dimension))
             return vectors
         except EmbeddingError:
             raise
@@ -130,30 +171,52 @@ class FlatVectorIndex:
         *,
         on_progress: Callable[[int, int], None] | None = None,
         is_cancelled: Callable[[], bool] | None = None,
+        on_warning: Callable[[str], None] | None = None,
     ) -> None:
-        """Build an index in small, cancellable batches before atomically activating it."""
+        """Build an index in small, cancellable batches before atomically activating it.
+
+        Holds the user-wide build lock throughout, and stops between batches under memory pressure.
+        If macOS memory readings are unavailable, it says so once through on_warning, or on stderr without one.
+        """
         ordered_chunks = sorted(chunks, key=lambda chunk: chunk.id)
         if len({chunk.id for chunk in ordered_chunks}) != len(ordered_chunks):
             raise IndexError("Cannot build an index with duplicate chunk IDs.")
         _raise_if_cancelled(is_cancelled)
+        with _build_lock():
+            self._rebuild_locked(ordered_chunks, on_progress, is_cancelled, on_warning or _warn_on_stderr)
+
+    def _rebuild_locked(
+        self,
+        ordered_chunks: list[Chunk],
+        on_progress: Callable[[int, int], None] | None,
+        is_cancelled: Callable[[], bool] | None,
+        on_warning: Callable[[str], None],
+    ) -> None:
         total = len(ordered_chunks)
         if on_progress is not None:
             on_progress(0, total)
         self._index_directory.mkdir(parents=True, exist_ok=True)
         versions_directory = self._index_directory / "versions"
         versions_directory.mkdir(parents=True, exist_ok=True)
+        self._remove_abandoned_staging(versions_directory)
         previous_version = self._active_version()
         version = uuid4().hex
         staging_directory = versions_directory / f".staging-{version}"
         final_directory = versions_directory / version
+        swap_baseline = _memory_signals()
+        warned = False
         try:
             _raise_if_cancelled(is_cancelled)
             staging_directory.mkdir()
+            (staging_directory / _STAGING_MARKER).write_text("", encoding="utf-8")
             vectors_path = staging_directory / self._VECTORS_FILE
             completed = 0
             with vectors_path.open("wb") as target:
                 for start in range(0, total, self._BUILD_BATCH_SIZE):
                     _raise_if_cancelled(is_cancelled)
+                    if not _raise_if_memory_pressure(swap_baseline) and not warned:
+                        on_warning(MEMORY_MONITORING_UNAVAILABLE)
+                        warned = True
                     batch = ordered_chunks[start : start + self._BUILD_BATCH_SIZE]
                     batch_vectors = self._embedder.embed([chunk.text for chunk in batch])
                     if len(batch_vectors) != len(batch):
@@ -169,6 +232,7 @@ class FlatVectorIndex:
             manifest = self._manifest(version, ordered_chunks)
             _write_json(staging_directory / "manifest.json", manifest)
             _raise_if_cancelled(is_cancelled)
+            (staging_directory / _STAGING_MARKER).unlink()
             os.replace(staging_directory, final_directory)
             _write_json_atomically(self._index_directory / "active.json", {"version": version})
         except Exception:
@@ -177,6 +241,22 @@ class FlatVectorIndex:
             raise
         if previous_version is not None and previous_version != version:
             self._remove_version(previous_version)
+
+    @staticmethod
+    def _remove_abandoned_staging(versions_directory: Path) -> None:
+        """Delete staging folders left by builds that held the build lock and then died.
+
+        Folders without the marker, such as those from builds made before the lock existed, are left in place,
+        because nothing proves no live process still writes them.
+        """
+        for candidate in versions_directory.iterdir():
+            if (
+                _STAGING_NAME.fullmatch(candidate.name)
+                and candidate.is_dir()
+                and not candidate.is_symlink()
+                and (candidate / _STAGING_MARKER).is_file()
+            ):
+                shutil.rmtree(candidate)
 
     def search(self, question: str, chunks: list[Chunk], limit: int = 20) -> list[Evidence]:
         if limit < 1:
@@ -333,6 +413,59 @@ def _normalize_vector(vector: list[float], dimension: int) -> list[float]:
     if magnitude == 0:
         raise EmbeddingError("Embedding output must not be a zero vector.")
     return [value / magnitude for value in vector]
+
+
+@contextmanager
+def _build_lock() -> Iterator[None]:
+    """Hold the user-wide build lock; the OS releases it when the file closes or the process exits."""
+    with open(_BUILD_LOCK_PATH, "a", encoding="utf-8") as lock_file:
+        try:
+            fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise IndexBusy("Another Hearth semantic-index build is running. Try again after it finishes.") from exc
+        yield
+
+
+def _memory_signals() -> tuple[int, float] | None:
+    """The macOS memory-pressure level (1 normal, 2 warning, 4 critical) and swap used in MB, or None if unreadable."""
+    try:
+        output = subprocess.run(
+            ["sysctl", "-n", "kern.memorystatus_vm_pressure_level", "vm.swapusage"],
+            capture_output=True, text=True, timeout=5, check=True,
+        ).stdout.splitlines()
+        swap = re.search(r"used = ([0-9.]+)M", output[1])
+        return (int(output[0]), float(swap.group(1))) if swap else None
+    except (OSError, subprocess.SubprocessError, ValueError, IndexError):
+        return None
+
+
+MEMORY_MONITORING_UNAVAILABLE = (
+    "Hearth could not read macOS memory pressure or swap use, so this semantic-index rebuild "
+    "is not protected by the memory check. Watch Activity Monitor, or cancel and rebuild later."
+)
+
+
+def _warn_on_stderr(message: str) -> None:
+    print(f"Warning: {message}", file=sys.stderr)
+
+
+def _raise_if_memory_pressure(baseline: tuple[int, float] | None) -> bool:
+    """Raise if memory is under pressure; return whether the check could run at all."""
+    # ponytail: unreadable signals warn instead of refusing, so a build on a Mac that hides them still runs.
+    current = _memory_signals()
+    if baseline is None or current is None:
+        return False
+    level, swap_used = current
+    if level >= 2:
+        reason = "macOS reported memory pressure"
+    elif swap_used - baseline[1] > _SWAP_GROWTH_LIMIT_MB:
+        reason = f"swap grew by {swap_used - baseline[1]:.0f} MB during the build"
+    else:
+        return True
+    raise IndexBuildStopped(
+        f"Hearth stopped the semantic-index rebuild because {reason}. "
+        "The active index is unchanged; close other memory-heavy apps and rebuild again."
+    )
 
 
 def _raise_if_cancelled(is_cancelled: Callable[[], bool] | None) -> None:

@@ -4,11 +4,23 @@ import math
 import unittest
 
 from hearth.domain import Chunk, Evidence
-from hearth.retrieval import RerankerError, ScoringReranker
+from hearth.retrieval import RerankerError, ScoringReranker, reciprocal_rank_fusion
 
 
 def _evidence(chunk_id: int, text: str) -> Evidence:
     return Evidence(Chunk(chunk_id, 1, "fixture.md", 1, None, text, 0, len(text), "native", None), 0.0)
+
+
+class ReciprocalRankFusionTests(unittest.TestCase):
+    def test_a_chunk_both_lists_rank_beats_one_that_tops_a_single_list(self) -> None:
+        keyword = [_evidence(1, "only keyword"), _evidence(2, "both")]
+        semantic = [_evidence(3, "only semantic"), _evidence(2, "both")]
+
+        fused = reciprocal_rank_fusion([keyword, semantic])
+
+        self.assertEqual([item.chunk.id for item in fused], [2, 1, 3])
+        self.assertAlmostEqual(fused[0].score, 2 / 62)
+        self.assertEqual(reciprocal_rank_fusion([keyword, semantic], limit=1)[0].chunk.id, 2)
 
 
 class ScoringRerankerTests(unittest.TestCase):

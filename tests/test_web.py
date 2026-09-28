@@ -10,7 +10,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from hearth.domain import DocumentRelationship
-from hearth.embedding import IndexBuildCancelled
+from hearth.embedding import IndexBuildCancelled, IndexBuildStopped
 from hearth.service import HearthService
 from hearth.web import HearthWebServer
 
@@ -19,7 +19,7 @@ class FakeRelationshipIndex:
     def __init__(self) -> None:
         self.rebuild_count = 0
 
-    def rebuild(self, chunks, *, on_progress=None, is_cancelled=None) -> None:
+    def rebuild(self, chunks, *, on_progress=None, is_cancelled=None, on_warning=None) -> None:
         self.rebuild_count += 1
         if on_progress is not None:
             on_progress(len(chunks), len(chunks))
@@ -40,7 +40,7 @@ class BlockingRelationshipIndex(FakeRelationshipIndex):
         self.block_rebuild = False
         self.started = threading.Event()
 
-    def rebuild(self, chunks, *, on_progress=None, is_cancelled=None) -> None:
+    def rebuild(self, chunks, *, on_progress=None, is_cancelled=None, on_warning=None) -> None:
         if not self.block_rebuild:
             super().rebuild(chunks, on_progress=on_progress, is_cancelled=is_cancelled)
             return
@@ -48,6 +48,21 @@ class BlockingRelationshipIndex(FakeRelationshipIndex):
         while is_cancelled is None or not is_cancelled():
             time.sleep(0.01)
         raise IndexBuildCancelled("cancelled in test")
+
+
+class PressuredRelationshipIndex(BlockingRelationshipIndex):
+    def rebuild(self, chunks, *, on_progress=None, is_cancelled=None, on_warning=None) -> None:
+        if not self.block_rebuild:
+            super().rebuild(chunks, on_progress=on_progress, is_cancelled=is_cancelled)
+            return
+        raise IndexBuildStopped("Hearth stopped the semantic-index rebuild because macOS reported memory pressure.")
+
+
+class UnmonitoredRelationshipIndex(BlockingRelationshipIndex):
+    def rebuild(self, chunks, *, on_progress=None, is_cancelled=None, on_warning=None) -> None:
+        if self.block_rebuild and on_warning is not None:
+            on_warning("Hearth could not read macOS memory pressure or swap use, so this rebuild is not protected.")
+        FakeRelationshipIndex.rebuild(self, chunks, on_progress=on_progress, is_cancelled=is_cancelled)
 
 
 class HearthWebServerTests(unittest.TestCase):
@@ -200,6 +215,42 @@ class HearthWebServerTests(unittest.TestCase):
 
         self.assertEqual(cancelling["status"], "cancelling")
         self.assertEqual(cancelled["completed"], 0)
+
+    def test_a_rebuild_stopped_for_memory_pressure_tells_the_person_why(self) -> None:
+        self.server.close()
+        self.thread.join(timeout=2)
+        self.service.close()
+        index = PressuredRelationshipIndex()
+        self.service = HearthService(self.database, semantic_index=index)
+        self.server = HearthWebServer(self.service, port=0, choose_file=lambda: self.selected_file, browser_opener=self.opened_urls.append)
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+        self._json_request("POST", "api/import")
+        index.block_rebuild = True
+        preview = self._json_request("POST", "api/semantic-index/preview")["preview"]
+        self._json_request("POST", f"api/previews/{preview['id']}/apply")
+
+        failed = self._wait_for_semantic_job({"failed"})
+
+        self.assertIn("memory pressure", failed["error"])
+
+    def test_a_rebuild_without_memory_readings_says_it_is_unprotected(self) -> None:
+        self.server.close()
+        self.thread.join(timeout=2)
+        self.service.close()
+        index = UnmonitoredRelationshipIndex()
+        self.service = HearthService(self.database, semantic_index=index)
+        self.server = HearthWebServer(self.service, port=0, choose_file=lambda: self.selected_file, browser_opener=self.opened_urls.append)
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+        self._json_request("POST", "api/import")
+        preview = self._json_request("POST", "api/semantic-index/preview")["preview"]
+        index.block_rebuild = True
+        self._json_request("POST", f"api/previews/{preview['id']}/apply")
+
+        completed = self._wait_for_semantic_job({"completed"})
+
+        self.assertIn("not protected", completed["warning"])
 
 
     def test_collection_map_groups_documents_by_shared_section_without_source_content(self) -> None:

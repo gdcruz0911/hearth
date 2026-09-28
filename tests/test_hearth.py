@@ -61,7 +61,7 @@ class FakeSemanticIndex:
     def __init__(self) -> None:
         self.rebuild_chunk_ids: list[tuple[int, ...]] = []
 
-    def rebuild(self, chunks, *, on_progress=None, is_cancelled=None) -> None:
+    def rebuild(self, chunks, *, on_progress=None, is_cancelled=None, on_warning=None) -> None:
         self.rebuild_chunk_ids.append(tuple(chunk.id for chunk in chunks))
         if on_progress is not None:
             on_progress(len(chunks), len(chunks))
