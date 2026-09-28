@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+import sys
 import tempfile
+import types
 import unittest
 from unittest import mock
+
+import numpy as np
 from pathlib import Path
 
 from hearth.domain import Chunk
 from hearth.embedding import (
-    MLX_LOCK, EmbeddingError, EmbeddingSpec, FlatVectorIndex, IndexBuildCancelled, IndexBuildStopped, IndexBusy,
+    MLX_LOCK, EmbeddingSpec, FlatVectorIndex, IndexBuildCancelled, IndexBuildStopped, IndexBusy,
     IndexCompatibilityError, MLXEmbedder, _build_lock,
 )
 from hearth.service import HearthService
@@ -37,77 +41,76 @@ def _document_chunk(chunk_id: int, document_id: int, text: str) -> Chunk:
     return Chunk(chunk_id, document_id, f"fixture-{document_id}.md", 1, "Fixture", text, 0, len(text), "native", None)
 
 
+def _fake_mlx(model: object, tokenizer: object) -> tuple[types.SimpleNamespace, object]:
+    """Stand-ins for mlx.core and mlx_lm backed by NumPy, so these tests run where MLX is not installed, as in CI."""
+    core = types.SimpleNamespace(
+        array=np.array, ones=np.ones, float32=np.float32, eval=lambda *arrays: None, cache_limits=[],
+    )
+    core.set_cache_limit = core.cache_limits.append
+    loader = types.SimpleNamespace(load=lambda path: (model, tokenizer))
+    patch = mock.patch.dict(sys.modules, {"mlx": types.SimpleNamespace(core=core), "mlx.core": core, "mlx_lm": loader})
+    return core, patch
+
+
+def _model_directory(test: unittest.TestCase) -> Path:
+    directory = tempfile.TemporaryDirectory()
+    test.addCleanup(directory.cleanup)
+    (Path(directory.name) / "config.json").write_text('{"hidden_size": 2}', encoding="utf-8")
+    (Path(directory.name) / "model.safetensors").write_bytes(b"weights")
+    return Path(directory.name)
+
+
+class _Tokenizer:
+    def __init__(self, token_ids: list[int]) -> None:
+        self._token_ids = token_ids
+
+    def encode(self, text: str, add_special_tokens: bool) -> list[int]:
+        return self._token_ids
+
+    def convert_tokens_to_ids(self, token: str) -> int:
+        return {"<|endoftext|>": 9}[token]
+
+
+class _EchoModel:
+    """Echoes each token ID as its own hidden state, so the pooled vector names the pooled token."""
+
+    def __init__(self) -> None:
+        self.seen: list[int] = []
+
+    def model(self, ids):
+        assert MLX_LOCK.locked(), "the forward pass must hold the shared MLX lock"
+        self.seen = ids[0].tolist()
+        return np.array([[[float(token_id), 1.0] for token_id in self.seen]])
+
+
 class MLXEmbedderTests(unittest.TestCase):
-    def test_pools_the_hidden_state_at_endoftext(self) -> None:
-        import mlx.core as mx
+    def test_pools_the_hidden_state_at_endoftext_under_the_mlx_lock(self) -> None:
+        model = _EchoModel()
+        core, patch = _fake_mlx(model, _Tokenizer([5, 6]))
 
-        class Tokenizer:
-            def encode(self, text: str, add_special_tokens: bool) -> list[int]:
-                return [5, 6]
+        with patch:
+            vector = MLXEmbedder(_model_directory(self)).embed(["two tokens"])[0]
 
-            def convert_tokens_to_ids(self, token: str) -> int:
-                return {"<|endoftext|>": 9}[token]
-
-        class Model:
-            seen: list[int] = []
-
-            def model(self, ids):  # Echo each token ID as its own hidden state, so the pooled vector names the token.
-                assert MLX_LOCK.locked(), "the forward pass must hold the shared MLX lock"
-                Model.seen = ids[0].tolist()
-                return mx.array([[[float(token_id), 1.0] for token_id in Model.seen]])
-
-        with tempfile.TemporaryDirectory() as directory:
-            (Path(directory) / "config.json").write_text('{"hidden_size": 2}', encoding="utf-8")
-            (Path(directory) / "model.safetensors").write_bytes(b"weights")
-            embedder = MLXEmbedder(Path(directory))
-            embedder._model, embedder._tokenizer = Model(), Tokenizer()
-
-            vector = embedder.embed(["two tokens"])[0]
-
-        self.assertEqual(Model.seen, [5, 6, 9])
+        self.assertEqual(model.seen, [5, 6, 9])
         self.assertAlmostEqual(vector[0] / vector[1], 9.0, places=5)
         self.assertFalse(MLX_LOCK.locked())
 
     def test_long_input_is_truncated_but_still_ends_with_endoftext(self) -> None:
-        import mlx.core as mx
+        model = _EchoModel()
+        core, patch = _fake_mlx(model, _Tokenizer(list(range(10, 3010))))
 
-        class Tokenizer:
-            def encode(self, text: str, add_special_tokens: bool) -> list[int]:
-                return list(range(10, 3010))
+        with patch:
+            MLXEmbedder(_model_directory(self)).embed(["a very long chunk"])
 
-            def convert_tokens_to_ids(self, token: str) -> int:
-                return 9
-
-        class Model:
-            seen: list[int] = []
-
-            def model(self, ids):
-                Model.seen = ids[0].tolist()
-                return mx.ones((1, len(Model.seen), 2))
-
-        with tempfile.TemporaryDirectory() as directory:
-            (Path(directory) / "config.json").write_text('{"hidden_size": 2}', encoding="utf-8")
-            (Path(directory) / "model.safetensors").write_bytes(b"weights")
-            embedder = MLXEmbedder(Path(directory))
-            embedder._model, embedder._tokenizer = Model(), Tokenizer()
-            embedder.embed(["a very long chunk"])
-
-        self.assertEqual((len(Model.seen), Model.seen[-1]), (2048, 9))
+        self.assertEqual((len(model.seen), model.seen[-1]), (2048, 9))
 
     def test_loading_the_model_caps_the_mlx_buffer_cache(self) -> None:
-        import mlx.core as mx
-        from unittest import mock
+        core, patch = _fake_mlx(_EchoModel(), _Tokenizer([5]))
 
-        previous = mx.set_cache_limit(1 << 40)
-        self.addCleanup(mx.set_cache_limit, previous)
-        with tempfile.TemporaryDirectory() as directory:
-            (Path(directory) / "config.json").write_text('{"hidden_size": 2}', encoding="utf-8")
-            (Path(directory) / "model.safetensors").write_bytes(b"weights")
-            with mock.patch("mlx_lm.load", side_effect=RuntimeError("stop after the cache limit is set")):
-                with self.assertRaises(EmbeddingError):
-                    MLXEmbedder(Path(directory)).embed(["text"])
+        with patch:
+            MLXEmbedder(_model_directory(self)).embed(["text"])
 
-        self.assertEqual(mx.set_cache_limit(previous), 256 * 1024 * 1024)
+        self.assertEqual(core.cache_limits, [256 * 1024 * 1024])
 
 
 class FlatVectorIndexTests(unittest.TestCase):
