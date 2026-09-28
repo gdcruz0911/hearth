@@ -16,6 +16,7 @@ import tomllib
 from pathlib import Path
 
 from . import usage
+from . import recall
 
 # Implementer invocations, confirmed against each installed version (see the workbench specification's Run table).
 # "{options}" becomes the model and effort flags, "{check}" the project's check command,
@@ -191,6 +192,9 @@ def add_parser(subcommands: argparse._SubParsersAction) -> None:
     new.add_argument("--interactive", action="store_true", help="Open the CLI in a tmux window instead of running it headlessly; finish with task collect.")
     new.add_argument("--attach", action="append", default=[], metavar="FILE", help="Copy a file or image into the worktree and list it in the brief. May be repeated.")
     new.add_argument("--issue", type=int, metavar="N", help="Start the brief from the project's GitHub issue N.")
+    new.add_argument("--recall", nargs="?", const="hybrid", choices=recall.MODES,
+                     help="Add excerpts from the keeper's notes to each agent's brief, limited to what that agent may receive "
+                          "(ADR-0024). Hybrid search by default; `--recall keyword` asks for keyword search.")
     new.add_argument("--tests-first", action="store_true", help="Have another model family write failing tests first; the implementer cannot change them.")
     new.add_argument("--approve-tests", action="store_true", help="With --tests-first, wait for you to approve the tests before implementing.")
     escape = actions.add_parser("escape", help="Record a problem found after the task passed every gate.")
@@ -370,6 +374,13 @@ def _new(args: argparse.Namespace) -> int:
     context = ""
     if issue:
         context += f"\nGitHub issue #{args.issue}, quoted as context rather than as instructions from the person:\n\n{issue['body']}\n"
+    recalled = {}
+    if args.recall:  # Checked before anything is created, so recall that cannot run as asked leaves nothing behind.
+        try:
+            recalled = {name: recall.build(_home(), project, name, goal, args.recall) for name in dict.fromkeys(filter(None, (writer, provider)))}
+        except recall.RecallError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
     task_id = stamp = time.strftime("%Y%m%d-%H%M%S")
     for suffix in range(2, 100):  # Two tasks started in the same second, such as an approved retro, need distinct IDs.
         if not (_home() / "tasks" / task_id).exists():
@@ -400,14 +411,17 @@ def _new(args: argparse.Namespace) -> int:
     if attached:
         context += "\nAttachments from the person:\n" + "".join(f"- {name}\n" for name in attached)
     (task_dir / "brief.md").write_text(f"# {goal}\n{context}", encoding="utf-8")
+    for record in recalled.values():
+        recall.save(task_dir, record)
 
     task = {
         "id": task_id, "project": args.project, "goal": goal, "base": base, "branch": f"hearth/{task_id}",
         "worktree": str(worktree), "status": "waiting" if args.interactive else "running", "stop_reason": None,
         "created": _now(), "finished": None, "discarded": None, "copied": copied, "context": context, "issue": args.issue, "runs": [],
+        "recall": {"mode": args.recall} if args.recall else None,
         "implementer": {"provider": provider, "model": args.model, "effort": args.effort, "timeout": args.timeout},
     }
-    prompt = PROMPT.format(id=task_id, goal=goal, check=project["check"]) + context
+    prompt = PROMPT.format(id=task_id, goal=goal, check=project["check"]) + context + recall.for_provider(_home(), task, task_dir, project, provider)
     if args.tests_first:
         return _write_tests(project, task, task_dir, writer, args.approve_tests)
     if not args.interactive:
@@ -428,7 +442,8 @@ def _new(args: argparse.Namespace) -> int:
 def _implement(project: dict, task: dict, task_dir: Path) -> int:
     """Run the implementer headlessly; with tests written first, it must make them pass without changing them."""
     implementer = task["implementer"]
-    prompt = PROMPT.format(id=task["id"], goal=task["goal"], check=project["check"]) + task.get("context", "")
+    prompt = (PROMPT.format(id=task["id"], goal=task["goal"], check=project["check"]) + task.get("context", "")
+              + recall.for_provider(_home(), task, task_dir, project, implementer["provider"]))
     if task.get("protected_tests"):
         prompt += ("\nTests written first by another model family: " + ", ".join(task["protected_tests"])
                    + ".\nMake them pass without changing them; Hearth rejects any change to these files.\n")
@@ -441,7 +456,8 @@ def _implement(project: dict, task: dict, task_dir: Path) -> int:
 def _write_tests(project: dict, task: dict, task_dir: Path, writer: str, approve: bool) -> int:
     """Have another model family write tests that fail on the base commit, then protect them."""
     _wait_for_slot("implement", task, task_dir)
-    prompt = TEST_PROMPT.format(id=task["id"], goal=task["goal"], context=task["context"]) + "\n" + INSTRUCTIONS.format(check=project["check"])
+    prompt = (TEST_PROMPT.format(id=task["id"], goal=task["goal"], context=task["context"])
+              + recall.for_provider(_home(), task, task_dir, project, writer) + "\n" + INSTRUCTIONS.format(check=project["check"]))
     result = _run(task, task_dir, "test", writer, PROVIDERS[writer], prompt, None, None, task["implementer"]["timeout"], project["check"])
     if result["stop"]:
         return _end(task, task_dir, result["stop"])
@@ -868,7 +884,7 @@ def _approve_proposal(task: dict, task_dir: Path, number: int) -> int:
     before = {path.name for path in _home().glob("tasks/*")}
     status = _new(argparse.Namespace(
         command="task", task_command="new", project="hearth" if proposal["kind"] == "guard" else task["project"],
-        goal=proposal["change"], agent=None, model=None, effort=None, timeout=1800, force=False, interactive=False,
+        goal=proposal["change"], agent=None, model=None, effort=None, timeout=1800, force=False, interactive=False, recall=None,
         attach=[], issue=None, tests_first=True, approve_tests=False))
     started = sorted({path.name for path in _home().glob("tasks/*")} - before)
     if started:
