@@ -17,6 +17,19 @@ from hearth.embedding import (
 from hearth.service import HearthService
 
 
+
+def setUpModule() -> None:
+    # Index builds read this machine's memory pressure and take a user-wide lock; tests get a steady normal
+    # reading and a private lock so they pass whatever else the Mac is doing. Pressure tests patch the reading again.
+    lock_directory = tempfile.TemporaryDirectory()
+    unittest.addModuleCleanup(lock_directory.cleanup)
+    for patcher in (
+        mock.patch("hearth.embedding._memory_signals", return_value=(1, 0.0)),
+        mock.patch("hearth.embedding._BUILD_LOCK_PATH", Path(lock_directory.name) / "build.lock"),
+    ):
+        patcher.start()
+        unittest.addModuleCleanup(patcher.stop)
+
 class FakeEmbedder:
     spec = EmbeddingSpec(
         model_name="synthetic-embedding-model",

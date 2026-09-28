@@ -4,6 +4,7 @@ import json
 import sqlite3
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 from hearth.domain import Evidence, ExtractedPage, ImportError, SourceDocument
@@ -11,6 +12,19 @@ from hearth.embedding import EmbeddingSpec, FlatVectorIndex
 from hearth.extraction import PdfExtractor
 from hearth.service import HearthService
 
+
+
+def setUpModule() -> None:
+    # Index builds read this machine's memory pressure and take a user-wide lock; tests get a steady normal
+    # reading and a private lock so they pass whatever else the Mac is doing. Pressure tests patch the reading again.
+    lock_directory = tempfile.TemporaryDirectory()
+    unittest.addModuleCleanup(lock_directory.cleanup)
+    for patcher in (
+        mock.patch("hearth.embedding._memory_signals", return_value=(1, 0.0)),
+        mock.patch("hearth.embedding._BUILD_LOCK_PATH", Path(lock_directory.name) / "build.lock"),
+    ):
+        patcher.start()
+        unittest.addModuleCleanup(patcher.stop)
 
 class FakePdfExtractor:
     def extract(self, path: Path) -> SourceDocument:
