@@ -31,6 +31,7 @@ A test fails when a command is missing from this table, so it grows with every p
 | `hearth task new <project> "<goal>" --tests-first` | Have another model family write failing tests first; the implementer must pass them unchanged. Add `--approve-tests` to read them before implementation starts. |
 | `hearth task approve-tests <id>` | Approve a tests-first task's tests and start implementing. |
 | `hearth task publish <id>` | Push an approved task and open or update its draft pull request (DEL-7), in a project with `"pr": true`; `hearth loop` does this on approval. |
+| `hearth task promote <id>` | Show the task's final report as it would be copied into your notes folder's `reports/`; `--apply` writes it, never overwriting and never importing. Refused inside a task. |
 | `hearth task ci <id>` | Read the pull request's checks: wait while pending, mark it ready when all pass, or send the failing log to a fix run. Never merges. |
 | `hearth task escape <id> "<text>"` | Record a problem found after the task passed every gate. |
 | `hearth task retro <id> --approve N` | Approve escape N's stored proposal by starting it as a tests-first task. |

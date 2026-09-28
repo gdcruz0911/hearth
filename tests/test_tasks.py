@@ -1356,3 +1356,65 @@ class RecallBriefTests(LoopTestCase):
         record = self.saved(task, "claude")
         self.assertNotIn("/Users/someone", self.prompt(task, "01-implement-claude"))
         self.assertEqual([item["kinds"] for item in record["withheld"]], [["absolute home path"]])
+
+
+class PromoteTests(TaskTestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.reports = self.home / "Hearth/reports"
+        self.reports.mkdir(parents=True)
+        self.cli("task", "new", "demo", "Add hello.txt")
+        self.task = self.only_task()
+        self.report = self.home / ".hearth/tasks" / self.task["id"] / "runs/01-implement-claude/report.md"
+
+    def promote(self, *argv: str) -> tuple[int, str, str]:
+        output, errors = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
+            status = main(["task", "promote", self.task["id"], *argv])
+        return status, output.getvalue(), errors.getvalue()
+
+    def target(self) -> Path:
+        return self.reports / f"{(self.task.get('finished') or self.task['created'])[:10]}-{self.task['id']}.md"
+
+    def test_the_preview_writes_nothing_and_apply_writes_the_report_with_its_provenance_once(self) -> None:
+        status, shown, _ = self.promote()
+        self.assertEqual((status, list(self.reports.iterdir())), (0, []))
+        self.assertIn(f"Promoted from Hearth task {self.task['id']}", shown)
+
+        applied, _, next_step = self.promote("--apply")
+
+        written = self.target().read_text(encoding="utf-8")
+        self.assertEqual(applied, 0)
+        self.assertTrue(written.startswith("# Add hello.txt\n"))
+        self.assertIn("it is the agent's own report, not verified fact", written)
+        self.assertIn(self.report.read_text(encoding="utf-8").strip(), written)
+        self.assertIn("nothing was imported or committed", next_step)
+        again, _, refused = self.promote("--apply")
+        self.assertEqual(again, 1)
+        self.assertIn("never overwrites", refused)
+        self.assertEqual(self.target().read_text(encoding="utf-8"), written)
+
+    def test_a_report_with_a_private_path_is_not_promoted(self) -> None:
+        self.report.write_text("Edited /Users/someone/project/hello.txt.\n", encoding="utf-8")
+
+        status, _, refused = self.promote("--apply")
+
+        self.assertEqual((status, list(self.reports.iterdir())), (1, []))
+        self.assertIn("absolute home path", refused)
+
+    def test_a_missing_reports_folder_is_not_created(self) -> None:
+        self.reports.rmdir()
+
+        status, _, refused = self.promote("--apply")
+
+        self.assertEqual(status, 1)
+        self.assertIn("no reports/ folder", refused)
+        self.assertFalse(self.reports.exists())
+
+    def test_an_agent_inside_a_task_cannot_promote(self) -> None:
+        os.environ["HEARTH_TASK"] = self.task["id"]
+
+        status, _, refused = self.promote("--apply")
+
+        self.assertEqual((status, list(self.reports.iterdir())), (1, []))
+        self.assertIn("Agents cannot promote reports into the person's notes", refused)
