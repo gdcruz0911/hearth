@@ -19,6 +19,7 @@ from .evaluation import (
     EvaluationCorpusError,
     LABELS,
     SCORED_LABELS,
+    append_outcomes,
     evaluate_corpus,
     load_evaluation_corpus,
     record_question_set,
@@ -272,11 +273,13 @@ def main(argv: list[str] | None = None) -> int:
                 server.close()
         elif args.command == "evaluate":
             outcomes = evaluate_corpus(service, load_evaluation_corpus(args.corpus))
+            log = append_outcomes(service, args.corpus, outcomes)
             for outcome in outcomes:
                 detail = "" if outcome.passed else f": {'; '.join(outcome.errors)}"
                 print(f"{outcome.case_id}: {'PASS' if outcome.passed else 'FAIL'}{detail}")
             passed_count = sum(outcome.passed for outcome in outcomes)
             print(f"Summary: {passed_count}/{len(outcomes)} cases passed.")
+            print(f"Every run is appended to {log}.")
             return 0 if passed_count == len(outcomes) else 1
         elif args.command == "evaluate-questions":
             records = record_question_set(service, args.question_set)

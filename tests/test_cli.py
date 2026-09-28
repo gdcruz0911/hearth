@@ -3,10 +3,12 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import os
 import re
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from hearth.cli import main
 from hearth.domain import ExtractedPage, SourceDocument
@@ -129,6 +131,18 @@ class CollectionInspectionCliTests(unittest.TestCase):
         self.assertIn("supported: 1 of 1 succeeded", output.getvalue())
         self.assertIn("Not scored: 1 (conflicting evidence 1)", output.getvalue())
         self.assertIn("Contradicted premises and conflicting evidence are not evaluated", output.getvalue())
+
+    def test_evaluate_appends_one_line_per_case_with_provenance(self) -> None:
+        corpus = Path(__file__).with_name("fixtures") / "public/baseline-evaluation.json"
+        log = self.root / ".hearth/evals/baseline-evaluation.jsonl"
+
+        with mock.patch.dict(os.environ, {"HOME": str(self.root)}), contextlib.redirect_stdout(io.StringIO()):
+            for _ in range(2):
+                main(["--database", str(self.root / "evaluate.sqlite"), "evaluate", str(corpus)])
+
+        rows = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+        self.assertEqual([row["case"] for row in rows], ["supported-deployment-owner", "abstained-annual-budget"] * 2)
+        self.assertTrue(all(row["passed"] and row["corpus"]["sha256"] and "retrieval" in row for row in rows))
 
     def test_list_empty_collection_explains_how_to_start(self) -> None:
         empty_database = self.root / "empty.sqlite"
