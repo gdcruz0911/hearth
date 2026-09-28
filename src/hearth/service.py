@@ -211,14 +211,15 @@ class HearthService:
                 attention.append(SourceAttention(document_id, document_name, status))
         return self._store.collection_health(semantic_index_status, tuple(attention))
 
-    def answer(self, question: str) -> Answer:
+    def answer(self, question: str, *, keyword_only: bool = False) -> Answer:
+        """Answer from cited evidence or abstain; keyword_only skips semantic search for exact lookups."""
         if not question.strip():
             return Answer.abstain()
         chunks = self._store.list_chunks()
         # Hybrid retrieval: BM25 finds exact words such as flags and ADR numbers, embeddings find paraphrases.
         chunks_by_id = {chunk.id: chunk for chunk in chunks}
         rankings = [[Evidence(chunk=chunks_by_id[chunk_id], score=0.0) for chunk_id in self._store.keyword_search(terms(question))]]
-        if self._semantic_index is not None:
+        if self._semantic_index is not None and not keyword_only:
             rankings.append(self._semantic_index.search(question, chunks, limit=20))
         candidates = reciprocal_rank_fusion(rankings, limit=20)
         evidence = self._reranker.rerank(question, candidates, limit=6)
