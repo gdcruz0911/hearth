@@ -583,6 +583,22 @@ class VerifyTests(VerifyTestCase):
         self.assertEqual((status, task["stop_reason"]), (1, "verifier_edited"))
         self.assertEqual((Path(task["worktree"]) / "hello.txt").read_text(encoding="utf-8"), "changed by the verifier\n")
 
+    def test_caches_written_by_running_the_program_are_not_verifier_edits(self) -> None:
+        status, task = self.run_loop("cache")
+
+        self.assertEqual((status, task["status"]), (0, "done"))
+        self.assertIn("such as __pycache__, are not edits", (self.home / ".fake-last-verify-prompt").read_text(encoding="utf-8"))
+
+    def test_a_failed_verdict_without_a_failing_claim_is_rejected(self) -> None:
+        from hearth.workbench.tasks import _evidence_problems
+
+        run_dir = self.home / "run"
+        (run_dir / "evidence").mkdir(parents=True)
+        (run_dir / "evidence/out.txt").write_text("2\n", encoding="utf-8")
+        verdict = {"verdict": "failed", "claims": [{"claim": "parses 2s", "evidence": "evidence/out.txt", "result": "pass"}]}
+
+        self.assertEqual(_evidence_problems(run_dir, verdict), ["a failed verdict has no failing claim"])
+
     def test_a_task_recorded_before_copied_files_were_tracked_still_verifies(self) -> None:
         os.environ["FAKE_VERIFY"] = "verified"
         task = self.start()

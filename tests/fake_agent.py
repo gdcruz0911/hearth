@@ -3,7 +3,7 @@
 It reads the prompt on standard input and prints Claude-format stream events, or another CLI's after `--as codex` or `--as antigravity`.
 The scenario comes from FAKE_AGENT_SCENARIO: edit, rewrite, idle, fail, auth, or hang.
 A prompt that starts with "# Review" is answered with the next verdict in FAKE_REVIEWS: approve, changes, elsewhere, second-line, or garbage.
-A prompt that starts with "# Verify" follows the next scenario in FAKE_VERIFY: verified, failed, missing, edit, or garbage.
+A prompt that starts with "# Verify" follows the next scenario in FAKE_VERIFY: verified, failed, missing, edit, cache, or garbage.
 A test-writing prompt writes tests/test_hello.txt, plus notes.txt when FAKE_TESTS is "source".
 A prompt that starts with "# Retro" is answered with the next reply in FAKE_RETRO: proposal, guard, or garbage.
 An editing or idle run also writes FAKE_OUTBOX, if set, to .hearth/outbox.jsonl as board messages,
@@ -57,6 +57,9 @@ def verify() -> None:
         return
     if scenario == "edit":
         Path("hello.txt").write_text("changed by the verifier\n", encoding="utf-8")
+    if scenario == "cache":
+        Path("__pycache__").mkdir(exist_ok=True)
+        Path("__pycache__/hello.cpython-314.pyc").write_bytes(b"written by running the program")
     if scenario != "missing":
         Path(".hearth/evidence").mkdir(parents=True, exist_ok=True)
         observed = Path("hello.txt").read_text(encoding="utf-8") if Path("hello.txt").exists() else "observed output\n"
