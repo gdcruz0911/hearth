@@ -209,6 +209,9 @@ def add_parser(subcommands: argparse._SubParsersAction) -> None:
     ci.add_argument("id")
     ci.add_argument("--timeout", type=int, default=1800, help="Seconds before a fix run is stopped. Defaults to 1800.")
     retro.add_argument("--approve", type=int, metavar="N", help="Start escape N's stored proposal as a tests-first task instead of running a retro.")
+    promote = actions.add_parser("promote", help="Copy a task's final report into your notes folder's reports/, for you to edit and import.")
+    promote.add_argument("id")
+    promote.add_argument("--apply", action="store_true", help="Write the file; without it, only show what would be written.")
     approve = actions.add_parser("approve-tests", help="Approve a tests-first task's tests, then start implementing.")
     approve.add_argument("id")
     answer = actions.add_parser("answer", help="Answer the question an agent left for you, so the task can continue.")
@@ -236,16 +239,18 @@ def add_parser(subcommands: argparse._SubParsersAction) -> None:
     project_opener.add_argument("project", help="A project name from ~/.hearth/projects.json.")
 
 
-def refused_inside_task() -> bool:
-    """ADR-0023: an agent never starts another task or run, so it cannot spend the person's quota on its own."""
+def refused_inside_task(action: str = "start tasks") -> bool:
+    """ADR-0023: an agent never starts another task or run, or writes into the person's notes, on its own."""
     if not os.environ.get("HEARTH_TASK"):
         return False
-    print(f"Agents cannot start tasks; this shell belongs to task {os.environ['HEARTH_TASK']}.\nNext: ask the person, through the task board or your final report", file=sys.stderr)
+    print(f"Agents cannot {action}; this shell belongs to task {os.environ['HEARTH_TASK']}.\nNext: ask the person, through the task board or your final report", file=sys.stderr)
     return True
 
 
 def run(args: argparse.Namespace) -> int:
     if (args.command == "loop" or getattr(args, "task_command", None) == "new") and refused_inside_task():
+        return 1
+    if getattr(args, "task_command", None) == "promote" and refused_inside_task("promote reports into the person's notes"):
         return 1
     if args.command == "loop":
         return _loop(args)
@@ -293,6 +298,8 @@ def run(args: argparse.Namespace) -> int:
         print(f"Recorded escape {len(task['escapes'])} on {task['id']}.")
         print(f"Next: hearth task retro {task['id']}", file=sys.stderr)
         return 0
+    if args.task_command == "promote":
+        return _promote(task, task_dir, args.apply)
     if args.task_command == "retro":
         return _approve_proposal(task, task_dir, args.approve) if args.approve else _retro(task, task_dir)
     if args.task_command == "approve-tests":
@@ -950,6 +957,40 @@ def _fix(project: dict, task: dict, task_dir: Path, label: str, feedback: str, t
     result = _run(task, task_dir, "fix", implementer["provider"], PROVIDERS[implementer["provider"]], prompt,
                   implementer["model"], implementer["effort"], timeout, project["check"])
     _finish(project, task, task_dir, result["stop"])
+
+
+def _promote(task: dict, task_dir: Path, apply: bool) -> int:
+    """Copy the task's final report into the notes folder for the person to edit; never imports, commits, or overwrites."""
+    run = next((run for run in reversed(task["runs"]) if run["role"] in ("implement", "fix") and run.get("dir")
+                and (task_dir / "runs" / run["dir"] / "report.md").exists()), None)
+    if run is None:
+        print(f"{task['id']} has no implementer report to promote.\nNext: hearth task show {task['id']}", file=sys.stderr)
+        return 1
+    policy = _home() / "recall.json"
+    vault = Path(json.loads(policy.read_text(encoding="utf-8")).get("vault", "~/Hearth") if policy.exists() else "~/Hearth").expanduser()
+    target = vault / "reports" / f"{(task.get('finished') or task['created'])[:10]}-{task['id']}.md"
+    report = (task_dir / "runs" / run["dir"] / "report.md").read_text(encoding="utf-8").strip()
+    pull = f", pull request {task['pr']['url']}" if task.get("pr") else ""
+    text = (f"# {task['goal']}\n\nPromoted from Hearth task {task['id']} on {time.strftime('%Y-%m-%d')}: project {task['project']}, "
+            f"status {task['status']}{pull}.\nWritten by {run['provider']} in run {run['dir']}; it is the agent's own report, "
+            f"not verified fact, so edit it before importing.\n\n{report}\n")
+    leaks = sorted({kind for kind, pattern in GUARD_PATTERNS if re.search(pattern, text)})
+    problems = ([f"it contains {', '.join(leaks)} (CODE-6); remove it from the report first"] if leaks else []) + \
+               ([f"{target.name} already exists in {target.parent.name}/, and promote never overwrites"] if target.exists() else []) + \
+               ([f"there is no reports/ folder in {vault.name}"] if not target.parent.is_dir() else [])
+    print(f"{task['id']}  {'writes' if apply and not problems else 'would write'}  {vault.name}/reports/{target.name}  "
+          f"({len(text.splitlines())} lines, from {run['dir']})")
+    for problem in problems:
+        print(f"  not promoted: {problem}", file=sys.stderr)
+    if problems:
+        return 1
+    if not apply:
+        print(text)
+        print(f"Next: hearth task promote {task['id']} --apply", file=sys.stderr)
+        return 0
+    target.write_text(text, encoding="utf-8")
+    print(f"Next: edit {vault.name}/reports/{target.name}, then import it with hearth sources import; nothing was imported or committed", file=sys.stderr)
+    return 0
 
 
 def _pull_request(task: dict, task_dir: Path) -> tuple[str, str]:
