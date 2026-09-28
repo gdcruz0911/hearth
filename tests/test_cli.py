@@ -96,6 +96,22 @@ class CollectionInspectionCliTests(unittest.TestCase):
 
         self.assertEqual(json.loads(output.getvalue())["evidence"][0]["source"], "source changed since import")
 
+    def test_recall_refuses_without_recall_roots_and_stays_inside_them(self) -> None:
+        errors = io.StringIO()
+        with contextlib.redirect_stderr(errors), self.assertRaises(SystemExit):
+            main(["--database", str(self.database), "recall", "Who is the deployment owner?"])
+        self.assertIn("No recall roots are set", errors.getvalue())
+
+        profile = self.root / "profile.json"
+        profile.write_text(json.dumps({"format": "hearth-runtime-profile-v1", "database": str(self.database),
+                                       "recall_roots": [str(self.root / "notes")]}), encoding="utf-8")
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            main(["--profile", str(profile), "recall", "Who is the deployment owner?"])
+
+        report = json.loads(output.getvalue())
+        self.assertEqual((report["status"], report["evidence"], report["scope"]), ("abstained", [], {"recall_roots": ["notes"]}))
+
     def test_evaluate_questions_writes_records_and_says_what_is_not_evaluated(self) -> None:
         question_set = self.root / "questions.json"
         question_set.write_text(json.dumps({"cases": [
