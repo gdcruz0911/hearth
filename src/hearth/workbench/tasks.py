@@ -47,7 +47,7 @@ REVIEW_ORDER = ["antigravity", "claude", "codex"]
 # agy also runs Claude and GPT-OSS models, so its pin names a Gemini model to stay in another family.
 CHECK_MODELS = {"codex": "gpt-6-luna", "claude": "sonnet", "antigravity": "gemini-3.1-pro-high"}
 CHECK_ROLES = {"test", "verify", "review", "retro"}
-RETRO_KINDS = ("test", "verify", "standard", "eval")  # In order of preference: a regression test is deterministic.
+RETRO_KINDS = ("guard", "test", "verify", "standard", "eval")  # In order of preference: guards and tests are deterministic.
 # Verifiers run the real program, so they need commands: Codex in its workspace sandbox, and Claude limited to the
 # project's check and its "verify" command prefix. Headless agy refuses unlisted commands, so it cannot verify.
 VERIFIERS = {
@@ -132,10 +132,14 @@ Goal: {goal}
 This task passed every gate, but the person found these problems afterwards:
 {escapes}
 Propose one permanent change for each problem so the same kind is caught next time, preferring, in order:
-a regression test, because it is deterministic; a VERIFY.md step; a standard in docs/standards/; or a new seeded evaluation case.
-Do not edit any file or run commands; the person approves or edits each proposal before anything changes.
+a guard in Hearth's own code that rejects the problem in every future diff, or a regression test, because both are deterministic;
+a VERIFY.md step; a standard in docs/standards/; or a new seeded evaluation case.
+First use your file-reading and search tools, not shell commands, to look for anything that already covers the problem,
+such as a guard in src/hearth/workbench/ or a standard in docs/standards/; if one does, say so and propose only the gap it leaves,
+because a duplicate fix is not a fix.
+Do not edit any file or run shell commands; the person approves or edits each proposal before anything changes.
 End your reply with this JSON and nothing after it:
-{{"proposals": [{{"escape": 1, "kind": "test" or "verify" or "standard" or "eval", "where": "path", "change": "what to add and why"}}]}}
+{{"proposals": [{{"escape": 1, "kind": "guard" or "test" or "verify" or "standard" or "eval", "where": "path", "change": "what to add and why"}}]}}
 
 What each run did:
 {runs}{messages}
@@ -788,9 +792,10 @@ def _retro(task: dict, task_dir: Path) -> int:
         print(f"No allowed agent outside the {family} model family.\nNext: add another provider to {task['project']}'s providers", file=sys.stderr)
         return 1
     saved = {key: task[key] for key in ("status", "stop_reason", "worktree")}
-    if not Path(task["worktree"]).exists():  # Discarded after merging: the receipts still hold the diff and outcomes.
-        (task_dir / "retro-work").mkdir(exist_ok=True)
-        task["worktree"] = str(task_dir / "retro-work")
+    if not Path(task["worktree"]).exists():
+        # Discarded after merging: the read-only agent works in the main checkout, where it sees the current standards and
+        # guards, and the receipts still hold the diff and outcomes. Retro agents cannot write, so the checkout stays untouched.
+        task["worktree"] = str(_repo(task))
     diff = (task_dir / "diff.patch").read_text(encoding="utf-8") if (task_dir / "diff.patch").exists() else ""
     prompt = RETRO_PROMPT.format(
         id=task["id"], goal=task["goal"], base=task["base"][:12], diff=diff[:100_000], messages=_messages(task_dir, "retro"),
@@ -812,8 +817,9 @@ def _retro(task: dict, task_dir: Path) -> int:
         escapes[number - 1]["proposal"] = proposal
         print(f"escape {number}: {escapes[number - 1]['text']}")
         print(f"  proposal ({proposal['kind']}, {proposal.get('where') or 'no path'}): {proposal['change']}")
-        if proposal["kind"] in ("test", "eval"):
-            print(f"  approve by running, or editing first: hearth task new {task['project']} {shlex.quote(proposal['change'])} --tests-first")
+        if proposal["kind"] in ("guard", "test", "eval"):
+            project_name = "hearth" if proposal["kind"] == "guard" else task["project"]  # Guards live in Hearth's own code.
+            print(f"  approve by running, or editing first: hearth task new {project_name} {shlex.quote(proposal['change'])} --tests-first")
         else:
             print(f"  approve by adding it to {proposal.get('where') or 'the file it names'} yourself; those docs stay on this Mac")
     _write(task_dir, task)
