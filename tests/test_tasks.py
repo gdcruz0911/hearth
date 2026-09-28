@@ -867,6 +867,59 @@ class EffortTests(LoopTestCase):
         self.assertEqual({(row["effort"], row["model"]) for row in rows}, {("low", "gemini-3.1-pro-low")})
 
 
+class RetroTests(LoopTestCase):
+    def escaped(self) -> dict:
+        task = self.start()
+        self.loop(task, "approve")
+        self.assertEqual(self.cli("task", "escape", task["id"], "hello.txt never says the person's name.")[0], 0)
+        return self.only_task()
+
+    def test_an_escape_is_recorded_on_the_task_and_shown(self) -> None:
+        task = self.escaped()
+
+        _, shown = self.cli("task", "show", task["id"])
+
+        self.assertEqual([escape["text"] for escape in task["escapes"]], ["hello.txt never says the person's name."])
+        self.assertIn("escape    1: hello.txt never says the person's name.", shown)
+
+    def test_a_retro_proposes_one_change_per_escape_and_prints_the_command_to_approve_it(self) -> None:
+        task = self.escaped()
+
+        status, output = self.cli("task", "retro", task["id"])
+
+        task = self.only_task()
+        self.assertEqual((status, task["status"]), (0, "done"))
+        self.assertEqual((task["runs"][-1]["role"], task["runs"][-1]["provider"]), ("retro", "codex"))
+        self.assertEqual(task["escapes"][0]["proposal"]["kind"], "test")
+        self.assertIn("hearth task new demo 'Add a regression test that hello.txt greets by name.' --tests-first", output)
+        prompt = (self.home / ".fake-last-retro-prompt").read_text(encoding="utf-8")
+        self.assertIn("hello.txt never says the person's name.", prompt)
+        self.assertIn("02 review", prompt)
+
+    def test_a_retro_works_after_the_worktree_is_discarded(self) -> None:
+        task = self.escaped()
+        self.cli("task", "discard", task["id"], "--apply")
+
+        status, _ = self.cli("task", "retro", task["id"])
+
+        self.assertEqual(status, 0)
+        self.assertIn(f"+# Task {task['id']}", (self.home / ".fake-last-retro-prompt").read_text(encoding="utf-8"))
+
+    def test_an_unreadable_retro_is_reported_without_a_proposal(self) -> None:
+        task = self.escaped()
+        os.environ["FAKE_RETRO"] = "garbage"
+
+        status, _ = self.cli("task", "retro", task["id"])
+
+        self.assertEqual(status, 1)
+        self.assertNotIn("proposal", self.only_task()["escapes"][0])
+
+    def test_a_retro_needs_an_escape(self) -> None:
+        task = self.start()
+
+        self.assertEqual(self.cli("task", "retro", task["id"])[0], 1)
+
+
 class ProviderResultTests(unittest.TestCase):
     def test_each_recorded_provider_stream_yields_final_text_and_session(self) -> None:
         cases = {
