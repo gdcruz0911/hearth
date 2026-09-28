@@ -42,8 +42,11 @@ REVIEWERS = {
 # Antigravity first spends the plan that is otherwise idle; it needs the read-only allow rules in the spec,
 # and an empty review falls back to the next reviewer from another model family.
 REVIEW_ORDER = ["antigravity", "claude", "codex"]
-# agy also runs Claude and GPT-OSS models, so its reviews name a Gemini model to stay in another family.
-REVIEW_MODELS = {"antigravity": "gemini-3.1-pro-high"}
+# Models for the checking roles (test, verify, review), pinned so a default changed in a provider's app cannot
+# silently change what checks the work; --model still overrides, and implementation keeps the CLI's default.
+# agy also runs Claude and GPT-OSS models, so its pin names a Gemini model to stay in another family.
+CHECK_MODELS = {"codex": "gpt-6-luna", "claude": "sonnet", "antigravity": "gemini-3.1-pro-high"}
+CHECK_ROLES = {"test", "verify", "review"}
 # Verifiers run the real program, so they need commands: Codex in its workspace sandbox, and Claude limited to the
 # project's check and its "verify" command prefix. Headless agy refuses unlisted commands, so it cannot verify.
 VERIFIERS = {
@@ -417,6 +420,7 @@ def _run(task: dict, task_dir: Path, role: str, provider: str, template: list[st
          model: str | None, effort: str | None, timeout: int, check: str, verify: str = "") -> dict:
     """Run one headless provider turn in the task's worktree and record it; returns the parsed result and a stop reason."""
     effort = effort or ROLE_EFFORT.get(role)
+    model = model or (CHECK_MODELS.get(provider) if role in CHECK_ROLES else None)
     if provider == "antigravity" and model and re.search(r"-(low|high)$", model):
         model = re.sub(r"-(low|high)$", "-low" if effort == "low" else "-high", model)  # agy names its thinking level in the model.
     record = _record(task, task_dir, role, provider, model, effort, prompt)
@@ -459,7 +463,7 @@ def _loop(args: argparse.Namespace) -> int:
     implementer = next(run for run in task["runs"] if run["role"] == "implement")
     family = _family(implementer["provider"], implementer["model"])
     candidates = [args.reviewer] if args.reviewer else [name for name in REVIEW_ORDER if name in project["providers"]]
-    reviewers = [name for name in candidates if name in project["providers"] and _family(name, REVIEW_MODELS.get(name)) != family]
+    reviewers = [name for name in candidates if name in project["providers"] and _family(name, CHECK_MODELS.get(name)) != family]
     if not reviewers:
         print(f"No allowed reviewer outside the {family} model family.\nNext: add another provider to {task['project']}'s providers, or pick one with --reviewer", file=sys.stderr)
         return 1
@@ -496,7 +500,7 @@ def _loop(args: argparse.Namespace) -> int:
             prompt = REVIEW_PROMPT.format(id=task["id"], goal=task["goal"], base=task["base"][:12], diff=diff[:100_000],
                                           messages=_messages(task_dir, "review"), verification=verification)  # ponytail: a cap, not paging, for very large diffs.
             for reviewer in reviewers:
-                result = _run(task, task_dir, "review", reviewer, REVIEWERS[reviewer], prompt, REVIEW_MODELS.get(reviewer), None, args.timeout, project["check"])
+                result = _run(task, task_dir, "review", reviewer, REVIEWERS[reviewer], prompt, None, None, args.timeout, project["check"])
                 verdict = None if result["stop"] else _verdict(result["final"])
                 task["runs"][-1]["verdict"] = verdict and verdict["verdict"]
                 if verdict or result["stop"] == "timeout":

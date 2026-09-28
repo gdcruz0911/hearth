@@ -8,7 +8,7 @@ import shutil
 import time
 from pathlib import Path
 
-from .tasks import REVIEW_MODELS, REVIEW_PROMPT, REVIEWERS, _git, _home, _now, _run, _verdict, refused_inside_task
+from .tasks import REVIEW_PROMPT, REVIEWERS, _git, _home, _now, _run, _verdict, refused_inside_task
 
 
 def add_parser(subcommands: argparse._SubParsersAction) -> None:
@@ -23,7 +23,7 @@ def add_parser(subcommands: argparse._SubParsersAction) -> None:
 def run(args: argparse.Namespace) -> int:
     if refused_inside_task():
         return 1
-    model = args.model or REVIEW_MODELS.get(args.reviewer)
+    model = args.model
     root = _home() / "evals/runs" / time.strftime("%Y%m%d-%H%M%S")
     rows = []
     for case_dir in sorted(path.parent for path in args.cases.glob("*/case.json")):
