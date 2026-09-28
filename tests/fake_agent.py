@@ -4,6 +4,7 @@ It reads the prompt on standard input and prints Claude-format stream events, or
 The scenario comes from FAKE_AGENT_SCENARIO: edit, idle, fail, auth, or hang.
 A prompt that starts with "# Review" is answered with the next verdict in FAKE_REVIEWS: approve, changes, or garbage.
 A prompt that starts with "# Verify" follows the next scenario in FAKE_VERIFY: verified, failed, missing, edit, or garbage.
+A test-writing prompt writes tests/test_hello.txt, plus notes.txt when FAKE_TESTS is "source".
 An editing or idle run also writes FAKE_OUTBOX, if set, to .hearth/outbox.jsonl as board messages,
 and an editing run appends FAKE_EXTRA, if set, to hello.txt.
 """
@@ -59,7 +60,7 @@ def verify() -> None:
     result = "fail" if scenario == "failed" else "pass"
     claims = [{"claim": "hello.txt greets the person", "evidence": "evidence/hello.txt", "result": result}]
     verdict = "failed" if scenario == "failed" else "verified"
-    finish("Checked.\n" + json.dumps({"verdict": verdict, "claims": claims}))
+    finish("Checked.\n" + json.dumps({"verdict": verdict, "claims": claims, "not_checked": ["the web interface: no loopback port here"]}))
 
 
 def main() -> int:
@@ -78,6 +79,13 @@ def main() -> int:
     if prompt.startswith("# Verify"):
         Path.home().joinpath(".fake-last-verify-prompt").write_text(prompt, encoding="utf-8")
         verify()
+        return 0
+    if "write the tests first" in prompt.splitlines()[0]:
+        Path("tests").mkdir(exist_ok=True)
+        Path("tests/test_hello.txt").write_text("hello.txt must exist\n", encoding="utf-8")
+        if os.environ.get("FAKE_TESTS") == "source":
+            Path("notes.txt").write_text("not a test\n", encoding="utf-8")
+        finish("Wrote tests/test_hello.txt; it fails because hello.txt does not exist yet.")
         return 0
     if os.environ.get("FAKE_OUTBOX"):
         Path(".hearth").mkdir(exist_ok=True)

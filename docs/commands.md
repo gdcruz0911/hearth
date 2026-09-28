@@ -25,6 +25,8 @@ A test fails when a command is missing from this table, so it grows with every p
 | `hearth task discard <id>` | Preview, or with `--apply` remove, a task's worktree and branch. |
 | `hearth task new <project> "<goal>" --interactive` | Open the agent in a tmux window instead, with the goal as its first message. |
 | `hearth task answer <id> "<text>"` | Answer the question an agent left for you; `hearth loop` then continues the task. |
+| `hearth task new <project> "<goal>" --tests-first` | Have another model family write failing tests first; the implementer must pass them unchanged. Add `--approve-tests` to read them before implementation starts. |
+| `hearth task approve-tests <id>` | Approve a tests-first task's tests and start implementing. |
 | `hearth task collect <id>` | After an interactive task, commit its checkpoint, run the check, and save the diff. |
 | `hearth task open <id>` | Open a task's worktree in VS Code. |
 | `hearth loop <id>` | Review a finished task with another model family and fix it, up to `--rounds` times, until approved. |
