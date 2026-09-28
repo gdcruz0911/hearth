@@ -487,19 +487,19 @@ class ReviewEvaluationTests(LoopTestCase):
                 self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_each_case_is_scored_and_appended_to_the_evaluation_log(self) -> None:
-        # Cases run in name order: bug-fraction, bug-negative, bug-swallow, clean-days, clean-rename.
-        os.environ["FAKE_REVIEWS"] = "changes,changes,approve,approve,garbage"
+        # Cases run in name order: bug-fraction, bug-negative, bug-skip, bug-swallow, clean-days, clean-rename.
+        os.environ["FAKE_REVIEWS"] = "changes,changes,changes,approve,approve,garbage"
 
         status, output = self.cli("review-eval", str(self.CASES), "--reviewer", "codex")
 
         rows = [json.loads(line) for line in (self.home / ".hearth/evals/reviews.jsonl").read_text(encoding="utf-8").splitlines()]
         self.assertEqual(status, 0)
         self.assertEqual([(row["case"], row["verdict"], row["correct"]) for row in rows], [
-            ("bug-fraction", "changes", True), ("bug-negative", "changes", True), ("bug-swallow", "approve", False),
+            ("bug-fraction", "changes", True), ("bug-negative", "changes", True), ("bug-skip", "changes", True), ("bug-swallow", "approve", False),
             ("clean-days", "approve", True), ("clean-rename", None, False),
         ])
         self.assertEqual({row["reviewer"] for row in rows}, {"codex"})
-        self.assertIn("planted bugs caught: 2 of 3", output)
+        self.assertIn("planted bugs caught: 3 of 4", output)
         self.assertIn("clean changes approved: 1 of 2", output)
         prompt = (self.home / ".fake-last-review-prompt").read_text(encoding="utf-8")
         self.assertIn("SECONDS_PER_UNIT", prompt)
@@ -602,6 +602,23 @@ class GuardTests(LoopTestCase):
 
         fix_prompt = (self.home / ".hearth/tasks" / task["id"] / "runs/02-fix-claude/prompt.md").read_text(encoding="utf-8")
         self.assertIn("absolute home path", fix_prompt)
+
+    def test_a_new_test_skip_fails_the_guards(self) -> None:
+        os.environ["FAKE_EXTRA"] = "        self.skipTest('flaky here')\n"
+
+        task = self.start()
+
+        guards = (self.home / ".hearth/tasks" / task["id"] / "runs/01-implement-claude/guards.txt").read_text(encoding="utf-8")
+        self.assertEqual(task["stop_reason"], "guard_failed")
+        self.assertIn("test skip in hello.txt:2 (TEST-7)", guards)
+
+    def test_a_skip_the_goal_asks_for_passes_the_guards(self) -> None:
+        os.environ["FAKE_EXTRA"] = "@unittest.skipIf(sys.platform == 'win32', 'POSIX only')\n"
+        self.write_projects(check="test -f hello.txt", providers=("claude", "codex"))
+
+        self.cli("task", "new", "demo", "Add hello.txt and skip its test on Windows")
+
+        self.assertEqual(self.only_task()["status"], "done")
 
     def test_a_diff_over_the_size_limit_fails_the_guards(self) -> None:
         os.environ["FAKE_EXTRA"] = "line\n" * (tasks.MAX_DIFF_LINES + 1)

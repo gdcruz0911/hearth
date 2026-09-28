@@ -72,6 +72,8 @@ GUARD_PATTERNS = [
     ("Slack token", r"xox[abprs]-[A-Za-z0-9-]{10,}"),
     ("absolute home path", r"/(?:Users|home)/[A-Za-z0-9._-]+/"),  # CODE-6: real local paths reveal names and layout.
 ]
+# TEST-7: a new skip silences a test instead of passing it, so it fails the guards unless the goal asks for one.
+SKIP_PATTERN = re.compile(r"\bskipTest\(|@(?:unittest\.)?skip(?:If|Unless)?\b|\bpytest\.(?:mark\.)?skip|\b(?:it|describe|test)\.skip\(|\bxit\(|\bt\.Skip")
 GUIDANCE = ["AGENTS.md", "CLAUDE.md", "CODING_REQUIREMENTS.md", "CONTEXT.md", "VERIFY.md", "docs/standards"]
 HEADROOM_LIMIT = 90
 PROMPT = """# Task {id}
@@ -603,6 +605,8 @@ def _guards(task: dict) -> list[str]:
         elif row.startswith("+") and path:
             line += 1
             problems += [f"{kind} in {path}:{line}" for kind, pattern in GUARD_PATTERNS if re.search(pattern, row[1:])]
+            if SKIP_PATTERN.search(row[1:]) and "skip" not in task["goal"].lower():
+                problems.append(f"test skip in {path}:{line} (TEST-7); skip a test only when the goal asks for it")
     return problems
 
 
