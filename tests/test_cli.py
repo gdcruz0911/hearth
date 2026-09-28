@@ -69,6 +69,33 @@ class CollectionInspectionCliTests(unittest.TestCase):
         self.assertNotIn("The deployment owner is Ada.", output.getvalue())
         self.assertNotIn(str(self.root), output.getvalue())
 
+    def test_search_json_separates_accepted_evidence_from_candidates_without_source_paths(self) -> None:
+        output = io.StringIO()
+
+        with contextlib.redirect_stdout(output):
+            exit_code = main(["--database", str(self.database), "search", "--json", "Who is the deployment owner?"])
+
+        report = json.loads(output.getvalue())
+        evidence = report["evidence"][0]
+        self.assertEqual(exit_code, 0)
+        self.assertEqual((report["status"], report["retrieval"]["mode"], report["gate"]["passed"]), ("supported", "keyword", True))
+        self.assertIn("term overlap only", report["gate"]["note"])
+        self.assertEqual((evidence["document"], evidence["page"], evidence["source"]), ("operations.md", 1, "current"))
+        self.assertIn("Ada", evidence["excerpt"])
+        self.assertEqual({"chunk_id", "document_id", "section", "char_start", "char_end", "extraction", "ocr_confidence"} - set(evidence), set())
+        self.assertTrue(all("excerpt" not in candidate for candidate in report["candidates"]))
+        self.assertEqual([c["chunk_id"] for c in report["candidates"] if c["cited"]], [e["chunk_id"] for e in report["evidence"]])
+        self.assertNotIn(str(self.root), output.getvalue())
+
+    def test_search_json_flags_a_source_changed_since_import(self) -> None:
+        self.note.write_text("# Operations\n\nThe deployment owner is Lin now.\n", encoding="utf-8")
+        output = io.StringIO()
+
+        with contextlib.redirect_stdout(output):
+            main(["--database", str(self.database), "search", "--json", "Who is the deployment owner?"])
+
+        self.assertEqual(json.loads(output.getvalue())["evidence"][0]["source"], "source changed since import")
+
     def test_evaluate_questions_writes_records_and_says_what_is_not_evaluated(self) -> None:
         question_set = self.root / "questions.json"
         question_set.write_text(json.dumps({"cases": [

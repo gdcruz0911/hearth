@@ -92,6 +92,7 @@ def main(argv: list[str] | None = None) -> int:
     importer.add_argument("path")
     search = subcommands.add_parser("search", help="Answer from retrieved evidence or abstain.")
     search.add_argument("question")
+    search.add_argument("--json", action="store_true", help="Print one JSON value: status, accepted evidence with provenance, and unaccepted candidates.")
     search.add_argument("--keyword", action="store_true", help="Search keywords only (BM25), for exact identifiers such as flags or ADR numbers.")
     reindexer = subcommands.add_parser("reindex", help="Re-extract and replace one document's derived index.")
     reindexer.add_argument("path")
@@ -269,8 +270,10 @@ def main(argv: list[str] | None = None) -> int:
             args.out.write_text("".join(json.dumps(record) + "\n" for record in records), encoding="utf-8")
             _print_question_set_summary(records, args.out)
         elif args.command == "search":
-            answer = service.answer(args.question, keyword_only=args.keyword)
-            _print_answer(answer)
+            if args.json:
+                print(json.dumps(service.search_report(args.question, keyword_only=args.keyword)))
+            else:
+                _print_answer(service.answer(args.question, keyword_only=args.keyword))
     except (
         EmbeddingError,
         EvaluationCorpusError,
