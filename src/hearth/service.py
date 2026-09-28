@@ -222,14 +222,18 @@ class HearthService:
         """Answer from cited evidence or abstain; keyword_only skips semantic search for exact lookups."""
         return self.trace(question, keyword_only=keyword_only)[0]
 
-    def trace(self, question: str, *, keyword_only: bool = False) -> tuple[Answer, dict[str, object]]:
+    def trace(
+        self, question: str, *, keyword_only: bool = False, within: tuple[Path, ...] | None = None
+    ) -> tuple[Answer, dict[str, object]]:
         """Answer exactly as answer() does, with a record of every stage for evaluation.
 
         The record holds chunk IDs and scores only, never chunk text: keyword ranks, semantic and fused scores,
         the reranker's score for every candidate, the citations, and the lexical-support gate's decision.
+        With `within`, only documents under those folders can be retrieved or cited.
         """
         record: dict[str, object] = {
             "question": question, "keyword_only": keyword_only, "reranker": type(self._reranker).__name__,
+            "within": [root.name or str(root) for root in within] if within is not None else None,
             "keyword": [], "semantic": [], "fused": [], "reranked": [], "citations": [],
             "lexical_support": None, "status": "abstained",
         }
@@ -238,11 +242,17 @@ class HearthService:
         chunks = self._store.list_chunks()
         # Hybrid retrieval: BM25 finds exact words such as flags and ADR numbers, embeddings find paraphrases.
         chunks_by_id = {chunk.id: chunk for chunk in chunks}
-        keyword = [Evidence(chunk=chunks_by_id[chunk_id], score=0.0) for chunk_id in self._store.keyword_search(terms(question), limit=KEYWORD_CANDIDATES)]
+        allowed = self._documents_within(within) if within is not None else None
+        keyword = [Evidence(chunk=chunks_by_id[chunk_id], score=0.0)
+                   for chunk_id in self._store.keyword_search(terms(question), limit=KEYWORD_CANDIDATES, document_ids=allowed)]
         record["keyword"] = [item.chunk.id for item in keyword]
         rankings = [keyword]
         if self._semantic_index is not None and not keyword_only:
-            semantic = self._semantic_index.search(question, chunks, limit=SEMANTIC_CANDIDATES)
+            if allowed is None:
+                semantic = self._semantic_index.search(question, chunks, limit=SEMANTIC_CANDIDATES)
+            else:  # Rank everything, then keep the scope, so out-of-scope chunks cannot crowd it out.
+                ranked = self._semantic_index.search(question, chunks, limit=len(chunks))
+                semantic = [item for item in ranked if item.chunk.document_id in allowed][:SEMANTIC_CANDIDATES]
             record["semantic"] = _scored(semantic)
             rankings.append(semantic)
         candidates = reciprocal_rank_fusion(rankings, limit=FUSED_CANDIDATES)
@@ -260,13 +270,21 @@ class HearthService:
         record["status"] = answer.status
         return answer, record
 
-    def search_report(self, question: str, *, keyword_only: bool = False) -> dict[str, object]:
+    def _documents_within(self, roots: tuple[Path, ...]) -> set[int]:
+        """IDs of documents whose source path is inside one of the folders."""
+        resolved = [root.expanduser().resolve() for root in roots]
+        return {document_id for document_id, _, path, *_ in self._store.source_records()
+                if any(path.is_relative_to(root) for root in resolved)}
+
+    def search_report(
+        self, question: str, *, keyword_only: bool = False, within: tuple[Path, ...] | None = None
+    ) -> dict[str, object]:
         """The answer as data for agents: accepted evidence with provenance, kept apart from unaccepted candidates.
 
         Evidence is what the current gate accepted and the answer cites; candidates are everything retrieval
         returned, without text. Passing the gate shows term overlap only, and the report says so.
         """
-        answer, record = self.trace(question, keyword_only=keyword_only)
+        answer, record = self.trace(question, keyword_only=keyword_only, within=within)
         chunks = {chunk.id: chunk for chunk in self._store.list_chunks()}
         health = self.collection_health()
         freshness = {item.document_id: item.status for item in health.source_attention}
@@ -275,6 +293,7 @@ class HearthService:
         return {
             "question": question,
             "status": answer.status,
+            "scope": {"recall_roots": record["within"]} if within is not None else {"collection": "everything indexed"},
             "retrieval": {"mode": "hybrid" if semantic else "keyword", "semantic_index": health.semantic_index_status,
                           "candidate_scores": record["reranker"] if record["reranker"] != "IdentityReranker"
                           else "reciprocal rank fusion"},

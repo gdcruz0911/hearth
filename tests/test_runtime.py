@@ -44,6 +44,14 @@ class RuntimeProfileTests(unittest.TestCase):
             ((profile_path.parent / "Desktop").resolve(), (profile_path.parent / "Documents").resolve()),
         )
 
+    def test_recall_roots_round_trip_and_default_to_none(self) -> None:
+        notes = self.root / "notes"
+        written = write_runtime_profile(self.root / "with.json", RuntimeProfile(database=self.root / "h.sqlite", recall_roots=(notes,)))
+        plain = write_runtime_profile(self.root / "without.json", RuntimeProfile(database=self.root / "h.sqlite"))
+
+        self.assertEqual(load_runtime_profile(written).recall_roots, (notes.resolve(),))
+        self.assertEqual(load_runtime_profile(plain).recall_roots, ())
+
     def test_write_refuses_to_overwrite_an_existing_profile(self) -> None:
         profile_path = self.root / "hearth.json"
         write_runtime_profile(profile_path, RuntimeProfile(database=self.root / "hearth.sqlite"))

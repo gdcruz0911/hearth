@@ -94,6 +94,11 @@ def main(argv: list[str] | None = None) -> int:
     search.add_argument("question")
     search.add_argument("--json", action="store_true", help="Print one JSON value: status, accepted evidence with provenance, and unaccepted candidates.")
     search.add_argument("--keyword", action="store_true", help="Search keywords only (BM25), for exact identifiers such as flags or ADR numbers.")
+    recall = subcommands.add_parser(
+        "recall", help="Search only the profile's recall roots, for agents, and print one JSON value like search --json."
+    )
+    recall.add_argument("question")
+    recall.add_argument("--keyword", action="store_true", help="Search keywords only (BM25), for exact identifiers.")
     reindexer = subcommands.add_parser("reindex", help="Re-extract and replace one document's derived index.")
     reindexer.add_argument("path")
     remover = subcommands.add_parser("remove", help="Remove a document and its derived records.")
@@ -133,6 +138,8 @@ def main(argv: list[str] | None = None) -> int:
     profile_create.add_argument("--ocr-output-directory", type=Path)
     profile_create.add_argument("--retain-ocr-output", action="store_true")
     profile_create.add_argument("--relationship-minimum-score", type=_relationship_minimum_score, default=0.72)
+    profile_create.add_argument("--recall-root", action="append", type=Path, default=[],
+                                help="A folder whose documents agents may receive as recall. Repeat for more.")
     profile_create.add_argument(
         "--source-root",
         type=Path,
@@ -165,6 +172,7 @@ def main(argv: list[str] | None = None) -> int:
                     retain_ocr_output=args.retain_ocr_output,
                     relationship_minimum_score=args.relationship_minimum_score,
                     source_roots=tuple(args.source_root) if args.source_root else default_source_roots(),
+                    recall_roots=tuple(args.recall_root),
                 ),
             )
         except RuntimeProfileError as exc:
@@ -177,6 +185,11 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(str(exc))
     args.database = args.database or profile.database or Path(".hearth/hearth.sqlite")
     args.source_roots = tuple(args.source_root) if args.source_root else profile.source_roots
+    # Recall roots come only from the profile, so a command line cannot widen what agents receive.
+    args.recall_roots = profile.recall_roots
+    if args.command == "recall" and not args.recall_roots:
+        parser.error("No recall roots are set, so Hearth will not hand documents to agents. "
+                     "Next: add recall_roots to your runtime profile.")
     args.embedding_model = args.embedding_model or profile.embedding_model
     args.index_directory = args.index_directory or profile.index_directory
     args.reranker_model = args.reranker_model or profile.reranker_model
@@ -269,6 +282,8 @@ def main(argv: list[str] | None = None) -> int:
             records = record_question_set(service, args.question_set)
             args.out.write_text("".join(json.dumps(record) + "\n" for record in records), encoding="utf-8")
             _print_question_set_summary(records, args.out)
+        elif args.command == "recall":
+            print(json.dumps(service.search_report(args.question, keyword_only=args.keyword, within=args.recall_roots)))
         elif args.command == "search":
             if args.json:
                 print(json.dumps(service.search_report(args.question, keyword_only=args.keyword)))

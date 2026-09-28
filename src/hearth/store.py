@@ -230,15 +230,26 @@ class SQLiteStore:
             for row in rows
         ]
 
-    def keyword_search(self, terms: set[str], limit: int = 20) -> list[int]:
-        """Chunk IDs ranked by BM25 over any of the terms, best first."""
-        if not terms or limit < 1:
+    def keyword_search(self, terms: set[str], limit: int = 20, document_ids: set[int] | None = None) -> list[int]:
+        """Chunk IDs ranked by BM25 over any of the terms, best first, optionally only from the given documents."""
+        if not terms or limit < 1 or document_ids == set():
             return []
         # Terms are letters and digits only, so quoting each one keeps FTS5 query syntax out of the question.
         query = " OR ".join(f'"{term}"' for term in sorted(terms))
-        rows = self._connection.execute(
-            "SELECT rowid FROM chunks_fts WHERE chunks_fts MATCH ? ORDER BY rank, rowid LIMIT ?", (query, limit)
-        ).fetchall()
+        if document_ids is None:
+            rows = self._connection.execute(
+                "SELECT rowid FROM chunks_fts WHERE chunks_fts MATCH ? ORDER BY rank, rowid LIMIT ?", (query, limit)
+            ).fetchall()
+        else:
+            # Filtering before the limit keeps a large collection outside the scope from crowding out the documents in it.
+            placeholders = ",".join("?" * len(document_ids))
+            rows = self._connection.execute(
+                f"""SELECT chunks_fts.rowid FROM chunks_fts JOIN chunks ON chunks.id = chunks_fts.rowid
+                JOIN pages ON pages.id = chunks.page_id
+                WHERE chunks_fts MATCH ? AND pages.document_id IN ({placeholders})
+                ORDER BY chunks_fts.rank, chunks_fts.rowid LIMIT ?""",
+                (query, *sorted(document_ids), limit),
+            ).fetchall()
         return [row[0] for row in rows]
 
     def _create_schema(self) -> None:

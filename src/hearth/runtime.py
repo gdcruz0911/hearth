@@ -25,6 +25,8 @@ class RuntimeProfile:
     retain_ocr_output: bool = False
     relationship_minimum_score: float = 0.72
     source_roots: tuple[Path, ...] = default_source_roots()
+    # Only documents under these folders are handed to agents as recall; none set means recall is refused.
+    recall_roots: tuple[Path, ...] = ()
 
 
 _FORMAT = "hearth-runtime-profile-v1"
@@ -35,7 +37,7 @@ _PATH_FIELDS = (
     "reranker_model",
     "ocr_output_directory",
 )
-_FIELDS = {"format", *_PATH_FIELDS, "retain_ocr_output", "relationship_minimum_score", "source_roots"}
+_FIELDS = {"format", *_PATH_FIELDS, "retain_ocr_output", "relationship_minimum_score", "source_roots", "recall_roots"}
 
 
 def load_runtime_profile(path: Path) -> RuntimeProfile:
@@ -55,6 +57,7 @@ def load_runtime_profile(path: Path) -> RuntimeProfile:
 
     paths = {field: _profile_path(payload, field, profile_path.parent) for field in _PATH_FIELDS}
     source_roots = _profile_root_paths(payload, profile_path.parent)
+    recall_roots = _profile_root_paths(payload, profile_path.parent, "recall_roots", tuple)
     retain_ocr_output = payload.get("retain_ocr_output", False)
     if not isinstance(retain_ocr_output, bool):
         raise RuntimeProfileError("Runtime profile retain_ocr_output must be true or false.")
@@ -68,6 +71,7 @@ def load_runtime_profile(path: Path) -> RuntimeProfile:
         retain_ocr_output=retain_ocr_output,
         relationship_minimum_score=float(relationship_minimum_score),
         source_roots=source_roots,
+        recall_roots=recall_roots,
     )
 
 
@@ -88,6 +92,8 @@ def write_runtime_profile(path: Path, profile: RuntimeProfile) -> Path:
         if value is not None:
             payload[field] = str(value.expanduser().resolve())
     payload["source_roots"] = [str(value.expanduser().resolve()) for value in _unique_paths(profile.source_roots)]
+    if profile.recall_roots:
+        payload["recall_roots"] = [str(value.expanduser().resolve()) for value in _unique_paths(profile.recall_roots)]
     try:
         profile_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     except OSError as exc:
@@ -105,12 +111,14 @@ def _profile_path(payload: dict[object, object], field: str, base_directory: Pat
     return (base_directory / candidate).resolve() if not candidate.is_absolute() else candidate.resolve()
 
 
-def _profile_root_paths(payload: dict[object, object], base_directory: Path) -> tuple[Path, ...]:
-    value = payload.get("source_roots")
+def _profile_root_paths(
+    payload: dict[object, object], base_directory: Path, field: str = "source_roots", default=default_source_roots
+) -> tuple[Path, ...]:
+    value = payload.get(field)
     if value is None:
-        return default_source_roots()
+        return default()
     if not isinstance(value, list) or any(not isinstance(item, str) or not item for item in value):
-        raise RuntimeProfileError("Runtime profile source_roots must be a list of non-empty path strings.")
+        raise RuntimeProfileError(f"Runtime profile {field} must be a list of non-empty path strings.")
     roots = []
     for item in value:
         candidate = Path(item).expanduser()

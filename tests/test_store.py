@@ -118,6 +118,49 @@ class KeywordIndexTests(unittest.TestCase):
         self.assertEqual([(c["document"], c["cited"]) for c in report["candidates"]], [("other.md", False)])
         self.assertEqual(report["retrieval"]["mode"], "hybrid")
 
+    def scoped_collection(self, semantic_index=None) -> tuple[HearthService, Path]:
+        inside, outside = self.directory / "notes", self.directory / "elsewhere"
+        inside.mkdir(); outside.mkdir()
+        service = HearthService(self.database, semantic_index=semantic_index)
+        self.addCleanup(service.close)
+        (inside / "garden.md").write_text("The garden owner is Ada.", encoding="utf-8")
+        service._import_document(str(inside / "garden.md"), rebuild_index=False)
+        for number in range(25):  # Better matches outside the scope, more than a page of candidates.
+            (outside / f"owner-{number}.md").write_text(f"The garden owner owner owner is person {number}.", encoding="utf-8")
+            service._import_document(str(outside / f"owner-{number}.md"), rebuild_index=False)
+        return service, inside
+
+    def test_recall_within_a_folder_returns_only_its_documents_even_when_outside_matches_are_better(self) -> None:
+        service, inside = self.scoped_collection()
+
+        report = service.search_report("Who is the garden owner?", within=(inside,))
+        everything = service.search_report("Who is the garden owner?")
+
+        self.assertEqual({item["document"] for item in report["evidence"] + report["candidates"]}, {"garden.md"})
+        self.assertEqual(report["scope"], {"recall_roots": ["notes"]})
+        self.assertNotIn("garden.md", [item["document"] for item in everything["candidates"]])
+
+    def test_semantic_results_outside_the_folder_are_dropped_before_the_limit(self) -> None:
+        from hearth.domain import Evidence
+
+        class OutsideFirst:
+            def rebuild(self, chunks, **options) -> None:
+                pass
+
+            def is_current(self, chunks) -> bool:
+                return True
+
+            def search(self, question, chunks, limit=20):
+                ranked = sorted(chunks, key=lambda chunk: chunk.document_name == "garden.md")
+                return [Evidence(chunk=chunk, score=1.0) for chunk in ranked][:limit]
+
+        service, inside = self.scoped_collection(OutsideFirst())
+
+        _, record = service.trace("zebra", within=(inside,))
+
+        self.assertEqual(len(record["semantic"]), 1)
+        self.assertEqual(record["within"], ["notes"])
+
     def test_a_collection_imported_before_the_keyword_index_is_backfilled(self) -> None:
         service = HearthService(self.database)
         service.import_document(str(self.decision))
