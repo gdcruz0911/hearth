@@ -51,6 +51,9 @@ VERIFIERS = {
                "--allowedTools", "Bash({check} *)", "Bash({verify} *)"],
 }
 VERIFY_ORDER = ["codex", "claude"]
+TEST_ORDER = VERIFY_ORDER  # Test writers must run the tests they write, which headless agy cannot.
+# ponytail: a path heuristic for "test file"; a per-project test glob if a project's layout needs one.
+TEST_PATH = re.compile(r"(^|/)(tests?|spec|__tests__)/|(^|/)test_[^/]*$|_test\.[^/]+$|\.(test|spec)\.[^/]+$")
 # The spec's slots: how many runs of each kind may be active at once, across all projects.
 SLOTS = {"implement": 2, "support": 1}
 IMPLEMENT_ROLES = {"test", "implement", "fix"}
@@ -93,16 +96,25 @@ Follow VERIFY.md to show that the change on this branch does what the goal says,
 Do not edit any file outside .hearth/evidence/; Hearth stops the task if you do.
 Save the output of each command you rely on to its own file in .hearth/evidence/, and cite it as evidence/<name>.
 Commands other than `{check}` and `{verify}` may be refused.
+Make claims only about the behavior the goal asks for; Hearth already ran the project's full check, so do not run it again.
+If this environment stops you from checking something, such as a port or a network, list it under "not_checked" with the reason instead of failing a claim.
 End your reply with this JSON and nothing after it:
-{{"verdict": "verified" or "failed", "claims": [{{"claim": "what you observed", "evidence": "evidence/name.txt", "result": "pass" or "fail"}}]}}
+{{"verdict": "verified" or "failed", "claims": [{{"claim": "what you observed", "evidence": "evidence/name.txt", "result": "pass" or "fail"}}], "not_checked": ["what and why"]}}
 A verified verdict needs at least one claim, and every claim must pass and cite a file that is not empty.
-If you could not run something, say so and mark that claim fail; never claim a check you did not run.
+Never claim a check you did not run.
 {messages}
 The diff from {base} to the task branch:
 
 ```diff
 {diff}
 ```
+"""
+TEST_PROMPT = """# Task {id}: write the tests first
+
+Goal: {goal}
+{context}
+Write tests that fail now and will pass once the goal is met, and change no other file.
+Another model family will implement the goal and cannot change your tests, so test the behavior the goal asks for, not implementation details.
 """
 REVIEW_PROMPT = """# Review of task {id}
 
@@ -112,6 +124,7 @@ You are reviewing a change another model made in this worktree; do not edit any 
 Do not run commands or search the disk: the diff is below, your file tools can read the worktree, and Hearth has already run the project's check.
 Check it against the goal and, where they exist, AGENTS.md and the standards in docs/standards/, and cite a standard ID such as CLI-3 for each finding when one applies.
 Approve only when the change meets the goal, is tested, and has no problem you would block a merge for.
+Ask for changes to any edit the goal did not call for, especially one that weakens or skips a test.
 End your reply with this JSON and nothing after it:
 {{"verdict": "approve" or "changes", "findings": [{{"standard": "CLI-3", "file": "path", "line": 1, "problem": "what is wrong and why"}}]}}
 
@@ -138,6 +151,10 @@ def add_parser(subcommands: argparse._SubParsersAction) -> None:
     new.add_argument("--interactive", action="store_true", help="Open the CLI in a tmux window instead of running it headlessly; finish with task collect.")
     new.add_argument("--attach", action="append", default=[], metavar="FILE", help="Copy a file or image into the worktree and list it in the brief. May be repeated.")
     new.add_argument("--issue", type=int, metavar="N", help="Start the brief from the project's GitHub issue N.")
+    new.add_argument("--tests-first", action="store_true", help="Have another model family write failing tests first; the implementer cannot change them.")
+    new.add_argument("--approve-tests", action="store_true", help="With --tests-first, wait for you to approve the tests before implementing.")
+    approve = actions.add_parser("approve-tests", help="Approve a tests-first task's tests, then start implementing.")
+    approve.add_argument("id")
     answer = actions.add_parser("answer", help="Answer the question an agent left for you, so the task can continue.")
     answer.add_argument("id")
     answer.add_argument("text")
@@ -207,6 +224,11 @@ def run(args: argparse.Namespace) -> int:
         task["runs"][-1]["finished"] = _now()
         _drain(task, task_dir, task["runs"][-1])
         return _finish(_projects()[task["project"]], task, task_dir, None)
+    if args.task_command == "approve-tests":
+        if task["status"] != "waiting" or task["stop_reason"] != "tests_to_approve":
+            print(f"{task['id']} has no tests waiting for approval.\nNext: hearth task show {task['id']}", file=sys.stderr)
+            return 1
+        return _implement(_projects()[task["project"]], task, task_dir)
     if args.task_command == "answer":
         return _answer(task, task_dir, args.text)
     return _discard(task, task_dir, args.apply, args.discard_uncommitted)
@@ -263,6 +285,11 @@ def _new(args: argparse.Namespace) -> int:
     if provider not in project["providers"]:
         print(f"{args.project} does not allow {provider}.\nNext: add it to the project's providers, or choose one of: {', '.join(project['providers'])}", file=sys.stderr)
         return 1
+    writer = _test_writer(project, provider, args.model) if args.tests_first else None
+    if args.tests_first and (writer is None or args.interactive):
+        reason = "cannot be interactive" if args.interactive else f"needs a test writer outside {provider}'s model family"
+        print(f"--tests-first {reason}.\nNext: add codex or claude to {args.project}'s providers, or drop --tests-first", file=sys.stderr)
+        return 1
     spent = [row for row in usage.report(usage.codex_limits(Path.home() / ".codex/sessions"), usage.claude_limits(_home() / "usage/claude-limits.jsonl"))
              if row["provider"] == provider and max(row["five_hour"] or 0, row["week"] or 0) >= HEADROOM_LIMIT]
     if spent and not args.force:
@@ -305,13 +332,14 @@ def _new(args: argparse.Namespace) -> int:
     task = {
         "id": task_id, "project": args.project, "goal": goal, "base": base, "branch": f"hearth/{task_id}",
         "worktree": str(worktree), "status": "waiting" if args.interactive else "running", "stop_reason": None,
-        "created": _now(), "finished": None, "discarded": None, "copied": copied, "runs": [],
+        "created": _now(), "finished": None, "discarded": None, "copied": copied, "context": context, "runs": [],
+        "implementer": {"provider": provider, "model": args.model, "effort": args.effort, "timeout": args.timeout},
     }
     prompt = PROMPT.format(id=task_id, goal=goal, check=project["check"]) + context
+    if args.tests_first:
+        return _write_tests(project, task, task_dir, writer, args.approve_tests)
     if not args.interactive:
-        _wait_for_slot("implement", task, task_dir)
-        result = _run(task, task_dir, "implement", provider, PROVIDERS[provider], prompt, args.model, args.effort, args.timeout, project["check"])
-        return _finish(project, task, task_dir, result["stop"])
+        return _implement(project, task, task_dir)
 
     record = _record(task, task_dir, "implement", provider, args.model, args.effort, prompt)
     record["interactive"] = True
@@ -323,6 +351,48 @@ def _new(args: argparse.Namespace) -> int:
     print(f"Next: work with the agent, exit it, then hearth task collect {task_id}", file=sys.stderr)
     _attach(f"=hearth-{args.project}:{task_id}")
     return 0
+
+
+def _implement(project: dict, task: dict, task_dir: Path) -> int:
+    """Run the implementer headlessly; with tests written first, it must make them pass without changing them."""
+    implementer = task["implementer"]
+    prompt = PROMPT.format(id=task["id"], goal=task["goal"], check=project["check"]) + task.get("context", "")
+    if task.get("protected_tests"):
+        prompt += ("\nTests written first by another model family: " + ", ".join(task["protected_tests"])
+                   + ".\nMake them pass without changing them; Hearth rejects any change to these files.\n")
+    _wait_for_slot("implement", task, task_dir)
+    result = _run(task, task_dir, "implement", implementer["provider"], PROVIDERS[implementer["provider"]], prompt,
+                  implementer["model"], implementer["effort"], implementer["timeout"], project["check"])
+    return _finish(project, task, task_dir, result["stop"])
+
+
+def _write_tests(project: dict, task: dict, task_dir: Path, writer: str, approve: bool) -> int:
+    """Have another model family write tests that fail on the base commit, then protect them."""
+    _wait_for_slot("implement", task, task_dir)
+    prompt = TEST_PROMPT.format(id=task["id"], goal=task["goal"], context=task["context"]) + "\n" + INSTRUCTIONS.format(check=project["check"])
+    result = _run(task, task_dir, "test", writer, PROVIDERS[writer], prompt, None, None, task["implementer"]["timeout"], project["check"])
+    if result["stop"]:
+        return _end(task, task_dir, result["stop"])
+    paths = _checkpoint(task, task_dir)
+    if not paths:
+        return _end(task, task_dir, "no_changes")
+    if not all(TEST_PATH.search(path) for path in paths):
+        return _end(task, task_dir, "tests_touched_source")
+    if _check(project, task, task_dir) == 0:
+        return _end(task, task_dir, "tests_already_pass")  # Tests that pass before the change prove nothing about it.
+    task.update(protected_tests=paths, protected_commit=_git(Path(task["worktree"]), "rev-parse", "HEAD").strip())
+    if approve:
+        task.update(status="waiting", stop_reason="tests_to_approve")
+        _write(task_dir, task)
+        print(f"{task['id']}  waiting  tests to approve: {', '.join(paths)}")
+        print(f"Next: read them in {task['worktree']}, then hearth task approve-tests {task['id']}", file=sys.stderr)
+        return 0
+    return _implement(project, task, task_dir)
+
+
+def _test_writer(project: dict, provider: str, model: str | None) -> str | None:
+    family = _family(provider, model)
+    return next((name for name in TEST_ORDER if name in project["providers"] and _family(name, None) != family), None)
 
 
 def _record(task: dict, task_dir: Path, role: str, provider: str, model: str | None, effort: str | None, prompt: str) -> dict:
@@ -478,6 +548,7 @@ def _verify(task: dict, task_dir: Path, project: dict, family: str, timeout: int
     else:
         return {"stop": "verify_rejected", "feedback": None, "summary": ""}
     lines = "".join(f"- {claim['result']}: {claim['claim']} ({claim['evidence']})\n" for claim in verdict["claims"])
+    lines += "".join(f"- not checked: {item}\n" for item in verdict.get("not_checked", []) if isinstance(item, str))
     if verdict["verdict"] == "verified":
         return {"stop": None, "feedback": None, "summary": f"\nA verifier ran the program; its claims and evidence files:\n{lines}"}
     return {"stop": None, "summary": "", "feedback": f"A verifier from another model family ran the program, and these claims failed:\n\n{lines}"}
@@ -674,19 +745,10 @@ def _finish(project: dict, task: dict, task_dir: Path, stop_reason: str | None) 
     record = task["runs"][-1]
     run_dir = task_dir / "runs" / record["dir"]
     worktree = Path(task["worktree"])
-    if (worktree / ".hearth/artifacts").is_dir():
-        shutil.copytree(worktree / ".hearth/artifacts", run_dir / "artifacts", dirs_exist_ok=True)
-    _git(worktree, "add", "-A")
-    _git(worktree, "reset", "-q", "--", ".hearth", *_copied(task))
-    changed = subprocess.run(["git", "-C", str(worktree), "diff", "--cached", "--quiet"]).returncode != 0
-    if changed:
-        _git(worktree, "commit", "-q", "-m", f"hearth: run {record['dir'].replace('-', ' ')}")
+    changed = bool(_checkpoint(task, task_dir))
     stop_reason = stop_reason or (None if changed else "no_changes")
     if stop_reason is None:
-        check = subprocess.run(project["check"], shell=True, cwd=worktree, capture_output=True, text=True)
-        (run_dir / "checks.txt").write_text(f"$ {project['check']}\n{check.stdout}{check.stderr}\nexit code: {check.returncode}\n", encoding="utf-8")
-        record["check_exit_code"] = check.returncode
-        stop_reason = "check_failed" if check.returncode else None
+        stop_reason = "check_failed" if _check(project, task, task_dir) else None
     if stop_reason is None:
         problems = _guards(task)
         (run_dir / "guards.txt").write_text(("\n".join(problems) or "All guards passed.") + "\n", encoding="utf-8")
@@ -700,6 +762,30 @@ def _finish(project: dict, task: dict, task_dir: Path, stop_reason: str | None) 
     print(f"{task['id']}  {task['status']}{f' ({stop_reason})' if stop_reason else ''}  {worktree}")
     print(f"Next: hearth task show {task['id']}", file=sys.stderr)
     return 1 if stop_reason else 0
+
+
+def _checkpoint(task: dict, task_dir: Path) -> list[str]:
+    """Keep the last run's artifacts and commit what it changed on the task branch; returns the changed paths."""
+    record = task["runs"][-1]
+    worktree = Path(task["worktree"])
+    if (worktree / ".hearth/artifacts").is_dir():
+        shutil.copytree(worktree / ".hearth/artifacts", task_dir / "runs" / record["dir"] / "artifacts", dirs_exist_ok=True)
+    _git(worktree, "add", "-A")
+    _git(worktree, "reset", "-q", "--", ".hearth", *_copied(task))
+    paths = _git(worktree, "diff", "--cached", "--name-only").split()
+    if paths:
+        _git(worktree, "commit", "-q", "-m", f"hearth: run {record['dir'].replace('-', ' ')}")
+    return paths
+
+
+def _check(project: dict, task: dict, task_dir: Path) -> int:
+    """Run the project's check in the worktree and save its output with the last run; returns the exit code."""
+    record = task["runs"][-1]
+    check = subprocess.run(project["check"], shell=True, cwd=task["worktree"], capture_output=True, text=True)
+    (task_dir / "runs" / record["dir"] / "checks.txt").write_text(
+        f"$ {project['check']}\n{check.stdout}{check.stderr}\nexit code: {check.returncode}\n", encoding="utf-8")
+    record["check_exit_code"] = check.returncode
+    return check.returncode
 
 
 def _open(name: str) -> int:
@@ -792,6 +878,8 @@ def _show(task: dict, task_dir: Path, as_json: bool) -> None:
     print(f"receipts  {task_dir}")
     for run in task["runs"]:
         print(f"run       {run['role']} {run['provider']} {run['model'] or ''} exit {run['exit_code']}, check exit {run['check_exit_code']}")
+    for path in task.get("protected_tests", []):
+        print(f"protected {path}")
     for question in _open_questions(task_dir):
         print(f"question  {question['id']} from {question['from']}: {question['body']}")
     repo = _repo(task)

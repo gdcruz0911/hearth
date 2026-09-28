@@ -529,7 +529,12 @@ class VerifyTests(VerifyTestCase):
         run_dir = self.home / ".hearth/tasks" / task["id"] / "runs/02-verify-codex"
         self.assertTrue((run_dir / "evidence/hello.txt").read_text(encoding="utf-8"))
         self.assertIn("pass: hello.txt greets the person (evidence/hello.txt)", (self.home / ".fake-last-review-prompt").read_text(encoding="utf-8"))
-        self.assertIn("VERIFY.md", (self.home / ".fake-last-verify-prompt").read_text(encoding="utf-8"))
+        verify_prompt = (self.home / ".fake-last-verify-prompt").read_text(encoding="utf-8")
+        self.assertIn("VERIFY.md", verify_prompt)
+        self.assertIn("Hearth already ran the project's full check", verify_prompt)
+        review_prompt = (self.home / ".fake-last-review-prompt").read_text(encoding="utf-8")
+        self.assertIn("not checked: the web interface: no loopback port here", review_prompt)
+        self.assertIn("weakens or skips a test", review_prompt)
 
     def test_a_failed_claim_is_sent_back_as_a_fix_run(self) -> None:
         status, task = self.run_loop("failed,verified")
@@ -676,6 +681,60 @@ class PersonRulesTests(VerifyTestCase):
         kept = list((self.home / ".hearth/tasks" / task["id"]).glob("leftover-evidence-*/old.txt"))
         self.assertEqual([path.read_text(encoding="utf-8") for path in kept], ["from a crashed run\n"])
         self.assertFalse((Path(task["worktree"]) / ".hearth/evidence").exists())
+
+
+class TestsFirstTests(LoopTestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        patch = mock.patch.dict(tasks.PROVIDERS, {"codex": FAKE_CODEX})
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def new(self, *argv: str, check: str = "test -f hello.txt", providers: tuple[str, ...] = ("claude", "codex")) -> tuple[int, dict]:
+        self.write_projects(check=check, providers=providers)
+        status, _ = self.cli("task", "new", "demo", "Add hello.txt", "--tests-first", *argv)
+        return status, self.only_task()
+
+    def test_another_family_writes_failing_tests_that_the_implementer_must_pass_unchanged(self) -> None:
+        status, task = self.new()
+
+        self.assertEqual((status, task["status"]), (0, "done"))
+        self.assertEqual([(run["role"], run["provider"]) for run in task["runs"]], [("test", "codex"), ("implement", "claude")])
+        self.assertEqual(task["protected_tests"], ["tests/test_hello.txt"])
+        task_dir = self.home / ".hearth/tasks" / task["id"]
+        self.assertNotIn("exit code: 0", (task_dir / "runs/01-test-codex/checks.txt").read_text(encoding="utf-8"))
+        self.assertIn("tests/test_hello.txt", (task_dir / "runs/02-implement-claude/prompt.md").read_text(encoding="utf-8"))
+
+    def test_tests_that_already_pass_are_rejected(self) -> None:
+        status, task = self.new(check="true")
+
+        self.assertEqual((status, task["stop_reason"], len(task["runs"])), (1, "tests_already_pass", 1))
+
+    def test_a_test_run_that_changes_source_is_rejected(self) -> None:
+        os.environ["FAKE_TESTS"] = "source"
+
+        status, task = self.new()
+
+        self.assertEqual((status, task["stop_reason"]), (1, "tests_touched_source"))
+
+    def test_approve_tests_waits_for_the_person_before_implementing(self) -> None:
+        status, task = self.new("--approve-tests")
+        self.assertEqual((status, task["status"], task["stop_reason"], len(task["runs"])), (0, "waiting", "tests_to_approve", 1))
+        _, shown = self.cli("task", "show", task["id"])
+        self.assertIn("tests/test_hello.txt", shown)
+
+        approved, _ = self.cli("task", "approve-tests", task["id"])
+
+        task = self.only_task()
+        self.assertEqual((approved, task["status"], [run["role"] for run in task["runs"]]), (0, "done", ["test", "implement"]))
+
+    def test_tests_first_needs_a_test_writer_from_another_family(self) -> None:
+        self.write_projects(check="test -f hello.txt", providers=("claude",))
+
+        status, _ = self.cli("task", "new", "demo", "Add hello.txt", "--tests-first")
+
+        self.assertEqual(status, 1)
+        self.assertFalse((self.home / ".hearth/tasks").exists())
 
 
 class ProviderResultTests(unittest.TestCase):
