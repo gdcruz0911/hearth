@@ -51,10 +51,12 @@ logs/
 !tests/fixtures/public/
 !tests/fixtures/public/**/*.pdf
 
-# Markdown stays on this Mac for now, except the README, the command list, and the public test fixtures the tests read.
+# Markdown stays on this Mac for now, except the README, the command list, the reviewer guide Hearth reads from a task's base commit,
+# and the public test fixtures the tests read.
 *.md
 !/README.md
 !/docs/commands.md
+!/docs/agents/review.md
 !tests/fixtures/public/*.md
 
 # Private question sets and relationship labels (knowledge track) stay on this Mac.
