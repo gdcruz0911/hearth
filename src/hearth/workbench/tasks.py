@@ -46,7 +46,8 @@ REVIEW_ORDER = ["antigravity", "claude", "codex"]
 # silently change what checks the work; --model still overrides, and implementation keeps the CLI's default.
 # agy also runs Claude and GPT-OSS models, so its pin names a Gemini model to stay in another family.
 CHECK_MODELS = {"codex": "gpt-6-luna", "claude": "sonnet", "antigravity": "gemini-3.1-pro-high"}
-CHECK_ROLES = {"test", "verify", "review"}
+CHECK_ROLES = {"test", "verify", "review", "retro"}
+RETRO_KINDS = ("test", "verify", "standard", "eval")  # In order of preference: a regression test is deterministic.
 # Verifiers run the real program, so they need commands: Codex in its workspace sandbox, and Claude limited to the
 # project's check and its "verify" command prefix. Headless agy refuses unlisted commands, so it cannot verify.
 VERIFIERS = {
@@ -59,7 +60,7 @@ TEST_ORDER = VERIFY_ORDER  # Test writers must run the tests they write, which h
 # ponytail: a path heuristic for "test file"; a per-project test glob if a project's layout needs one.
 TEST_PATH = re.compile(r"(^|/)(tests?|spec|__tests__)/|(^|/)test_[^/]*$|_test\.[^/]+$|\.(test|spec)\.[^/]+$")
 # Effort per role when none is given: judgment roles think harder than the runs that write code.
-ROLE_EFFORT = {"test": "high", "verify": "high", "review": "high", "implement": "medium", "fix": "medium"}
+ROLE_EFFORT = {"test": "high", "verify": "high", "review": "high", "retro": "high", "implement": "medium", "fix": "medium"}
 # The spec's slots: how many runs of each kind may be active at once, across all projects.
 SLOTS = {"implement": 2, "support": 1}
 IMPLEMENT_ROLES = {"test", "implement", "fix"}
@@ -124,6 +125,26 @@ Goal: {goal}
 Write tests that fail now and will pass once the goal is met, and change no other file.
 Another model family will implement the goal and cannot change your tests, so test the behavior the goal asks for, not implementation details.
 """
+RETRO_PROMPT = """# Retro for task {id}
+
+Goal: {goal}
+
+This task passed every gate, but the person found these problems afterwards:
+{escapes}
+Propose one permanent change for each problem so the same kind is caught next time, preferring, in order:
+a regression test, because it is deterministic; a VERIFY.md step; a standard in docs/standards/; or a new seeded evaluation case.
+Do not edit any file or run commands; the person approves or edits each proposal before anything changes.
+End your reply with this JSON and nothing after it:
+{{"proposals": [{{"escape": 1, "kind": "test" or "verify" or "standard" or "eval", "where": "path", "change": "what to add and why"}}]}}
+
+What each run did:
+{runs}{messages}
+The diff from {base} to the task branch:
+
+```diff
+{diff}
+```
+"""
 REVIEW_PROMPT = """# Review of task {id}
 
 Goal: {goal}
@@ -161,6 +182,11 @@ def add_parser(subcommands: argparse._SubParsersAction) -> None:
     new.add_argument("--issue", type=int, metavar="N", help="Start the brief from the project's GitHub issue N.")
     new.add_argument("--tests-first", action="store_true", help="Have another model family write failing tests first; the implementer cannot change them.")
     new.add_argument("--approve-tests", action="store_true", help="With --tests-first, wait for you to approve the tests before implementing.")
+    escape = actions.add_parser("escape", help="Record a problem found after the task passed every gate.")
+    escape.add_argument("id")
+    escape.add_argument("text", help="What was missed.")
+    retro = actions.add_parser("retro", help="Have another model family propose one permanent fix per escape, for you to approve.")
+    retro.add_argument("id")
     approve = actions.add_parser("approve-tests", help="Approve a tests-first task's tests, then start implementing.")
     approve.add_argument("id")
     answer = actions.add_parser("answer", help="Answer the question an agent left for you, so the task can continue.")
@@ -232,6 +258,14 @@ def run(args: argparse.Namespace) -> int:
         task["runs"][-1]["finished"] = _now()
         _drain(task, task_dir, task["runs"][-1])
         return _finish(_projects()[task["project"]], task, task_dir, None)
+    if args.task_command == "escape":
+        task.setdefault("escapes", []).append({"at": _now(), "text": args.text})
+        _write(task_dir, task)
+        print(f"Recorded escape {len(task['escapes'])} on {task['id']}.")
+        print(f"Next: hearth task retro {task['id']}", file=sys.stderr)
+        return 0
+    if args.task_command == "retro":
+        return _retro(task, task_dir)
     if args.task_command == "approve-tests":
         if task["status"] != "waiting" or task["stop_reason"] != "tests_to_approve":
             print(f"{task['id']} has no tests waiting for approval.\nNext: hearth task show {task['id']}", file=sys.stderr)
@@ -740,6 +774,69 @@ def _codex_model() -> str | None:
         return None
 
 
+def _retro(task: dict, task_dir: Path) -> int:
+    """Ask a read-only agent from another model family for one permanent fix per escape; the person approves each."""
+    escapes = task.get("escapes", [])
+    if not escapes:
+        print(f"{task['id']} has no escapes.\nNext: hearth task escape {task['id']} \"<what was missed>\"", file=sys.stderr)
+        return 1
+    project = _projects()[task["project"]]
+    implementer = next(run for run in task["runs"] if run["role"] == "implement")
+    family = _family(implementer["provider"], implementer["model"])
+    agents = [name for name in REVIEW_ORDER if name in project["providers"] and _family(name, CHECK_MODELS.get(name)) != family]
+    if not agents:
+        print(f"No allowed agent outside the {family} model family.\nNext: add another provider to {task['project']}'s providers", file=sys.stderr)
+        return 1
+    saved = {key: task[key] for key in ("status", "stop_reason", "worktree")}
+    if not Path(task["worktree"]).exists():  # Discarded after merging: the receipts still hold the diff and outcomes.
+        (task_dir / "retro-work").mkdir(exist_ok=True)
+        task["worktree"] = str(task_dir / "retro-work")
+    diff = (task_dir / "diff.patch").read_text(encoding="utf-8") if (task_dir / "diff.patch").exists() else ""
+    prompt = RETRO_PROMPT.format(
+        id=task["id"], goal=task["goal"], base=task["base"][:12], diff=diff[:100_000], messages=_messages(task_dir, "retro"),
+        escapes="".join(f"{number}. {escape['text']}\n" for number, escape in enumerate(escapes, 1)),
+        runs="".join(f"- {run.get('dir', '')[:2]} {run['role']} {run['provider']}: {_outcome(run)}\n" for run in task["runs"]))
+    proposals = None
+    for agent in agents:
+        _wait_for_slot("support", task, task_dir)
+        result = _run(task, task_dir, "retro", agent, REVIEWERS[agent], prompt, None, None, 1800, project["check"])
+        proposals = None if result["stop"] else _proposals(result["final"], len(escapes))
+        if proposals or result["stop"] == "timeout":
+            break  # An empty or unreadable retro falls back to the next agent, as a review does.
+    task.update(saved)
+    if not proposals:
+        _write(task_dir, task)
+        print(f"{task['id']}: no readable proposal; see the retro run's report.\nNext: hearth task show {task['id']}", file=sys.stderr)
+        return 1
+    for number, proposal in proposals.items():
+        escapes[number - 1]["proposal"] = proposal
+        print(f"escape {number}: {escapes[number - 1]['text']}")
+        print(f"  proposal ({proposal['kind']}, {proposal.get('where') or 'no path'}): {proposal['change']}")
+        if proposal["kind"] in ("test", "eval"):
+            print(f"  approve by running, or editing first: hearth task new {task['project']} {shlex.quote(proposal['change'])} --tests-first")
+        else:
+            print(f"  approve by adding it to {proposal.get('where') or 'the file it names'} yourself; those docs stay on this Mac")
+    _write(task_dir, task)
+    return 0
+
+
+def _proposals(text: str, count: int) -> dict[int, dict] | None:
+    """The last JSON object in a retro reply that proposes a valid change for every escape, keyed by escape number."""
+    decoder = json.JSONDecoder()
+    for index in reversed([i for i, character in enumerate(text) if character == "{"]):
+        try:
+            value, _ = decoder.raw_decode(text[index:])
+        except json.JSONDecodeError:
+            continue
+        if not (isinstance(value, dict) and isinstance(value.get("proposals"), list)):
+            continue
+        found = {item["escape"]: item for item in value["proposals"]
+                 if isinstance(item, dict) and item.get("kind") in RETRO_KINDS and isinstance(item.get("change"), str)
+                 and item["change"].strip() and isinstance(item.get("escape"), int) and 1 <= item["escape"] <= count}
+        return found if len(found) == count else None
+    return None
+
+
 def _verdict(text: str, verdicts: tuple[str, str] = ("approve", "changes"), items: str = "findings") -> dict | None:
     """Find the last JSON object in a reply that is a well-formed review or verification verdict."""
     decoder = json.JSONDecoder()
@@ -950,6 +1047,10 @@ def _show(task: dict, task_dir: Path, as_json: bool) -> None:
         print(f"run       {run.get('dir', f'{index:02d}')[:2]} {run['role']:<10} {run['provider']:<12} {model:<22} {run.get('effort') or '-':<7} {_outcome(run)}")
     for path in task.get("protected_tests", []):
         print(f"protected {path}")
+    for number, escape in enumerate(task.get("escapes", []), 1):
+        print(f"escape    {number}: {escape['text']}")
+        if escape.get("proposal"):
+            print(f"          proposal ({escape['proposal']['kind']}): {escape['proposal']['change']}")
     for question in _open_questions(task_dir):
         print(f"question  {question['id']} from {question['from']}: {question['body']}")
     repo = _repo(task)
