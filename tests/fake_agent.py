@@ -1,8 +1,8 @@
 """A stand-in provider CLI for workbench tests.
 
 It reads the prompt on standard input and prints Claude-format stream events, or another CLI's after `--as codex` or `--as antigravity`.
-The scenario comes from FAKE_AGENT_SCENARIO: edit, idle, fail, auth, or hang.
-A prompt that starts with "# Review" is answered with the next verdict in FAKE_REVIEWS: approve, changes, elsewhere, or garbage.
+The scenario comes from FAKE_AGENT_SCENARIO: edit, rewrite, idle, fail, auth, or hang.
+A prompt that starts with "# Review" is answered with the next verdict in FAKE_REVIEWS: approve, changes, elsewhere, second-line, or garbage.
 A prompt that starts with "# Verify" follows the next scenario in FAKE_VERIFY: verified, failed, missing, edit, or garbage.
 A test-writing prompt writes tests/test_hello.txt, plus notes.txt when FAKE_TESTS is "source".
 An editing or idle run also writes FAKE_OUTBOX, if set, to .hearth/outbox.jsonl as board messages,
@@ -23,6 +23,7 @@ VERDICTS = {
     "approve": 'Looks good.\n{"verdict": "approve", "findings": []}',
     "changes": 'One problem.\n{"verdict": "changes", "findings": [{"standard": "CLI-3", "file": "hello.txt", "line": 1, "problem": "Say hello."}]}',
     "elsewhere": 'One problem.\n{"verdict": "changes", "findings": [{"standard": "CLI-3", "file": "notes.txt", "line": 1, "problem": "Add notes."}]}',
+    "second-line": 'One problem.\n{"verdict": "changes", "findings": [{"standard": "CLI-3", "file": "hello.txt", "line": 2, "problem": "Line two is wrong."}]}',
     "garbage": "I think it is fine.",
 }
 
@@ -102,6 +103,8 @@ def main() -> int:
     if scenario == "idle":
         finish("")
         return 0
+    if scenario == "rewrite":
+        Path("hello.txt").write_text("rewritten\n", encoding="utf-8")
     with Path("hello.txt").open("a", encoding="utf-8") as file:
         file.write(prompt.splitlines()[0] + "\n" + os.environ.get("FAKE_EXTRA", ""))
     Path(".hearth/artifacts").mkdir(parents=True, exist_ok=True)
