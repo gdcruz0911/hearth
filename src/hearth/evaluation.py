@@ -11,6 +11,12 @@ class EvaluationCorpusError(ValueError):
     """Raised when an evaluation corpus does not follow the local schema."""
 
 
+# Every case carries one of these labels. Only the first two are scored; the rest are recorded but never
+# counted as successes or failures, so contradicted premises and conflicting evidence stay unevaluated.
+LABELS = ("supported", "unsupported", "contradicted premise", "conflicting evidence", "ambiguous question")
+SCORED_LABELS = ("supported", "unsupported")
+
+
 @dataclass(frozen=True)
 class ExpectedCitation:
     document_name: str
@@ -131,3 +137,35 @@ def _evaluate_case(service: HearthService, case: EvaluationCase) -> EvaluationOu
         ):
             errors.append(f"missing expected citation for {expected.document_name} page {expected.page_number}")
     return EvaluationOutcome(case_id=case.id, passed=not errors, errors=tuple(errors))
+
+
+def record_question_set(service: HearthService, path: Path) -> list[dict[str, object]]:
+    """Run each question of a labeled set against the existing collection and return one full record per question.
+
+    Nothing is imported. A supported case succeeds when a citation contains its expected phrase, an unsupported
+    case when Hearth abstains; excluded cases and every other label are recorded as not scored.
+    """
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise EvaluationCorpusError("The question set is missing or is not valid UTF-8 JSON.") from exc
+    cases = payload.get("cases") if isinstance(payload, dict) else None
+    if not isinstance(cases, list) or not cases:
+        raise EvaluationCorpusError("The question set requires at least one case.")
+    records = []
+    for index, case in enumerate(cases, start=1):
+        if not isinstance(case, dict) or case.get("label") not in LABELS:
+            raise EvaluationCorpusError(f"Question {index} needs a label, one of: {', '.join(LABELS)}.")
+        question = _required_string(case, "question", index)
+        case_id = _required_string(case, "id", index)
+        quote = _required_string(case, "quote_contains", index) if case["label"] == "supported" else None
+        answer, trace = service.trace(question)
+        if case.get("excluded") or case["label"] not in SCORED_LABELS:
+            outcome = "not scored"
+        elif quote is not None:
+            outcome = "success" if any(quote in citation.quote for citation in answer.citations) else "failure"
+        else:
+            outcome = "success" if answer.status == "abstained" else "failure"
+        records.append({"id": case_id, "label": case["label"], "excluded": bool(case.get("excluded")),
+                        "expected_quote": quote, "outcome": outcome, **trace})
+    return records

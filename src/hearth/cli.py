@@ -17,8 +17,11 @@ from .domain import (
 from .embedding import EmbeddingError, FlatVectorIndex, IndexError, MLXEmbedder
 from .evaluation import (
     EvaluationCorpusError,
+    LABELS,
+    SCORED_LABELS,
     evaluate_corpus,
     load_evaluation_corpus,
+    record_question_set,
 )
 from .retrieval import MLXLocalReranker, RerankerError
 from .runtime import (
@@ -113,6 +116,11 @@ def main(argv: list[str] | None = None) -> int:
     web.add_argument("--no-open", action="store_true", help="Do not open the local interface in the default browser.")
     evaluator = subcommands.add_parser("evaluate", help="Run a local synthetic or public evaluation corpus.")
     evaluator.add_argument("corpus", type=Path)
+    recorder = subcommands.add_parser(
+        "evaluate-questions", help="Record every retrieval stage for a labeled question set against the current collection."
+    )
+    recorder.add_argument("question_set", type=Path)
+    recorder.add_argument("--out", type=Path, required=True, help="JSON Lines file for one record per question.")
     profile = subcommands.add_parser("profile", help="Create one private runtime profile for repeatable Hearth commands.")
     profile_commands = profile.add_subparsers(dest="profile_command", required=True)
     profile_create = profile_commands.add_parser("create", help="Create a new profile without overwriting an existing file.")
@@ -256,6 +264,10 @@ def main(argv: list[str] | None = None) -> int:
             passed_count = sum(outcome.passed for outcome in outcomes)
             print(f"Summary: {passed_count}/{len(outcomes)} cases passed.")
             return 0 if passed_count == len(outcomes) else 1
+        elif args.command == "evaluate-questions":
+            records = record_question_set(service, args.question_set)
+            args.out.write_text("".join(json.dumps(record) + "\n" for record in records), encoding="utf-8")
+            _print_question_set_summary(records, args.out)
         elif args.command == "search":
             answer = service.answer(args.question, keyword_only=args.keyword)
             _print_answer(answer)
@@ -399,6 +411,18 @@ def _collection_health_json(health: CollectionHealth) -> dict:
             for attention in health.source_attention
         ],
     }
+
+
+def _print_question_set_summary(records: list[dict], out: Path) -> None:
+    for label in SCORED_LABELS:
+        scored = [record for record in records if record["label"] == label and record["outcome"] != "not scored"]
+        print(f"{label}: {sum(record['outcome'] == 'success' for record in scored)} of {len(scored)} succeeded")
+    unscored = [record for record in records if record["outcome"] == "not scored"]
+    by_label = ", ".join(f"{label} {sum(record['label'] == label for record in unscored)}" for label in LABELS
+                         if any(record["label"] == label for record in unscored))
+    print(f"Not scored: {len(unscored)}" + (f" ({by_label})" if by_label else ""))
+    print("Contradicted premises and conflicting evidence are not evaluated by these results.")
+    print(f"Records: {out}")
 
 
 def _print_answer(answer) -> None:
