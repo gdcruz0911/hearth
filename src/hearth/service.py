@@ -213,22 +213,45 @@ class HearthService:
 
     def answer(self, question: str, *, keyword_only: bool = False) -> Answer:
         """Answer from cited evidence or abstain; keyword_only skips semantic search for exact lookups."""
+        return self.trace(question, keyword_only=keyword_only)[0]
+
+    def trace(self, question: str, *, keyword_only: bool = False) -> tuple[Answer, dict[str, object]]:
+        """Answer exactly as answer() does, with a record of every stage for evaluation.
+
+        The record holds chunk IDs and scores only, never chunk text: keyword ranks, semantic and fused scores,
+        the reranker's score for every candidate, the citations, and the lexical-support gate's decision.
+        """
+        record: dict[str, object] = {
+            "question": question, "keyword_only": keyword_only, "reranker": type(self._reranker).__name__,
+            "keyword": [], "semantic": [], "fused": [], "reranked": [], "citations": [],
+            "lexical_support": None, "status": "abstained",
+        }
         if not question.strip():
-            return Answer.abstain()
+            return Answer.abstain(), record
         chunks = self._store.list_chunks()
         # Hybrid retrieval: BM25 finds exact words such as flags and ADR numbers, embeddings find paraphrases.
         chunks_by_id = {chunk.id: chunk for chunk in chunks}
-        rankings = [[Evidence(chunk=chunks_by_id[chunk_id], score=0.0) for chunk_id in self._store.keyword_search(terms(question))]]
+        keyword = [Evidence(chunk=chunks_by_id[chunk_id], score=0.0) for chunk_id in self._store.keyword_search(terms(question))]
+        record["keyword"] = [item.chunk.id for item in keyword]
+        rankings = [keyword]
         if self._semantic_index is not None and not keyword_only:
-            rankings.append(self._semantic_index.search(question, chunks, limit=20))
+            semantic = self._semantic_index.search(question, chunks, limit=20)
+            record["semantic"] = _scored(semantic)
+            rankings.append(semantic)
         candidates = reciprocal_rank_fusion(rankings, limit=20)
-        evidence = self._reranker.rerank(question, candidates, limit=6)
+        record["fused"] = _scored(candidates)
+        # Rerank every candidate so each score is recorded; the six cited are the same six a limit of six returns.
+        reranked = self._reranker.rerank(question, candidates, limit=len(candidates))
+        record["reranked"] = _scored(reranked)
+        evidence = reranked[:6]
         answer = validate_answer(self._answerer.answer(question, evidence), evidence)
-        if answer.status == "supported" and not has_lexical_support(
-            question, [citation.quote for citation in answer.citations]
-        ):
-            return Answer.abstain()
-        return answer
+        if answer.status == "supported":
+            record["lexical_support"] = has_lexical_support(question, [citation.quote for citation in answer.citations])
+            if not record["lexical_support"]:
+                answer = Answer.abstain()
+        record["citations"] = [citation.chunk_id for citation in answer.citations]
+        record["status"] = answer.status
+        return answer, record
 
     def document_relationships(self, *, limit: int = 12) -> list[DocumentRelationship]:
         """Return only relationships substantiated by the active local semantic index."""
@@ -276,6 +299,10 @@ class HearthService:
             semantic_index_status=self.collection_health().semantic_index_status,
             ocr_artifact_status=ocr_artifact_status,
         )
+
+def _scored(items: list[Evidence]) -> list[list[float]]:
+    return [[item.chunk.id, round(item.score, 5)] for item in items]
+
 
 def _validated_local_file(raw_path: str) -> Path:
     path = _validated_local_path(raw_path)

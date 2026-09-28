@@ -69,6 +69,24 @@ class CollectionInspectionCliTests(unittest.TestCase):
         self.assertNotIn("The deployment owner is Ada.", output.getvalue())
         self.assertNotIn(str(self.root), output.getvalue())
 
+    def test_evaluate_questions_writes_records_and_says_what_is_not_evaluated(self) -> None:
+        question_set = self.root / "questions.json"
+        question_set.write_text(json.dumps({"cases": [
+            {"id": "owner", "question": "Who is the deployment owner?", "label": "supported", "quote_contains": "Ada"},
+            {"id": "conflict", "question": "When was it due?", "label": "conflicting evidence", "excluded": True},
+        ]}), encoding="utf-8")
+        records = self.root / "records.jsonl"
+        output = io.StringIO()
+
+        with contextlib.redirect_stdout(output):
+            exit_code = main(["--database", str(self.database), "evaluate-questions", str(question_set), "--out", str(records)])
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(len(records.read_text(encoding="utf-8").splitlines()), 2)
+        self.assertIn("supported: 1 of 1 succeeded", output.getvalue())
+        self.assertIn("Not scored: 1 (conflicting evidence 1)", output.getvalue())
+        self.assertIn("Contradicted premises and conflicting evidence are not evaluated", output.getvalue())
+
     def test_list_empty_collection_explains_how_to_start(self) -> None:
         empty_database = self.root / "empty.sqlite"
         output = io.StringIO()

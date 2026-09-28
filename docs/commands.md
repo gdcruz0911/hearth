@@ -17,6 +17,7 @@ A test fails when a command is missing from this table, so it grows with every p
 | `hearth sources import` | Import the eligible files the preview listed. |
 | `hearth web` | Open the local web interface on this Mac only. |
 | `hearth evaluate <corpus>` | Run a synthetic or public evaluation corpus. |
+| `hearth evaluate-questions <question-set> --out <records.jsonl>` | Record every retrieval stage for a labeled question set against the current collection, scoring only supported and unsupported cases. |
 | `hearth profile create <path>` | Create a private runtime profile. |
 | `hearth usage` | Show five-hour and weekly plan use for Claude, Codex, and Antigravity. |
 | `hearth usage statusline` | Record Claude's limits from its status line JSON. |

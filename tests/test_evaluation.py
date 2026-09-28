@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 
 from hearth.evaluation import (
+    record_question_set,
     EvaluationCorpusError,
     evaluate_corpus,
     load_evaluation_corpus,
@@ -101,3 +102,59 @@ class EvaluationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class QuestionSetRecordTests(unittest.TestCase):
+    def test_every_stage_is_recorded_and_only_supported_and_unsupported_cases_are_scored(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "operations.md").write_text("# Operations\n\nThe deployment owner is Ada.\n", encoding="utf-8")
+            service = HearthService(root / "hearth.sqlite")
+            self.addCleanup(service.close)
+            service.import_document(str(root / "operations.md"))
+            question_set = root / "questions.json"
+            question_set.write_text(json.dumps({"cases": [
+                {"id": "owner", "question": "Who is the deployment owner?", "label": "supported", "quote_contains": "Ada"},
+                {"id": "none", "question": "Which zebra won?", "label": "unsupported"},
+                {"id": "vague", "question": "Who owns it?", "label": "ambiguous question"},
+                {"id": "premise", "question": "Why did Ada resign?", "label": "contradicted premise"},
+                {"id": "held", "question": "Who is the deployment owner?", "label": "supported", "quote_contains": "Ada", "excluded": True},
+            ]}), encoding="utf-8")
+
+            records = {record["id"]: record for record in record_question_set(service, question_set)}
+            answer = service.answer("Who is the deployment owner?")
+
+        self.assertEqual({key: record["outcome"] for key, record in records.items()},
+                         {"owner": "success", "none": "success", "vague": "not scored", "premise": "not scored", "held": "not scored"})
+        owner = records["owner"]
+        self.assertTrue(owner["keyword"] and owner["fused"] and owner["reranked"])
+        self.assertEqual((owner["status"], owner["lexical_support"]), ("supported", True))
+        self.assertEqual(owner["citations"], [citation.chunk_id for citation in answer.citations])
+        self.assertEqual(records["none"]["status"], "abstained")
+        self.assertNotIn("Ada", json.dumps(owner["reranked"]))
+
+    def test_answers_cite_six_chunks_while_the_record_keeps_every_candidate(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            service = HearthService(root / "hearth.sqlite")
+            self.addCleanup(service.close)
+            for number in range(8):
+                note = root / f"team-{number}.md"
+                note.write_text(f"The deployment owner for team {number} is person {number}.", encoding="utf-8")
+                service.import_document(str(note))
+
+            answer, record = service.trace("Who is the deployment owner?")
+
+        self.assertEqual((len(answer.citations), len(record["citations"])), (6, 6))
+        self.assertEqual((len(record["fused"]), len(record["reranked"])), (8, 8))
+
+    def test_a_case_without_one_of_the_five_labels_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            question_set = Path(directory) / "questions.json"
+            question_set.write_text(json.dumps({"cases": [{"id": "x", "question": "Who?", "label": "unanswerable"}]}), encoding="utf-8")
+            service = HearthService(Path(directory) / "hearth.sqlite")
+            self.addCleanup(service.close)
+
+            with self.assertRaisesRegex(EvaluationCorpusError, "needs a label"):
+                record_question_set(service, question_set)
+
