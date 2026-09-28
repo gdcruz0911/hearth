@@ -107,7 +107,9 @@ Goal: {goal}
 
 Follow VERIFY.md to show that the change on this branch does what the goal says, by running the real program rather than reading code.
 Do not edit any file outside .hearth/evidence/; Hearth stops the task if you do.
+Files the program writes on its own when run, such as __pycache__, are not edits: leave them and do not report them.
 Save the output of each command you rely on to its own file in .hearth/evidence/, and cite it as evidence/<name>.
+Each claim cites exactly one evidence file; split a claim that needs several.
 Commands other than `{check}` and `{verify}` may be refused.
 Make claims only about the behavior the goal asks for; Hearth already ran the project's full check, so do not run it again.
 If this environment stops you from checking something, such as a port or a network, list it under "not_checked" with the reason instead of failing a claim.
@@ -649,7 +651,9 @@ def _verify(task: dict, task_dir: Path, project: dict, family: str, timeout: int
 
 def _uncommitted(task: dict) -> str:
     """Changed or new files in the worktree outside Hearth's own folder and the files Hearth copied in."""
-    return _git(Path(task["worktree"]), "status", "--porcelain", "--", ".", ":(exclude).hearth", *[f":(exclude){name}" for name in _copied(task)])
+    # Caches the program writes when run are not work; listing every untracked file lets the exclusion see inside new folders.
+    return _git(Path(task["worktree"]), "status", "--porcelain", "--untracked-files=all", "--", ".", ":(exclude).hearth",
+                ":(exclude,glob)**/__pycache__/**", *[f":(exclude){name}" for name in _copied(task)])
 
 
 def _copied(task: dict) -> list[str]:
@@ -670,6 +674,8 @@ def _evidence_problems(run_dir: Path, verdict: dict) -> list[str]:
             problems.append(f"{cited or 'a claim'} has no pass or fail result")
     if verdict["verdict"] == "verified" and any(claim.get("result") != "pass" for claim in verdict["claims"]):
         problems.append("a verified verdict includes a claim that did not pass")
+    if verdict["verdict"] == "failed" and not any(claim.get("result") == "fail" for claim in verdict["claims"]):
+        problems.append("a failed verdict has no failing claim")
     return problems
 
 
