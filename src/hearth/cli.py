@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import json
+import sys
 from pathlib import Path
 
 from .domain import (
@@ -98,6 +100,7 @@ def main(argv: list[str] | None = None) -> int:
     subcommands.add_parser("health", help="Summarize private collection health without document text or source paths.")
     inspector = subcommands.add_parser("inspect", help="Inspect one document's local provenance metadata.")
     inspector.add_argument("document_id", type=int)
+    inspector.add_argument("--json", action="store_true", help="Print the document's provenance metadata as one JSON value.")
     sources = subcommands.add_parser("sources", help="Preview or import supported files from connected local folders.")
     sources.add_argument("action", choices=("preview", "import"))
     web = subcommands.add_parser("web", help="Run the local Hearth web interface on this Mac only.")
@@ -205,10 +208,17 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "inspect":
             inspection = service.inspect_document(args.document_id)
             if inspection is None:
-                print(f"No imported document with ID {args.document_id}.")
-                print("Next: run list to review imported documents and their IDs.")
+                if args.json:
+                    print(json.dumps({"error": f"No imported document with ID {args.document_id}."}))
+                    print("Next: run list to review imported documents and their IDs.", file=sys.stderr)
+                else:
+                    print(f"No imported document with ID {args.document_id}.")
+                    print("Next: run list to review imported documents and their IDs.")
                 return 1
-            _print_document_inspection(inspection)
+            if args.json:
+                print(json.dumps(_document_inspection_json(inspection)))
+            else:
+                _print_document_inspection(inspection)
         elif args.command == "sources":
             plan = service.plan_source_import(args.source_roots)
             if args.action == "preview":
@@ -393,6 +403,30 @@ def _print_document_inspection(inspection: DocumentInspection) -> None:
         print(f"Page {page.page_number} ({', '.join(metadata)})")
         for chunk in page.chunks:
             print(f"  Chunk {chunk.id} (characters: {chunk.char_start}-{chunk.char_end})")
+
+
+def _document_inspection_json(inspection: DocumentInspection) -> dict:
+    document = inspection.document
+    return {
+        "id": document.id,
+        "name": document.name,
+        "page_count": document.page_count,
+        "chunk_count": document.chunk_count,
+        "ocr_page_count": document.ocr_page_count,
+        "pages": [
+            {
+                "page_number": page.page_number,
+                "section": page.section,
+                "extraction_method": page.extraction_method,
+                "ocr_confidence": page.ocr_confidence,
+                "chunks": [
+                    {"id": chunk.id, "char_start": chunk.char_start, "char_end": chunk.char_end}
+                    for chunk in page.chunks
+                ],
+            }
+            for page in inspection.pages
+        ],
+    }
 
 
 if __name__ == "__main__":

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+import json
 import re
 import tempfile
 import unittest
@@ -25,6 +26,20 @@ class OcrPdfExtractor:
                 ),
             ),
         )
+
+
+def _metadata_objects(value: object) -> list[dict]:
+    if isinstance(value, dict):
+        records = [value]
+        for child in value.values():
+            records.extend(_metadata_objects(child))
+        return records
+    if isinstance(value, list):
+        records = []
+        for child in value:
+            records.extend(_metadata_objects(child))
+        return records
+    return []
 
 
 class CollectionInspectionCliTests(unittest.TestCase):
@@ -200,10 +215,45 @@ class CollectionInspectionCliTests(unittest.TestCase):
         with contextlib.redirect_stdout(output):
             exit_code = main(["--database", str(self.database), "inspect", str(self.document_id)])
 
+        service = HearthService(self.database)
+        chunk = service.inspect_document(self.document_id).pages[0].chunks[0]
+        service.close()
         self.assertEqual(exit_code, 0)
-        self.assertIn(f"Document {self.document_id}: operations.md", output.getvalue())
-        self.assertIn("Page 1 (section: Operations, extraction: native, chunks: 1)", output.getvalue())
-        self.assertRegex(output.getvalue(), r"Chunk \d+ \(characters: 0-\d+\)")
+        self.assertEqual(
+            output.getvalue(),
+            f"Document {self.document_id}: operations.md\n"
+            "Page 1 (section: Operations, extraction: native, chunks: 1)\n"
+            f"  Chunk {chunk.id} (characters: {chunk.char_start}-{chunk.char_end})\n",
+        )
+        self.assertNotIn("The deployment owner is Ada.", output.getvalue())
+        self.assertNotIn(str(self.root), output.getvalue())
+
+    def test_inspect_json_reports_document_page_and_chunk_provenance(self) -> None:
+        output = io.StringIO()
+
+        with contextlib.redirect_stdout(output):
+            exit_code = main(["--database", str(self.database), "inspect", str(self.document_id), "--json"])
+
+        self.assertEqual(exit_code, 0)
+        records = _metadata_objects(json.loads(output.getvalue()))
+        self.assertTrue(any(record.get("id") == self.document_id and record.get("name") == "operations.md" for record in records))
+        self.assertTrue(
+            any(
+                record.get("page_number") == 1
+                and record.get("section") == "Operations"
+                and record.get("extraction_method") == "native"
+                for record in records
+            )
+        )
+        self.assertTrue(
+            any(
+                isinstance(record.get("id"), int)
+                and record.get("char_start") == 0
+                and isinstance(record.get("char_end"), int)
+                and record["char_end"] > 0
+                for record in records
+            )
+        )
         self.assertNotIn("The deployment owner is Ada.", output.getvalue())
         self.assertNotIn(str(self.root), output.getvalue())
 
@@ -218,6 +268,18 @@ class CollectionInspectionCliTests(unittest.TestCase):
             output.getvalue(),
             "No imported document with ID 999.\nNext: run list to review imported documents and their IDs.\n",
         )
+
+    def test_inspect_json_returns_one_json_value_for_unknown_document(self) -> None:
+        output = io.StringIO()
+        error = io.StringIO()
+
+        with contextlib.redirect_stdout(output), contextlib.redirect_stderr(error):
+            exit_code = main(["--database", str(self.database), "inspect", "999", "--json"])
+
+        self.assertEqual(exit_code, 1)
+        payload = json.loads(output.getvalue())
+        self.assertEqual(payload, {"error": "No imported document with ID 999."})
+        self.assertIn("Next: run list to review imported documents and their IDs.", error.getvalue())
 
     def test_search_abstention_suggests_safe_next_actions(self) -> None:
         output = io.StringIO()
@@ -268,6 +330,31 @@ class CollectionInspectionCliTests(unittest.TestCase):
         self.assertIn("OCR confidence: 0.92", output.getvalue())
         self.assertIn("OCR warning: verify against the original document", output.getvalue())
         self.assertNotIn("OCR-derived archive metadata.", output.getvalue())
+
+    def test_inspect_json_reports_ocr_provenance_without_document_text(self) -> None:
+        pdf = self.root / "scanned.pdf"
+        pdf.write_bytes(b"placeholder")
+        service = HearthService(self.database, pdf_extractor=OcrPdfExtractor())
+        document_id = service.import_document(str(pdf))
+        service.close()
+        output = io.StringIO()
+
+        with contextlib.redirect_stdout(output):
+            exit_code = main(["--database", str(self.database), "inspect", str(document_id), "--json"])
+
+        self.assertEqual(exit_code, 0)
+        records = _metadata_objects(json.loads(output.getvalue()))
+        self.assertTrue(any(record.get("id") == document_id and record.get("name") == "scanned.pdf" for record in records))
+        self.assertTrue(
+            any(
+                record.get("page_number") == 1
+                and record.get("extraction_method") == "ocr"
+                and record.get("ocr_confidence") == 0.92
+                for record in records
+            )
+        )
+        self.assertNotIn("OCR-derived archive metadata.", output.getvalue())
+        self.assertNotIn(str(self.root), output.getvalue())
 
     def test_retain_ocr_output_requires_an_output_directory(self) -> None:
         error = io.StringIO()
