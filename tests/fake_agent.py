@@ -59,7 +59,8 @@ def verify() -> None:
         Path("hello.txt").write_text("changed by the verifier\n", encoding="utf-8")
     if scenario != "missing":
         Path(".hearth/evidence").mkdir(parents=True, exist_ok=True)
-        Path(".hearth/evidence/hello.txt").write_text(Path("hello.txt").read_text(encoding="utf-8"), encoding="utf-8")
+        observed = Path("hello.txt").read_text(encoding="utf-8") if Path("hello.txt").exists() else "observed output\n"
+        Path(".hearth/evidence/hello.txt").write_text(observed, encoding="utf-8")
     result = "fail" if scenario == "failed" else "pass"
     claims = [{"claim": "hello.txt greets the person", "evidence": "evidence/hello.txt", "result": result}]
     verdict = "failed" if scenario == "failed" else "verified"

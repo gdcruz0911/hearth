@@ -36,6 +36,7 @@ A test fails when a command is missing from this table, so it grows with every p
 | `hearth task collect <id>` | After an interactive task, commit its checkpoint, run the check, and save the diff. |
 | `hearth task open <id>` | Open a task's worktree in VS Code. |
 | `hearth loop <id>` | Review a finished task with another model family and fix it, up to `--rounds` times, until approved. |
+| `hearth verify-eval <cases> --verifier NAME` | Score a verifier on seeded changes whose stated behavior does or does not hold, and append the results to `~/.hearth/evals/verifies.jsonl`. |
 | `hearth stats` | Show runs, usable replies, pass rates, time, models, and effort per provider and role, with escapes and plan use; `--json` for the command center. |
 | `hearth review-eval <cases> --reviewer NAME` | Score a reviewer on seeded changes, some with planted bugs, and append the results to `~/.hearth/evals/reviews.jsonl`. |
 | `hearth open <project>` | Open or attach to the project's tmux session: an editor, a live task list, and interactive tasks. |

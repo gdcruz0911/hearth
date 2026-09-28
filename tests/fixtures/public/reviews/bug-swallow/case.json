@@ -1,1 +1,1 @@
-{"goal": "Accept surrounding whitespace, such as ' 5m '.", "expect": "changes", "planted": "Every error is swallowed and returns 0, so invalid text no longer raises ValueError, and the test for invalid text was deleted."}
+{"goal": "Accept surrounding whitespace, such as ' 5m '.", "expect": "changes", "planted": "Every error is swallowed and returns 0, so invalid text no longer raises ValueError, and the test for invalid text was deleted.", "verify_expect": "verified"}

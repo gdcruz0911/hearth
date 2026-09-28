@@ -1133,6 +1133,39 @@ class PullRequestTests(LoopTestCase):
         self.assertNotIn(["pr", "ready", "7"], self.gh)
 
 
+class VerifyEvaluationTests(LoopTestCase):
+    CASES = Path(__file__).parent / "fixtures/public/reviews"
+
+    def setUp(self) -> None:
+        super().setUp()
+        patch = mock.patch.dict(tasks.VERIFIERS, {"codex": FAKE_CODEX})
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def test_every_case_says_whether_its_stated_behavior_holds(self) -> None:
+        expects = {path.parent.name: json.loads(path.read_text(encoding="utf-8")).get("verify_expect") for path in self.CASES.glob("*/case.json")}
+
+        self.assertEqual(expects, {"bug-fraction": "failed", "bug-negative": "failed", "bug-skip": "verified",
+                                   "bug-swallow": "verified", "clean-days": "verified", "clean-rename": "verified"})
+
+    def test_each_verifier_case_is_scored_and_appended_to_the_evaluation_log(self) -> None:
+        # Name order: bug-fraction, bug-negative, bug-skip, bug-swallow, clean-days, clean-rename.
+        os.environ["FAKE_VERIFY"] = "failed,verified,verified,missing,verified,garbage"
+
+        status, output = self.cli("verify-eval", str(self.CASES), "--verifier", "codex", "--effort", "low")
+
+        rows = [json.loads(line) for line in (self.home / ".hearth/evals/verifies.jsonl").read_text(encoding="utf-8").splitlines()]
+        self.assertEqual(status, 0)
+        self.assertEqual([(row["case"], row["outcome"], row["correct"]) for row in rows], [
+            ("bug-fraction", "failed", True), ("bug-negative", "verified", False), ("bug-skip", "verified", True),
+            ("bug-swallow", "rejected", False), ("clean-days", "verified", True), ("clean-rename", "rejected", False),
+        ])
+        self.assertEqual({(row["verifier"], row["effort"]) for row in rows}, {("codex", "low")})
+        self.assertIn("broken claims caught: 1 of 2", output)
+        self.assertIn("working claims verified: 2 of 4", output)
+        self.assertIn("VERIFY.md", (self.home / ".fake-last-verify-prompt").read_text(encoding="utf-8"))
+
+
 class ProviderResultTests(unittest.TestCase):
     def test_each_recorded_provider_stream_yields_final_text_and_session(self) -> None:
         cases = {
