@@ -166,3 +166,75 @@ class WorkbenchBoundaryTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StatsTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary_directory = tempfile.TemporaryDirectory()
+        self.home = Path(self.temporary_directory.name)
+        patch = mock.patch.dict(os.environ, {"HOME": str(self.home)})
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.addCleanup(self.temporary_directory.cleanup)
+
+    def task(self, task_id: str, status: str, runs: list[dict], escapes: int = 0) -> None:
+        path = self.home / ".hearth/tasks" / task_id
+        path.mkdir(parents=True)
+        record = {"id": task_id, "status": status, "runs": runs, "escapes": [{"text": "missed"}] * escapes}
+        (path / "task.json").write_text(json.dumps(record), encoding="utf-8")
+
+    @staticmethod
+    def make_run(role: str, provider: str, minutes: int = 2, **fields: object) -> dict:
+        return {"role": role, "provider": provider, "model_used": f"{provider}-model", "effort": "high", "exit_code": 0,
+                "check_exit_code": None, "guards": None, "started": "2026-09-28T10:00:00-0400",
+                "finished": f"2026-09-28T10:{minutes:02d}:00-0400", **fields}
+
+    def stats(self) -> dict:
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            main(["stats", "--json"])
+        return json.loads(output.getvalue())
+
+    def test_each_provider_and_role_reports_runs_usable_passed_minutes_and_models(self) -> None:
+        self.task("20260928-100000", "done", [
+            self.make_run("implement", "claude", check_exit_code=0, guards="pass"),
+            self.make_run("review", "antigravity", verdict=None),
+            self.make_run("review", "codex", minutes=4, verdict="approve"),
+        ], escapes=1)
+        self.task("20260928-110000", "failed", [
+            self.make_run("implement", "claude", check_exit_code=1),
+            self.make_run("fix", "claude", check_exit_code=0, guards="pass"),
+            self.make_run("review", "antigravity", verdict="changes"),
+        ])
+
+        stats = self.stats()
+
+        rows = {(row["provider"], row["role"]): row for row in stats["rows"]}
+        self.assertEqual({k: rows[("claude", "implement")][k] for k in ("runs", "passed")}, {"runs": 2, "passed": 0.5})
+        self.assertEqual({k: rows[("antigravity", "review")][k] for k in ("runs", "usable", "passed")}, {"runs": 2, "usable": 0.5, "passed": 0.0})
+        self.assertEqual(rows[("codex", "review")]["minutes"], 4.0)
+        self.assertEqual(rows[("codex", "review")]["models"], ["codex-model"])
+        self.assertEqual(stats["summary"], {"tasks": 2, "done": 1, "failed": 1, "waiting": 0, "fix_rounds": 0.5, "escapes": 1, "escapes_per_done_task": 1.0})
+
+    def test_older_records_without_effort_or_models_still_count(self) -> None:
+        self.task("20260926-090000", "done", [{"role": "implement", "provider": "codex", "exit_code": 0, "check_exit_code": 0}])
+
+        row = self.stats()["rows"][0]
+
+        self.assertEqual((row["runs"], row["models"], row["efforts"], row["minutes"]), (1, [], [], None))
+
+    def test_interactive_runs_count_as_usable(self) -> None:
+        self.task("20260928-100000", "done", [self.make_run("implement", "claude", exit_code=None, interactive=True, check_exit_code=0, guards="pass")])
+
+        self.assertEqual(self.stats()["rows"][0]["usable"], 1.0)
+
+    def test_the_table_reads_in_a_terminal(self) -> None:
+        self.task("20260928-100000", "done", [self.make_run("review", "codex", verdict="approve")])
+        output = io.StringIO()
+
+        with contextlib.redirect_stdout(output):
+            main(["stats"])
+
+        self.assertIn("codex", output.getvalue())
+        self.assertIn("review", output.getvalue())
+        self.assertIn("escapes per done task", output.getvalue())
