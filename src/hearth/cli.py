@@ -33,7 +33,7 @@ from .runtime import (
     write_runtime_profile,
 )
 from .service import HearthService
-from .web import HearthWebServer
+from .web import HearthWebServer, _document_payload
 from .workbench import ask, evals, stats, tasks, usage
 
 
@@ -109,7 +109,8 @@ def main(argv: list[str] | None = None) -> int:
     tasks.add_parser(subcommands)
     evals.add_parser(subcommands)
     stats.add_parser(subcommands)
-    subcommands.add_parser("list", help="List imported documents without document text or source paths.")
+    lister = subcommands.add_parser("list", help="List imported documents without document text or source paths.")
+    lister.add_argument("--json", action="store_true", help="Print the imported documents as one JSON array.")
     healther = subcommands.add_parser(
         "health", help="Summarize private collection health without document text or source paths."
     )
@@ -235,7 +236,11 @@ def main(argv: list[str] | None = None) -> int:
                 print("No matching document found.")
                 print("Next: run list to review imported documents and their IDs.")
         elif args.command == "list":
-            _print_documents(service.list_documents())
+            documents = service.list_documents()
+            if args.json:
+                print(json.dumps([_document_payload(document) for document in documents]))  # Named fields only, as in the web API.
+            else:
+                _print_documents(documents)
         elif args.command == "health":
             health = service.collection_health()
             if args.json:

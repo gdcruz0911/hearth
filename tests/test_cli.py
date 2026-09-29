@@ -148,6 +148,27 @@ class CollectionInspectionCliTests(unittest.TestCase):
         self.assertEqual([row["case"] for row in rows], ["supported-deployment-owner", "abstained-annual-budget"] * 2)
         self.assertTrue(all(row["passed"] and row["corpus"]["sha256"] and "retrieval" in row for row in rows))
 
+    def test_list_json_prints_one_array_of_document_metadata(self) -> None:
+        output = io.StringIO()
+
+        with contextlib.redirect_stdout(output):
+            exit_code = main(["--database", str(self.database), "list", "--json"])
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(
+            json.loads(output.getvalue()),
+            [{"id": self.document_id, "name": "operations.md", "page_count": 1, "chunk_count": 1, "ocr_page_count": 0}],
+        )
+
+    def test_list_json_empty_collection_prints_empty_array(self) -> None:
+        output = io.StringIO()
+
+        with contextlib.redirect_stdout(output):
+            exit_code = main(["--database", str(self.root / "empty.sqlite"), "list", "--json"])
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(output.getvalue(), "[]\n")
+
     def test_list_empty_collection_explains_how_to_start(self) -> None:
         empty_database = self.root / "empty.sqlite"
         output = io.StringIO()
