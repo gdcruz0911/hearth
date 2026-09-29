@@ -1572,3 +1572,22 @@ class ReviewGuideTests(LoopTestCase):
         prompt = self.review_prompt(task, "02-review-codex")
         self.assertIn(tasks.BUILTIN_REVIEW, prompt)
         self.assertNotIn("Review context:", prompt)
+
+    def test_a_review_after_a_fix_gets_the_findings_it_should_check(self) -> None:
+        self.commit_guide("Base rule: check the goal.\n")
+        task = self.start()
+
+        self.assertEqual(self.loop(task, "changes,approve"), 0)
+
+        first, second = self.review_prompt(task, "02-review-codex"), self.review_prompt(task, "04-review-codex")
+        self.assertEqual(self.only_task()["runs"][1]["findings"][0]["problem"], "Say hello.")
+        earlier = second.split("</reviewer-guide>")[1]
+        self.assertIn("Review 02-review-codex:\n- CLI-3 hello.txt:1 Say hello.", earlier)
+        self.assertNotIn("Findings earlier reviews", first)
+
+    def test_without_a_guide_a_review_after_a_fix_keeps_todays_prompt(self) -> None:
+        task = self.start()
+
+        self.assertEqual(self.loop(task, "changes,approve"), 0)
+
+        self.assertNotIn("Findings earlier reviews", self.review_prompt(task, "04-review-codex"))

@@ -17,6 +17,7 @@ The first review of the change: apply the rules above to the whole diff.
 ## Review after a fix
 
 An earlier review asked for changes and the implementer has changed the branch since.
+Hearth lists the earlier reviews' findings after this guide: check that each one was corrected, and say which were not.
 Review the whole diff from the base, not only the latest edits, with the initial implementation or docs-only checklist that fits it, since a fix can break something that was fine before.
 Look for fixes that hide a problem instead of solving it: a weakened assertion, an added skip, a caught and ignored error, or a loosened limit (TEST-7, CODE-7).
 

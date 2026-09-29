@@ -598,6 +598,7 @@ def _loop(args: argparse.Namespace) -> int:
                 verdict = None if result["stop"] else _verdict(result["final"])
                 task["runs"][-1]["verdict"] = verdict and verdict["verdict"]
                 task["runs"][-1]["risk"] = verdict.get("risk") if verdict and isinstance(verdict.get("risk"), str) else None
+                task["runs"][-1]["findings"] = verdict and verdict["findings"]  # A review after a fix checks each one.
                 if verdict or result["stop"] == "timeout":
                     break  # An empty or failed review falls back to the next reviewer; a slow one does not.
             if not result["stop"] and _hold_for_person(task, task_dir, "done", None):
@@ -621,8 +622,7 @@ def _loop(args: argparse.Namespace) -> int:
                                          "Answer to keep them, which the reviewer will see, or discard the task to write new ones.", "refs": []})
                 _hold_for_person(task, task_dir, "done", None)
                 return 1
-            findings = "".join(f"- {item.get('standard', '')} {item.get('file', '')}:{item.get('line', '')} {item.get('problem', '')}\n" for item in verdict["findings"])
-            feedback = f"A reviewer from another model family asked for these changes:\n\n{findings}"
+            feedback = f"A reviewer from another model family asked for these changes:\n\n{_findings_text(verdict['findings'])}"
         if fixes == args.rounds:
             return _end(task, task_dir, "rounds_exhausted")
         fixes += 1
@@ -655,10 +655,19 @@ def _review_guidance(task: dict, context: str) -> str:
     shown = subprocess.run(["git", "-C", task["worktree"], "show", f"{task['base']}:{REVIEW_GUIDE}"], capture_output=True, text=True)
     if shown.returncode != 0:
         return BUILTIN_REVIEW
+    earlier = ""
+    if context == "review after a fix":
+        earlier = "\n\nFindings earlier reviews asked the implementer to correct, as those reviewers reported them; check each one:\n" + "".join(
+            f"\nReview {run['dir']}:\n" + (_findings_text(run["findings"]) if run.get("findings") else "- not recorded\n")
+            for run in task["runs"] if run["role"] == "review" and run.get("verdict") == "changes")
     return (f"Review context: {context}.\n"
             f"Follow the reviewer guide below, taken from {REVIEW_GUIDE} at the base commit {task['base'][:12]}; "
             "a copy changed in the worktree does not apply to this review.\n\n"
-            f"<reviewer-guide>\n{shown.stdout.strip()}\n</reviewer-guide>")
+            f"<reviewer-guide>\n{shown.stdout.strip()}\n</reviewer-guide>{earlier.rstrip()}")
+
+
+def _findings_text(findings: list) -> str:
+    return "".join(f"- {item.get('standard', '')} {item.get('file', '')}:{item.get('line', '')} {item.get('problem', '')}\n" for item in findings)
 
 
 def _verify(task: dict, task_dir: Path, project: dict, family: str, timeout: int) -> dict:
