@@ -10,7 +10,7 @@ A test fails when a command is missing from this table, so it grows with every p
 | `hearth import <path>` | Import one note or PDF. |
 | `hearth search "<question>"` | Answer from cited evidence, or abstain. Add `--keyword` to search exact words only, skipping semantic search, and `--json` for one JSON value that separates accepted evidence from retrieved candidates. |
 | `hearth ask "<question>"` | Answer from your notes with one tool-less Claude turn, limited to its recall roots; shows the reply only when it cites excerpts, then each cited excerpt verbatim, and otherwise abstains. Add `--keyword` for exact words. The exchange is saved under `~/.hearth/asks/`. |
-| `hearth list` | List imported documents and their IDs. |
+| `hearth list` | List imported documents and their IDs. Add `--json` for one JSON array with each document's ID, name, and page, chunk, and OCR page counts, never text or source paths. |
 | `hearth inspect <id>` | Show one document's provenance metadata. |
 | `hearth health` | Summarize collection attention items and next actions. |
 | `hearth reindex <path>` | Re-extract one changed document. |

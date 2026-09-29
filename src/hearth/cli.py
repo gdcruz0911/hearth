@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import dataclasses
 import json
 import sys
 from pathlib import Path
@@ -34,7 +33,7 @@ from .runtime import (
     write_runtime_profile,
 )
 from .service import HearthService
-from .web import HearthWebServer
+from .web import HearthWebServer, _document_payload
 from .workbench import ask, evals, stats, tasks, usage
 
 
@@ -239,7 +238,7 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "list":
             documents = service.list_documents()
             if args.json:
-                print(json.dumps([dataclasses.asdict(document) for document in documents]))
+                print(json.dumps([_document_payload(document) for document in documents]))  # Named fields only, as in the web API.
             else:
                 _print_documents(documents)
         elif args.command == "health":
