@@ -8,7 +8,7 @@ import shutil
 import time
 from pathlib import Path
 
-from .tasks import (REVIEW_PROMPT, REVIEWERS, VERIFIERS, VERIFY_PROMPT, _evidence_problems, _git, _home, _now, _run, _verdict,
+from .tasks import (BUILTIN_REVIEW, REVIEW_PROMPT, REVIEWERS, VERIFIERS, VERIFY_PROMPT, _evidence_problems, _git, _home, _now, _run, _verdict,
                     refused_inside_task)
 
 # The seeded project is a small Python parser, so its verify instructions are short and live here, not in the fixtures.
@@ -56,7 +56,7 @@ def run(args: argparse.Namespace) -> int:
             outcome = "rejected" if verdict is None or _evidence_problems(run_dir, verdict) else verdict["verdict"]
             expect = case["verify_expect"]
         else:
-            prompt = REVIEW_PROMPT.format(id=task["id"], goal=case["goal"], base=base[:12], diff=diff, messages="", verification="")
+            prompt = REVIEW_PROMPT.format(id=task["id"], goal=case["goal"], base=base[:12], diff=diff, guidance=BUILTIN_REVIEW, messages="", verification="")
             result = _run(task, work, "review", args.reviewer, REVIEWERS[args.reviewer], prompt, args.model, args.effort, args.timeout, "")
             verdict = None if result["stop"] else _verdict(result["final"])
             outcome, expect = verdict and verdict["verdict"], case["expect"]

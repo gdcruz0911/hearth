@@ -163,9 +163,7 @@ Goal: {goal}
 
 You are reviewing a change another model made in this worktree; do not edit any file.
 Do not run commands or search the disk: the diff is below, your file tools can read the worktree, and Hearth has already run the project's check.
-Check it against the goal and, where they exist, AGENTS.md and the standards in docs/standards/, and cite a standard ID such as CLI-3 for each finding when one applies.
-Approve only when the change meets the goal, is tested, and has no problem you would block a merge for.
-Ask for changes to any edit the goal did not call for, especially one that weakens or skips a test.
+{guidance}
 End your reply with this JSON and nothing after it:
 {{"verdict": "approve" or "changes", "findings": [{{"standard": "CLI-3", "file": "path", "line": 1, "problem": "what is wrong and why"}}],
  "risk": "low, medium, or high: one sentence on what this change could break"}}
@@ -177,6 +175,14 @@ The diff from {base} to the task branch:
 {diff}
 ```
 """
+
+
+# Today's review rules, used for a project whose base revision has no reviewer guide.
+BUILTIN_REVIEW = """Check it against the goal and, where they exist, AGENTS.md and the standards in docs/standards/, and cite a standard ID such as CLI-3 for each finding when one applies.
+Approve only when the change meets the goal, is tested, and has no problem you would block a merge for.
+Ask for changes to any edit the goal did not call for, especially one that weakens or skips a test."""
+REVIEW_GUIDE = "docs/agents/review.md"
+CI_FIX_LABEL = "fix for CI"
 
 
 def add_parser(subcommands: argparse._SubParsersAction) -> None:
@@ -584,8 +590,9 @@ def _loop(args: argparse.Namespace) -> int:
                                  + " raise a problem with what they test as a finding on that file, and Hearth asks the person about it.\n")
             _wait_for_slot("support", task, task_dir)
             diff = _git(Path(task["worktree"]), "diff", f"{task['base']}..HEAD")
+            guidance = _review_guidance(task, _review_context(task, _git(Path(task["worktree"]), "diff", "--name-only", f"{task['base']}..HEAD")))
             for reviewer in reviewers:
-                prompt = REVIEW_PROMPT.format(id=task["id"], goal=task["goal"], base=task["base"][:12], diff=diff[:100_000],
+                prompt = REVIEW_PROMPT.format(id=task["id"], goal=task["goal"], base=task["base"][:12], diff=diff[:100_000], guidance=guidance,
                                               messages=_messages(task_dir, "review", reviewer), verification=verification)  # ponytail: a cap, not paging, for very large diffs.
                 result = _run(task, task_dir, "review", reviewer, REVIEWERS[reviewer], prompt, None, None, args.timeout, project["check"])
                 verdict = None if result["stop"] else _verdict(result["final"])
@@ -628,6 +635,30 @@ def _loop(args: argparse.Namespace) -> int:
             continue
         if task["stop_reason"] not in (None, "check_failed", "guard_failed"):
             return 1
+
+
+def _review_context(task: dict, changed: str) -> str:
+    """Which section of the reviewer guide applies: judged from the task's runs and the changed paths."""
+    last = next((run for run in reversed(task["runs"]) if run["role"] in IMPLEMENT_ROLES), None)
+    if last and last["role"] == "fix" and last.get("label") == CI_FIX_LABEL:
+        return "CI fix"
+    if any(run["role"] == "review" and run.get("verdict") == "changes" for run in task["runs"]):
+        return "review after a fix"
+    paths = changed.splitlines()
+    if paths and all(path.endswith(".md") for path in paths):
+        return "docs-only change"
+    return "initial implementation"
+
+
+def _review_guidance(task: dict, context: str) -> str:
+    """The reviewer guide from the task's base revision, so the change under review cannot rewrite its own review rules."""
+    shown = subprocess.run(["git", "-C", task["worktree"], "show", f"{task['base']}:{REVIEW_GUIDE}"], capture_output=True, text=True)
+    if shown.returncode != 0:
+        return BUILTIN_REVIEW
+    return (f"Review context: {context}.\n"
+            f"Follow the reviewer guide below, taken from {REVIEW_GUIDE} at the base commit {task['base'][:12]}; "
+            "a copy changed in the worktree does not apply to this review.\n\n"
+            f"<reviewer-guide>\n{shown.stdout.strip()}\n</reviewer-guide>")
 
 
 def _verify(task: dict, task_dir: Path, project: dict, family: str, timeout: int) -> dict:
@@ -956,6 +987,7 @@ def _fix(project: dict, task: dict, task_dir: Path, label: str, feedback: str, t
               + _messages(task_dir, "implement", implementer["provider"]) + "\n" + INSTRUCTIONS.format(check=project["check"]))
     result = _run(task, task_dir, "fix", implementer["provider"], PROVIDERS[implementer["provider"]], prompt,
                   implementer["model"], implementer["effort"], timeout, project["check"])
+    task["runs"][-1]["label"] = label  # The reviewer guide has a section for a fix after CI failed.
     _finish(project, task, task_dir, result["stop"])
 
 
@@ -1101,7 +1133,7 @@ def _ci(task: dict, task_dir: Path, timeout: int) -> int:
         print(f"{task['id']}  CI failed, and its worktree was discarded; see {task_dir / 'ci.txt'}", file=sys.stderr)
         return 1
     project = _projects()[task["project"]]
-    _fix(project, task, task_dir, "fix for CI", f"CI failed on the pull request; fix it:\n\n```text\n{log[-4000:]}\n```\n", timeout)
+    _fix(project, task, task_dir, CI_FIX_LABEL, f"CI failed on the pull request; fix it:\n\n```text\n{log[-4000:]}\n```\n", timeout)
     print(f"Next: hearth loop {task['id']}, which verifies, reviews, and pushes the fix", file=sys.stderr)
     return 1 if task["stop_reason"] else 0
 
