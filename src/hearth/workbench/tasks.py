@@ -547,7 +547,7 @@ def _loop(args: argparse.Namespace) -> int:
         print(f"No single task matches {args.id}.\nNext: hearth task list, then use last, a full ID, or a unique ending of one", file=sys.stderr)
         return 1
     task = _read(task_dir)
-    if task["status"] not in ("done", "failed") or task["stop_reason"] not in (None, "check_failed", "guard_failed", "no_changes", "review_unparsed", "verify_rejected", "rounds_exhausted"):
+    if task["status"] not in ("done", "failed") or task["stop_reason"] not in (None, "check_failed", "guard_failed", "no_changes", "review_unparsed", "review_guide_unreadable", "verify_rejected", "rounds_exhausted"):
         reason = f" ({task['stop_reason']})" if task["stop_reason"] else ""
         print(f"{task['id']} is {task['status']}{reason}; the loop continues only a finished task whose check ran.\nNext: hearth task show {task['id']}", file=sys.stderr)
         return 1
@@ -573,6 +573,11 @@ def _loop(args: argparse.Namespace) -> int:
         elif task["stop_reason"] == "verify_failed":
             feedback = task.pop("verify_feedback")
         else:
+            try:
+                guidance = _review_guidance(task, _review_context(task, _git(Path(task["worktree"]), "diff", "--name-only", f"{task['base']}..HEAD")))
+            except ReviewGuideError as exc:
+                print(exc, file=sys.stderr)
+                return _end(task, task_dir, "review_guide_unreadable")
             verification = ""
             if (Path(task["worktree"]) / "VERIFY.md").exists():
                 outcome = _verify(task, task_dir, project, family, args.timeout)
@@ -590,7 +595,6 @@ def _loop(args: argparse.Namespace) -> int:
                                  + " raise a problem with what they test as a finding on that file, and Hearth asks the person about it.\n")
             _wait_for_slot("support", task, task_dir)
             diff = _git(Path(task["worktree"]), "diff", f"{task['base']}..HEAD")
-            guidance = _review_guidance(task, _review_context(task, _git(Path(task["worktree"]), "diff", "--name-only", f"{task['base']}..HEAD")))
             for reviewer in reviewers:
                 prompt = REVIEW_PROMPT.format(id=task["id"], goal=task["goal"], base=task["base"][:12], diff=diff[:100_000], guidance=guidance,
                                               messages=_messages(task_dir, "review", reviewer), verification=verification)  # ponytail: a cap, not paging, for very large diffs.
@@ -650,11 +654,23 @@ def _review_context(task: dict, changed: str) -> str:
     return "initial implementation"
 
 
+class ReviewGuideError(RuntimeError):
+    """Raised when the base commit has a reviewer guide that cannot be read; reviewing without it would drop its rules."""
+
+
 def _review_guidance(task: dict, context: str) -> str:
-    """The reviewer guide from the task's base revision, so the change under review cannot rewrite its own review rules."""
-    shown = subprocess.run(["git", "-C", task["worktree"], "show", f"{task['base']}:{REVIEW_GUIDE}"], capture_output=True, text=True)
-    if shown.returncode != 0:
+    """The reviewer guide from the task's base revision, so the change under review cannot rewrite its own review rules.
+
+    Only a guide absent from the base commit falls back to the built-in text; one that exists but cannot be read is an error.
+    """
+    git = ["git", "-C", task["worktree"]]
+    listed = subprocess.run([*git, "ls-tree", task["base"], "--", REVIEW_GUIDE], capture_output=True, text=True)
+    if listed.returncode == 0 and not listed.stdout.strip():
         return BUILTIN_REVIEW
+    shown = subprocess.run([*git, "cat-file", "blob", f"{task['base']}:{REVIEW_GUIDE}"], capture_output=True, text=True)
+    if listed.returncode != 0 or shown.returncode != 0:
+        raise ReviewGuideError(f"{REVIEW_GUIDE} exists at the base commit {task['base'][:12]} but could not be read: "
+                               f"{(listed.stderr or shown.stderr).strip()}")
     earlier = ""
     if context == "review after a fix":
         earlier = "\n\nFindings earlier reviews asked the implementer to correct, as those reviewers reported them; check each one:\n" + "".join(

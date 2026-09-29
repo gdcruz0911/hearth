@@ -1573,6 +1573,18 @@ class ReviewGuideTests(LoopTestCase):
         self.assertIn(tasks.BUILTIN_REVIEW, prompt)
         self.assertNotIn("Review context:", prompt)
 
+    def test_a_guide_that_exists_but_cannot_be_read_stops_the_loop_instead_of_falling_back(self) -> None:
+        self.commit_guide("Base rule: check the goal.\n")
+        task = self.start()
+        blob = git(self.repo, "rev-parse", f"HEAD:{tasks.REVIEW_GUIDE}").strip()
+        (self.repo / ".git/objects" / blob[:2] / blob[2:]).unlink()  # The guide is committed, but its contents are gone.
+
+        status = self.loop(task, "approve")
+
+        task = self.only_task()
+        self.assertEqual((status, task["stop_reason"]), (1, "review_guide_unreadable"))
+        self.assertEqual([run["role"] for run in task["runs"]], ["implement"])
+
     def test_a_review_after_a_fix_gets_the_findings_it_should_check(self) -> None:
         self.commit_guide("Base rule: check the goal.\n")
         task = self.start()
