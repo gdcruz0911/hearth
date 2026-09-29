@@ -12,7 +12,6 @@ import signal
 import subprocess
 import sys
 import time
-import tomllib
 from pathlib import Path
 
 from . import usage
@@ -44,9 +43,11 @@ REVIEWERS = {
 # and an empty review falls back to the next reviewer from another model family.
 REVIEW_ORDER = ["antigravity", "claude", "codex"]
 # Models for the checking roles (test, verify, review), pinned so a default changed in a provider's app cannot
-# silently change what checks the work; --model still overrides, and implementation keeps the CLI's default.
+# silently change what checks the work; --model still overrides.
 # agy also runs Claude and GPT-OSS models, so its pin names a Gemini model to stay in another family.
-CHECK_MODELS = {"codex": "gpt-6-luna", "claude": "sonnet", "antigravity": "gemini-3.1-pro-high"}
+CHECK_MODELS = {"codex": "gpt-6-sol", "claude": "claude-sonnet-5-5", "antigravity": "gemini-3.1-pro-high"}
+# Models for implementation, pinned for the same reason; a provider missing here keeps its CLI's default.
+IMPLEMENT_MODELS = {"codex": "gpt-6-sol", "claude": "claude-sonnet-5-5"}
 CHECK_ROLES = {"test", "verify", "review", "retro"}
 # DEL-7: a Conventional Commit title the implementer proposes, which becomes the squash commit on main.
 TITLE_PATTERN = re.compile(r"^(feat|fix|docs|test|refactor|chore|perf|ci)(\([^)]+\))?: \S.*$")
@@ -371,7 +372,8 @@ def _new(args: argparse.Namespace) -> int:
     if provider not in project["providers"]:
         print(f"{args.project} does not allow {provider}.\nNext: add it to the project's providers, or choose one of: {', '.join(project['providers'])}", file=sys.stderr)
         return 1
-    writer = _test_writer(project, provider, args.model) if args.tests_first else None
+    model = args.model or IMPLEMENT_MODELS.get(provider)
+    writer = _test_writer(project, provider, model) if args.tests_first else None
     if args.tests_first and (writer is None or args.interactive):
         reason = "cannot be interactive" if args.interactive else f"needs a test writer outside {provider}'s model family"
         print(f"--tests-first {reason}.\nNext: add codex or claude to {args.project}'s providers, or drop --tests-first", file=sys.stderr)
@@ -433,7 +435,7 @@ def _new(args: argparse.Namespace) -> int:
         "worktree": str(worktree), "status": "waiting" if args.interactive else "running", "stop_reason": None,
         "created": _now(), "finished": None, "discarded": None, "copied": copied, "context": context, "issue": args.issue, "runs": [],
         "recall": {"mode": args.recall} if args.recall else None,
-        "implementer": {"provider": provider, "model": args.model, "effort": args.effort, "timeout": args.timeout},
+        "implementer": {"provider": provider, "model": model, "effort": args.effort, "timeout": args.timeout},
     }
     prompt = PROMPT.format(id=task_id, goal=goal, check=project["check"]) + context + recall.for_provider(_home(), task, task_dir, project, provider)
     if args.tests_first:
@@ -441,10 +443,10 @@ def _new(args: argparse.Namespace) -> int:
     if not args.interactive:
         return _implement(project, task, task_dir)
 
-    record = _record(task, task_dir, "implement", provider, args.model, args.effort, prompt)
+    record = _record(task, task_dir, "implement", provider, model, args.effort, prompt)
     record["interactive"] = True
     _ensure_session(args.project, repo)
-    argv = _argv(INTERACTIVE[provider], provider, prompt, project["check"], args.model, args.effort)
+    argv = _argv(INTERACTIVE[provider], provider, prompt, project["check"], model, args.effort)
     _launch(["tmux", "new-window", "-t", f"=hearth-{args.project}:", "-c", str(worktree), "-n", task_id, "-e", f"HEARTH_TASK={task_id}", *argv])
     _write(task_dir, task)
     print(f"{task_id}  waiting  {worktree}")
@@ -537,9 +539,9 @@ def _run(task: dict, task_dir: Path, role: str, provider: str, template: list[st
             _stop(process)
     record.update(exit_code=process.returncode, finished=_now())
     parsed = parse_events(provider, (run_dir / "events.jsonl").read_text(encoding="utf-8"))
-    # What actually ran, for later statistics: the CLI's own report, else the requested model, else Codex's configured default.
+    # What actually ran, for later statistics: the CLI's own report, else the requested model.
     record.update(session_id=parsed["session_id"], usage=parsed["usage"],
-                  model_used=parsed["model"] or model or (_codex_model() if provider == "codex" else None))
+                  model_used=parsed["model"] or model)
     (run_dir / "report.md").write_text(parsed["final"], encoding="utf-8")
     _drain(task, task_dir, record)
     parsed["stop"] = "timeout" if timed_out else parsed["error"] or ("provider_error" if process.returncode else None)
@@ -914,13 +916,6 @@ def _answer(task: dict, task_dir: Path, text: str) -> int:
         print(f"Answered {question['id']}; {len(questions) - 1} more question(s) open.")
         print(f"Next: hearth task show {task['id']}", file=sys.stderr)
     return 0
-
-
-def _codex_model() -> str | None:
-    try:
-        return tomllib.loads((Path.home() / ".codex/config.toml").read_text(encoding="utf-8")).get("model")
-    except (FileNotFoundError, tomllib.TOMLDecodeError):
-        return None
 
 
 def _retro(task: dict, task_dir: Path) -> int:
