@@ -902,6 +902,18 @@ class EffortTests(LoopTestCase):
         used = sorted(json.loads(path.read_text(encoding="utf-8"))["runs"][0]["model_used"] for path in (self.home / ".hearth/tasks").glob("*/task.json"))
         self.assertEqual(used, ["gpt-6-sol", "gpt-test"])
 
+    def test_models_json_overrides_the_pins_for_every_role_and_model_still_wins(self) -> None:
+        (self.home / ".hearth/models.json").write_text(json.dumps({"claude": "claude-chosen", "codex": "gpt-chosen"}), encoding="utf-8")
+        task = self.start()
+        self.loop(task, "approve")
+        with mock.patch.dict(tasks.PROVIDERS, {"codex": FAKE_CODEX}):
+            self.cli("task", "new", "demo", "Add hello.txt", "--agent", "codex", "--model", "gpt-test")
+
+        first = self.only_task_by_id(task["id"])
+        self.assertEqual([(run["role"], run["model"]) for run in first["runs"]], [("implement", "claude-chosen"), ("review", "gpt-chosen")])
+        other = next(path for path in (self.home / ".hearth/tasks").glob("*/task.json") if path.parent.name != task["id"])
+        self.assertEqual(json.loads(other.read_text(encoding="utf-8"))["runs"][0]["model"], "gpt-test")
+
     def test_review_eval_runs_at_the_chosen_effort_and_antigravity_picks_the_matching_model(self) -> None:
         os.environ["FAKE_REVIEWS"] = ",".join(["approve"] * 6)
         cases = Path(__file__).parent / "fixtures/public/reviews"

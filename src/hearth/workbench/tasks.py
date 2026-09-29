@@ -42,11 +42,11 @@ REVIEWERS = {
 # Antigravity first spends the plan that is otherwise idle; it needs the read-only allow rules in the spec,
 # and an empty review falls back to the next reviewer from another model family.
 REVIEW_ORDER = ["antigravity", "claude", "codex"]
-# Models for the checking roles (test, verify, review), pinned so a default changed in a provider's app cannot
-# silently change what checks the work; --model still overrides.
+# Fallback models for the checking roles (test, verify, review), pinned so a default changed in a provider's app, which
+# shares the CLI's settings, cannot silently change what checks the work; ~/.hearth/models.json and --model override them.
 # agy also runs Claude and GPT-OSS models, so its pin names a Gemini model to stay in another family.
 CHECK_MODELS = {"codex": "gpt-6-sol", "claude": "claude-sonnet-5-5", "antigravity": "gemini-3.1-pro-high"}
-# Models for implementation, pinned for the same reason; a provider missing here keeps its CLI's default.
+# Fallback models for implementation, pinned for the same reason; a provider missing here keeps its CLI's default.
 IMPLEMENT_MODELS = {"codex": "gpt-6-sol", "claude": "claude-sonnet-5-5"}
 CHECK_ROLES = {"test", "verify", "review", "retro"}
 # DEL-7: a Conventional Commit title the implementer proposes, which becomes the squash commit on main.
@@ -372,7 +372,7 @@ def _new(args: argparse.Namespace) -> int:
     if provider not in project["providers"]:
         print(f"{args.project} does not allow {provider}.\nNext: add it to the project's providers, or choose one of: {', '.join(project['providers'])}", file=sys.stderr)
         return 1
-    model = args.model or IMPLEMENT_MODELS.get(provider)
+    model = args.model or _model(provider, "implement")
     writer = _test_writer(project, provider, model) if args.tests_first else None
     if args.tests_first and (writer is None or args.interactive):
         reason = "cannot be interactive" if args.interactive else f"needs a test writer outside {provider}'s model family"
@@ -514,7 +514,7 @@ def _run(task: dict, task_dir: Path, role: str, provider: str, template: list[st
          model: str | None, effort: str | None, timeout: int, check: str, verify: str = "") -> dict:
     """Run one headless provider turn in the task's worktree and record it; returns the parsed result and a stop reason."""
     effort = effort or ROLE_EFFORT.get(role)
-    model = model or (CHECK_MODELS.get(provider) if role in CHECK_ROLES else None)
+    model = model or _model(provider, role)
     if provider == "antigravity" and model and re.search(r"-(low|high)$", model):
         model = re.sub(r"-(low|high)$", "-low" if effort == "low" else "-high", model)  # agy names its thinking level in the model.
     record = _record(task, task_dir, role, provider, model, effort, prompt)
@@ -562,7 +562,7 @@ def _loop(args: argparse.Namespace) -> int:
     implementer = next(run for run in task["runs"] if run["role"] == "implement")
     family = _family(implementer["provider"], implementer["model"])
     candidates = [args.reviewer] if args.reviewer else [name for name in REVIEW_ORDER if name in project["providers"]]
-    reviewers = [name for name in candidates if name in project["providers"] and _family(name, CHECK_MODELS.get(name)) != family]
+    reviewers = [name for name in candidates if name in project["providers"] and _family(name, _model(name, "review")) != family]
     if not reviewers:
         print(f"No allowed reviewer outside the {family} model family.\nNext: add another provider to {task['project']}'s providers, or pick one with --reviewer", file=sys.stderr)
         return 1
@@ -927,7 +927,7 @@ def _retro(task: dict, task_dir: Path) -> int:
     project = _projects()[task["project"]]
     implementer = next(run for run in task["runs"] if run["role"] == "implement")
     family = _family(implementer["provider"], implementer["model"])
-    agents = [name for name in REVIEW_ORDER if name in project["providers"] and _family(name, CHECK_MODELS.get(name)) != family]
+    agents = [name for name in REVIEW_ORDER if name in project["providers"] and _family(name, _model(name, "review")) != family]
     if not agents:
         print(f"No allowed agent outside the {family} model family.\nNext: add another provider to {task['project']}'s providers", file=sys.stderr)
         return 1
@@ -1207,6 +1207,15 @@ def _verdict(text: str, verdicts: tuple[str, str] = ("approve", "changes"), item
             value.setdefault(items, [])
             return value
     return None
+
+
+def _model(provider: str, role: str) -> str | None:
+    """The model Hearth runs for a provider: the person's choice in ~/.hearth/models.json, else the pin for the role."""
+    path = _home() / "models.json"
+    chosen = json.loads(path.read_text(encoding="utf-8")).get(provider) if path.exists() else None
+    if isinstance(chosen, str) and chosen:
+        return chosen
+    return (CHECK_MODELS if role in CHECK_ROLES else IMPLEMENT_MODELS).get(provider)
 
 
 def _family(provider: str, model: str | None) -> str:
