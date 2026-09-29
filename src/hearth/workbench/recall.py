@@ -61,14 +61,38 @@ def may_receive(home: Path, project: dict | None, task_dir: Path, provider: str)
     holds evidence, a provider may read the task's agent output only if its current scope covers all of those roots.
     Its own earlier excerpts get no exemption: a provider whose permission was revoked is refused too.
     """
-    delivered = [record for path in sorted((task_dir / "recall").glob("*.json"))
-                 if (record := json.loads(path.read_text(encoding="utf-8"))).get("evidence")]
-    if not delivered:
+    records = delivered(task_dir)
+    if not records:
         return True
     mine = scope(home, project, provider)[0] if project is not None else ()
     # A record without saved roots, written before they were saved, cannot be shown to be covered.
     return all(record.get("roots") and all(any(Path(root).is_relative_to(allowed) for allowed in mine) for root in record["roots"])
-               for record in delivered)
+               for record in records)
+
+
+RUN = 8  # Consecutive words that make a copy of an excerpt.
+
+
+def delivered(task_dir: Path) -> list[dict]:
+    """The saved recall records of this task that hold evidence a provider received."""
+    return [record for path in sorted((task_dir / "recall").glob("*.json"))
+            if (record := json.loads(path.read_text(encoding="utf-8"))).get("evidence")]
+
+
+def matches(task_dir: Path, text: str) -> list[dict]:
+    """Delivered excerpts that share a run of RUN words with `text`, as document and chunk only, never their text.
+
+    ponytail: an exact-run scan, so a paraphrase passes; the person's approval of outbound material covers that.
+    """
+    words = text.split()
+    runs = {tuple(words[i:i + RUN]) for i in range(len(words) - RUN + 1)}
+    found = {}
+    for record in delivered(task_dir):
+        for item in record["evidence"]:
+            excerpt = item["excerpt"].split()
+            if any(tuple(excerpt[i:i + RUN]) in runs for i in range(len(excerpt) - RUN + 1)):
+                found[item["chunk_id"]] = {"chunk_id": item["chunk_id"], "document": item["document"]}
+    return sorted(found.values(), key=lambda item: item["chunk_id"])
 
 
 def build(home: Path, project: dict | None, provider: str, goal: str, mode: str) -> dict:

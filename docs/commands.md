@@ -32,7 +32,7 @@ A test fails when a command is missing from this table, so it grows with every p
 | `hearth task answer <id> "<text>"` | Answer the question an agent left for you; `hearth loop` then continues the task. |
 | `hearth task new <project> "<goal>" --tests-first` | Have another model family write failing tests first; the implementer must pass them unchanged. Add `--approve-tests` to read them before implementation starts. |
 | `hearth task approve-tests <id>` | Approve a tests-first task's tests and start implementing. |
-| `hearth task publish <id>` | Push an approved task and open or update its draft pull request (DEL-7), in a project with `"pr": true`; `hearth loop` does this on approval. |
+| `hearth task publish <id>` | Push an approved task and open or update its draft pull request (DEL-7), in a project with `"pr": true`; `hearth loop` does this on approval. A task that received excerpts from your notes pushes nothing until you have read the exact commits, changes, and pull request text it prints and run the command again with `--approve` and the code printed with them, and it is refused outright when it copies a delivered excerpt. |
 | `hearth task promote <id>` | Show the task's final report as it would be copied into your notes folder's `reports/`; `--apply` writes it, never overwriting and never importing. Refused inside a task. |
 | `hearth task ci <id>` | Read the pull request's checks: wait while pending, mark it ready when all pass, or send the failing log to a fix run. Never merges. |
 | `hearth task escape <id> "<text>"` | Record a problem found after the task passed every gate. |

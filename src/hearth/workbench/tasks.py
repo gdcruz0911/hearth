@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -212,6 +213,7 @@ def add_parser(subcommands: argparse._SubParsersAction) -> None:
     retro.add_argument("id")
     publish = actions.add_parser("publish", help="Push an approved task and open or update its draft pull request, for a project with pr enabled.")
     publish.add_argument("id")
+    publish.add_argument("--approve", metavar="CODE", help="For a task that received notes excerpts: the code printed with the outbound material you read.")
     ci = actions.add_parser("ci", help="Read the task's pull request checks: wait, mark it ready, or send a failure to a fix run.")
     ci.add_argument("id")
     ci.add_argument("--timeout", type=int, default=1800, help="Seconds before a fix run is stopped. Defaults to 1800.")
@@ -296,7 +298,9 @@ def run(args: argparse.Namespace) -> int:
         if not _projects()[task["project"]].get("pr") or task["status"] != "done" or not task.get("review"):
             print(f"{task['id']} can be published only when approved, in a project with \"pr\": true.\nNext: hearth loop {task['id']}", file=sys.stderr)
             return 1
-        return _publish(task, task_dir)
+        if args.approve and refused_inside_task("approve outbound material"):
+            return 1
+        return _publish(task, task_dir, args.approve)
     if args.task_command == "ci":
         return _ci(task, task_dir, args.timeout)
     if args.task_command == "escape":
@@ -1101,8 +1105,12 @@ def _pull_request(task: dict, task_dir: Path) -> tuple[str, str]:
     return title or fallback, "\n".join(lines)
 
 
-def _publish(task: dict, task_dir: Path) -> int:
-    """Push the task branch and open its draft pull request, or update the open one; never merges (ADR-0023)."""
+def _publish(task: dict, task_dir: Path, approve: str | None = None) -> int:
+    """Push the task branch and open its draft pull request, or update the open one; never merges (ADR-0023).
+
+    A task that received excerpts from the person's notes pushes only after the person has read exactly what would be
+    pushed and approved it by its code, and never when it copies a delivered excerpt (ADR-0024: GitHub never receives them).
+    """
     repo = _repo(task)
     if task.get("pr"):
         # A merged or closed pull request must not turn a push into a new pull request that re-proposes finished work.
@@ -1126,6 +1134,8 @@ def _publish(task: dict, task_dir: Path) -> int:
         print(f"Not publishing {task['id']}: {task['branch']} conflicts with {base}, so its pull request could not be merged.", file=sys.stderr)
         print(f"Next: rerun the goal as a fresh task on the current {base}, or merge {base} into {task['branch']} yourself", file=sys.stderr)
         return 1
+    if recall.delivered(task_dir) and (stopped := _outbound_gate(task, task_dir, title, body, approve)) is not None:
+        return stopped
     _push(task)
     existing = json.loads(_gh(["pr", "list", "--head", task["branch"], "--state", "open", "--json", "number,url"], repo) or "[]")
     if existing:
@@ -1139,6 +1149,35 @@ def _publish(task: dict, task_dir: Path) -> int:
     print(f"{task['id']}  draft pull request {pull['url']}")
     print(f"Next: hearth task ci {task['id']} once CI has run", file=sys.stderr)
     return 0
+
+
+def _outbound_gate(task: dict, task_dir: Path, title: str, body: str, approve: str | None) -> int | None:
+    """None when the person approved this exact outbound material; otherwise an exit code: 1 for a copied excerpt,
+    or 0 after showing and saving the material and saying how to approve it."""
+    repo, span = _repo(task), f"{task['base']}..{task['branch']}"
+    history = _git(repo, "log", "-p", "--reverse", "--format=commit %h %s%n%b", span)
+    added = "\n".join(line[1:] for line in _git(repo, "log", "-p", "--format=", span).splitlines() if line.startswith("+") and not line.startswith("+++"))
+    messages = _git(repo, "log", "--format=%B", span)
+    copied = recall.matches(task_dir, f"{title}\n{body}\n{messages}\n{added}")
+    if copied:
+        print(f"Not publishing {task['id']}: it copies excerpts recalled from your notes, which GitHub must not receive (ADR-0024): "
+              + ", ".join(f"{item['document']} chunk {item['chunk_id']}" for item in copied), file=sys.stderr)
+        print(f"Next: remove the copied text from {task['branch']}, or push it yourself if you decide it may leave", file=sys.stderr)
+        return 1
+    code = hashlib.sha256(f"{_git(repo, 'rev-parse', task['branch']).strip()}\0{title}\0{body}".encode()).hexdigest()[:12]
+    material = f"Title: {title}\n\n{body}\n\nCommits and changes to push:\n\n{history}"
+    outbound = task_dir / "outbound"
+    outbound.mkdir(exist_ok=True)
+    (outbound / f"{code}.md").write_text(material, encoding="utf-8")  # ADR-0024: saved before it is sent.
+    if approve != code:
+        print(material)
+        print(f"Not publishing {task['id']} yet: this task received excerpts from your notes, and a paraphrase cannot be detected, "
+              "so nothing was pushed.", file=sys.stderr)
+        print(f"Next: read the material above, then hearth task publish {task['id']} --approve {code}", file=sys.stderr)
+        return 0
+    task["outbound_approval"] = {"code": code, "at": _now()}
+    _write(task_dir, task)
+    return None
 
 
 def _ci(task: dict, task_dir: Path, timeout: int) -> int:
