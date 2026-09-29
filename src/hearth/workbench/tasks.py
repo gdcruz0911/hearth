@@ -517,6 +517,11 @@ def _run(task: dict, task_dir: Path, role: str, provider: str, template: list[st
         model = re.sub(r"-(low|high)$", "-low" if effort == "low" else "-high", model)  # agy names its thinking level in the model.
     record = _record(task, task_dir, role, provider, model, effort, prompt)
     run_dir = task_dir / "runs" / record["dir"]
+    if not recall.may_receive(_home(), _projects().get(task.get("project")) if (task_dir / "recall").is_dir() else None, task_dir, provider):
+        # ADR-0024: this prompt carries the task's agent output, which can quote excerpts this provider may not receive.
+        record.update(exit_code=None, finished=_now())
+        (run_dir / "report.md").write_text("Not sent: this provider's recall scope does not cover excerpts delivered in this task.\n", encoding="utf-8")
+        return {**parse_events(provider, ""), "stop": "recall_not_permitted"}
     argv = _argv(template, provider, prompt, check, model, effort, verify)
     with (run_dir / "events.jsonl").open("w", encoding="utf-8") as events, (run_dir / "stderr.txt").open("w", encoding="utf-8") as errors:
         process = subprocess.Popen(argv, cwd=task["worktree"], stdin=subprocess.PIPE, stdout=events, stderr=errors, text=True,
@@ -547,7 +552,7 @@ def _loop(args: argparse.Namespace) -> int:
         print(f"No single task matches {args.id}.\nNext: hearth task list, then use last, a full ID, or a unique ending of one", file=sys.stderr)
         return 1
     task = _read(task_dir)
-    if task["status"] not in ("done", "failed") or task["stop_reason"] not in (None, "check_failed", "guard_failed", "no_changes", "review_unparsed", "review_guide_unreadable", "no_permitted_reviewer", "verify_rejected", "rounds_exhausted"):
+    if task["status"] not in ("done", "failed") or task["stop_reason"] not in (None, "check_failed", "guard_failed", "no_changes", "review_unparsed", "review_guide_unreadable", "no_permitted_reviewer", "no_permitted_verifier", "recall_not_permitted", "verify_rejected", "rounds_exhausted"):
         reason = f" ({task['stop_reason']})" if task["stop_reason"] else ""
         print(f"{task['id']} is {task['status']}{reason}; the loop continues only a finished task whose check ran.\nNext: hearth task show {task['id']}", file=sys.stderr)
         return 1
@@ -701,6 +706,10 @@ def _verify(task: dict, task_dir: Path, project: dict, family: str, timeout: int
     verifiers = [name for name in VERIFY_ORDER if name in project["providers"] and _family(name, None) != family]
     if not verifiers:
         return {"stop": "no_verifier", "feedback": None, "summary": ""}
+    verifiers = [name for name in verifiers if recall.may_receive(_home(), project, task_dir, name)]
+    if not verifiers:
+        print("No verifier may receive this task's agent output, which can quote excerpts recalled for another provider (ADR-0024).", file=sys.stderr)
+        return {"stop": "no_permitted_verifier", "feedback": None, "summary": ""}
     diff = _git(worktree, "diff", f"{task['base']}..HEAD")
     verify = project.get("verify", project["check"])
     for verifier in verifiers:
