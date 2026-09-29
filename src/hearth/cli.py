@@ -34,7 +34,7 @@ from .runtime import (
 )
 from .service import HearthService
 from .web import HearthWebServer
-from .workbench import evals, stats, tasks, usage
+from .workbench import ask, evals, stats, tasks, usage
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -105,6 +105,7 @@ def main(argv: list[str] | None = None) -> int:
     remover = subcommands.add_parser("remove", help="Remove a document and its derived records.")
     remover.add_argument("path")
     usage.add_parser(subcommands)
+    ask.add_parser(subcommands)
     tasks.add_parser(subcommands)
     evals.add_parser(subcommands)
     stats.add_parser(subcommands)
@@ -156,6 +157,8 @@ def main(argv: list[str] | None = None) -> int:
         return evals.run(args)
     if args.command == "stats":
         return stats.run(args)
+    if args.command == "ask":
+        return ask.run(args)
     if args.command == "profile":
         if (args.embedding_model is None) != (args.index_directory is None):
             parser.error("--embedding-model and --index-directory must be provided together.")

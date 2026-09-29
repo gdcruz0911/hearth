@@ -14,8 +14,9 @@ from pathlib import Path
 from unittest import mock
 
 from hearth.cli import main
-from hearth.workbench import tasks
+from hearth.workbench import ask, tasks
 
+REAL_ASK = {name: list(argv) for name, argv in ask.ASK.items()}  # Before any test patches it.
 FAKE_AGENT = [sys.executable, str(Path(__file__).with_name("fake_agent.py")), "{options}", "--allowedTools", "Bash({check} *)"]
 FAKE_CODEX = [sys.executable, str(Path(__file__).with_name("fake_agent.py")), "--as", "codex", "{options}"]
 FAKE_AGY = [sys.executable, str(Path(__file__).with_name("fake_agent.py")), "--as", "antigravity", "{options}"]
@@ -47,6 +48,7 @@ class TaskTestCase(unittest.TestCase):
             mock.patch.dict(tasks.PROVIDERS, {"claude": FAKE_AGENT, "codex": FAKE_CODEX, "antigravity": FAKE_AGY}),
             mock.patch.dict(tasks.REVIEWERS, {"claude": FAKE_AGENT, "codex": FAKE_CODEX, "antigravity": FAKE_AGY}),
             mock.patch.dict(tasks.VERIFIERS, {"claude": FAKE_AGENT, "codex": FAKE_CODEX}),
+            mock.patch.dict(ask.ASK, {"claude": FAKE_AGENT}),
             mock.patch.object(tasks.usage, "report", return_value=[]),
         ]
         for patch in patches:
@@ -1697,3 +1699,63 @@ class ReviewPermissionTests(RecallFixture):
         fix = task["runs"][-1]
         self.assertEqual((fix["role"], task["stop_reason"]), ("fix", "recall_not_permitted"))
         self.assertFalse((self.home / ".hearth/tasks" / task["id"] / "runs" / fix["dir"] / "events.jsonl").exists())
+
+
+class AskTests(RecallFixture):
+    """hearth ask: local recall within Claude's roots, one tool-less turn, and only cited answers shown."""
+
+    def ask(self, *argv: str) -> tuple[int, str]:
+        return self.cli("ask", "How should hello files greet the person?", "--keyword", *argv)
+
+    def test_a_cited_answer_is_shown_with_its_excerpts_verbatim_and_the_prompt_saved_first(self) -> None:
+        self.configure({"claude": [str(self.vault)]}, None)
+
+        status, output = self.ask()
+
+        (folder,) = (self.home / ".hearth/asks").iterdir()
+        prompt = (folder / "prompt.md").read_text(encoding="utf-8")
+        self.assertEqual(status, 0)
+        self.assertEqual(prompt, (self.home / ".fake-last-ask-prompt").read_text(encoding="utf-8"))
+        self.assertNotIn("OUTSIDE-ONLY", prompt + output)
+        self.assertIn("Greetings are warm [1].", output)
+        self.assertIn("Cited excerpts:\n\n[1] ", output)
+        self.assertIn("checked only for citations, not verified", output)
+
+    def test_the_real_command_disables_every_tool(self) -> None:
+        argv = REAL_ASK["claude"]
+        self.assertEqual(argv[argv.index("--tools") + 1], "")
+
+    def test_a_reply_that_cites_nothing_is_not_shown(self) -> None:
+        self.configure({"claude": [str(self.vault)]}, None)
+        os.environ["FAKE_ASK"] = "Greetings are warm, trust me."
+
+        status, output = self.ask()
+
+        self.assertEqual(status, 0)
+        self.assertIn("Abstained: the reply cited no excerpt", output)
+        self.assertNotIn("trust me", output)
+
+    def test_without_recall_permission_no_prompt_is_built_or_sent(self) -> None:
+        self.configure({"codex": [str(self.vault)]}, None)
+
+        status, _ = self.ask()
+
+        self.assertEqual(status, 1)
+        self.assertFalse((self.home / ".hearth/asks").exists())
+        self.assertFalse((self.home / ".fake-last-ask-prompt").exists())
+
+    def test_no_accepted_excerpt_abstains_without_asking_a_model(self) -> None:
+        self.configure({"claude": [str(self.vault)]}, None)
+
+        status, output = self.cli("ask", "zebra quantum lattice", "--keyword")
+
+        self.assertEqual(status, 0)
+        self.assertIn("No model was asked", output)
+        self.assertFalse((self.home / ".fake-last-ask-prompt").exists())
+
+    def test_an_agent_inside_a_task_cannot_ask(self) -> None:
+        self.configure({"claude": [str(self.vault)]}, None)
+        os.environ["HEARTH_TASK"] = "20260928-000000"
+
+        self.assertEqual(self.ask()[0], 1)
+        self.assertFalse((self.home / ".hearth/asks").exists())
