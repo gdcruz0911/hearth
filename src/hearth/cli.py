@@ -445,6 +445,9 @@ def _print_question_set_summary(records: list[dict], out: Path) -> None:
     by_label = ", ".join(f"{label} {sum(record['label'] == label for record in unscored)}" for label in LABELS
                          if any(record["label"] == label for record in unscored))
     print(f"Not scored: {len(unscored)}" + (f" ({by_label})" if by_label else ""))
+    for record in unscored:
+        if record.get("exclusion_reason"):
+            print(f"  {record['id']}, labeled {record['label']}: excluded, {record['exclusion_reason']}")
     print("Contradicted premises and conflicting evidence are not evaluated by these results.")
     print(f"Records: {out}")
 

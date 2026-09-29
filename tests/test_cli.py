@@ -119,6 +119,8 @@ class CollectionInspectionCliTests(unittest.TestCase):
         question_set.write_text(json.dumps({"cases": [
             {"id": "owner", "question": "Who is the deployment owner?", "label": "supported", "quote_contains": "Ada"},
             {"id": "conflict", "question": "When was it due?", "label": "conflicting evidence", "excluded": True},
+            {"id": "removed", "question": "Who owns it?", "label": "supported", "quote_contains": "Ada", "excluded": True,
+             "exclusion_reason": "source removed"},
         ]}), encoding="utf-8")
         records = self.root / "records.jsonl"
         output = io.StringIO()
@@ -127,9 +129,11 @@ class CollectionInspectionCliTests(unittest.TestCase):
             exit_code = main(["--database", str(self.database), "evaluate-questions", str(question_set), "--out", str(records)])
 
         self.assertEqual(exit_code, 0)
-        self.assertEqual(len(records.read_text(encoding="utf-8").splitlines()), 2)
+        self.assertEqual(len(records.read_text(encoding="utf-8").splitlines()), 3)
         self.assertIn("supported: 1 of 1 succeeded", output.getvalue())
-        self.assertIn("Not scored: 1 (conflicting evidence 1)", output.getvalue())
+        self.assertIn("Not scored: 2 (supported 1, conflicting evidence 1)", output.getvalue())
+        self.assertIn("  removed, labeled supported: excluded, source removed", output.getvalue())
+        self.assertEqual(json.loads(records.read_text(encoding="utf-8").splitlines()[2])["exclusion_reason"], "source removed")
         self.assertIn("Contradicted premises and conflicting evidence are not evaluated", output.getvalue())
 
     def test_evaluate_appends_one_line_per_case_with_provenance(self) -> None:

@@ -188,7 +188,8 @@ def record_question_set(service: HearthService, path: Path) -> list[dict[str, ob
             outcome = "success" if any(quote in citation.quote for citation in answer.citations) else "failure"
         else:
             outcome = "success" if answer.status == "abstained" else "failure"
-        records.append({"id": case_id, "label": case["label"], "excluded": bool(case.get("excluded")),
+        reason = case.get("exclusion_reason") if isinstance(case.get("exclusion_reason"), str) else None
+        records.append({"id": case_id, "label": case["label"], "excluded": bool(case.get("excluded")), "exclusion_reason": reason,
                         "expected_quote": quote, "outcome": outcome, **trace, "run": run})
     return records
 
