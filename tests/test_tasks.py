@@ -1603,3 +1603,42 @@ class ReviewGuideTests(LoopTestCase):
         self.assertEqual(self.loop(task, "changes,approve"), 0)
 
         self.assertNotIn("Findings earlier reviews", self.review_prompt(task, "04-review-codex"))
+
+
+class ReviewPermissionTests(RecallFixture):
+    """Agent output can quote recalled excerpts, so only a provider whose recall scope covers the task's may read it (ADR-0024)."""
+
+    def test_a_reviewer_without_recall_permission_never_sees_the_findings_or_diff_of_a_recall_task(self) -> None:
+        (self.repo / "docs/agents").mkdir(parents=True)
+        (self.repo / tasks.REVIEW_GUIDE).write_text("Base rule: check the goal.\n", encoding="utf-8")
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-q", "-m", "guide")
+        self.configure({"claude": [str(self.vault)], "codex": [str(self.vault)]}, [str(self.vault)], members=("claude", "codex", "antigravity"))
+        self.cli("task", "new", "demo", "Add hello.txt", "--recall", "keyword")
+        task = self.only_task()
+        self.assertTrue(self.saved(task, "claude")["evidence"])
+
+        # Without the permission check, antigravity reviews first and receives the diff, then the findings in round two.
+        self.assertEqual(self.loop(task, "changes,approve"), 0)
+
+        reviews = [run["provider"] for run in self.only_task()["runs"] if run["role"] == "review"]
+        self.assertNotIn("antigravity", reviews)
+        self.assertIn("Say hello.", self.prompt(task, "04-review-codex").split("</reviewer-guide>")[1])
+
+    def test_a_recall_task_with_only_an_unpermitted_reviewer_stops_before_any_review(self) -> None:
+        self.configure({"claude": [str(self.vault)]}, [str(self.vault)], members=("claude", "antigravity"))
+        self.cli("task", "new", "demo", "Add hello.txt", "--recall", "keyword")
+
+        self.assertEqual(self.loop(self.only_task(), "approve"), 1)
+
+        task = self.only_task()
+        self.assertEqual((task["stop_reason"], [run["role"] for run in task["runs"]]), ("no_permitted_reviewer", ["implement"]))
+
+    def test_a_narrower_scope_cannot_read_output_from_a_wider_one(self) -> None:
+        self.configure({"claude": [str(self.vault)], "codex": [str(self.vault / "projects")]}, [str(self.vault)])
+        self.cli("task", "new", "demo", "Add hello.txt", "--recall", "keyword")
+        task_dir = self.home / ".hearth/tasks" / self.only_task()["id"]
+        project = json.loads((self.home / ".hearth/projects.json").read_text(encoding="utf-8"))["demo"]
+
+        self.assertEqual([tasks.recall.may_receive(self.home / ".hearth", project, task_dir, name) for name in ("claude", "codex", "antigravity")],
+                         [True, False, False])

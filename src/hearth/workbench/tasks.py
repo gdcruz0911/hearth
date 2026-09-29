@@ -547,7 +547,7 @@ def _loop(args: argparse.Namespace) -> int:
         print(f"No single task matches {args.id}.\nNext: hearth task list, then use last, a full ID, or a unique ending of one", file=sys.stderr)
         return 1
     task = _read(task_dir)
-    if task["status"] not in ("done", "failed") or task["stop_reason"] not in (None, "check_failed", "guard_failed", "no_changes", "review_unparsed", "review_guide_unreadable", "verify_rejected", "rounds_exhausted"):
+    if task["status"] not in ("done", "failed") or task["stop_reason"] not in (None, "check_failed", "guard_failed", "no_changes", "review_unparsed", "review_guide_unreadable", "no_permitted_reviewer", "verify_rejected", "rounds_exhausted"):
         reason = f" ({task['stop_reason']})" if task["stop_reason"] else ""
         print(f"{task['id']} is {task['status']}{reason}; the loop continues only a finished task whose check ran.\nNext: hearth task show {task['id']}", file=sys.stderr)
         return 1
@@ -593,9 +593,15 @@ def _loop(args: argparse.Namespace) -> int:
                 verification += ("\nProtected tests, which the implementer cannot change: " + ", ".join(task["protected_tests"])
                                  + ".\nAnother model family wrote them first on purpose as part of this change, so adding them is in scope;"
                                  + " raise a problem with what they test as a finding on that file, and Hearth asks the person about it.\n")
+            permitted = [name for name in reviewers if recall.may_receive(_home(), project, task_dir, name)]
+            if not permitted:
+                print(f"{', '.join(reviewers)} may not receive this task's agent output, which can quote excerpts recalled for another "
+                      "provider (ADR-0024).\nNext: pick a reviewer whose recall scope covers this task's with --reviewer, or discard the task",
+                      file=sys.stderr)
+                return _end(task, task_dir, "no_permitted_reviewer")
             _wait_for_slot("support", task, task_dir)
             diff = _git(Path(task["worktree"]), "diff", f"{task['base']}..HEAD")
-            for reviewer in reviewers:
+            for reviewer in permitted:
                 prompt = REVIEW_PROMPT.format(id=task["id"], goal=task["goal"], base=task["base"][:12], diff=diff[:100_000], guidance=guidance,
                                               messages=_messages(task_dir, "review", reviewer), verification=verification)  # ponytail: a cap, not paging, for very large diffs.
                 result = _run(task, task_dir, "review", reviewer, REVIEWERS[reviewer], prompt, None, None, args.timeout, project["check"])

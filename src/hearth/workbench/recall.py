@@ -31,29 +31,55 @@ def effective_roots(*lists: list[str] | tuple[Path, ...]) -> tuple[Path, ...]:
     return tuple(dict.fromkeys(result))
 
 
+def scope(home: Path, project: dict, provider: str) -> tuple[tuple[Path, ...], str | None, object]:
+    """The folders `provider` may receive excerpts from for this project, or why it may receive none, and the profile."""
+    policy_path = home / "recall.json"
+    if not policy_path.exists():
+        return (), f"no recall policy at {policy_path.name}", None
+    policy = json.loads(policy_path.read_text(encoding="utf-8"))
+    provider_roots = policy.get("providers", {}).get(provider)
+    if not provider_roots:
+        return (), f"{provider} has no recall permission", None
+    if not project.get("recall_roots"):
+        return (), "the project sets no recall_roots", None
+
+    from ..runtime import load_runtime_profile
+
+    profile = load_runtime_profile(Path(policy["profile"]).expanduser())
+    roots = effective_roots(profile.recall_roots, provider_roots, project["recall_roots"])
+    return roots, None if roots else "the profile, provider, and project recall roots do not overlap", profile
+
+
+def may_receive(home: Path, project: dict, task_dir: Path, provider: str) -> bool:
+    """Whether `provider` may see what agents wrote in this task, such as its diff or review findings.
+
+    Agent-written text can quote any excerpt an agent received, and secret and path checks do not establish that another
+    provider may receive it. So once any provider has received recalled evidence, a provider may read the task's agent
+    output only if its own recall scope covers the scope of every provider that received evidence.
+    """
+    sources = {record["provider"] for path in sorted((task_dir / "recall").glob("*.json"))
+               if (record := json.loads(path.read_text(encoding="utf-8"))).get("evidence")}
+    mine = scope(home, project, provider)[0]
+    for source in sources - {provider}:
+        theirs = scope(home, project, source)[0]
+        # A source whose scope can no longer be determined cannot be shown to be covered.
+        if not theirs or not all(any(root.is_relative_to(allowed) for allowed in mine) for root in theirs):
+            return False
+    return True
+
+
 def build(home: Path, project: dict, provider: str, goal: str, mode: str) -> dict:
     """Search for one destination provider and return what may be sent, or why nothing may."""
     record = {"provider": provider, "mode": mode, "query": goal, "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
               "scope": [], "status": None, "evidence": [], "withheld": [], "reason": None}
-    policy_path = home / "recall.json"
-    if not policy_path.exists():
-        return {**record, "reason": f"no recall policy at {policy_path.name}"}
-    policy = json.loads(policy_path.read_text(encoding="utf-8"))
-    provider_roots = policy.get("providers", {}).get(provider)
-    if not provider_roots:
-        return {**record, "reason": f"{provider} has no recall permission"}
-    if not project.get("recall_roots"):
-        return {**record, "reason": "the project sets no recall_roots"}
+    roots, reason, profile = scope(home, project, provider)
+    if reason:
+        return {**record, "reason": reason}
 
     from ..embedding import EmbeddingError, FlatVectorIndex, IndexError, MLXEmbedder
-    from ..runtime import load_runtime_profile
     from ..service import HearthService
     from .tasks import GUARD_PATTERNS
 
-    profile = load_runtime_profile(Path(policy["profile"]).expanduser())
-    roots = effective_roots(profile.recall_roots, provider_roots, project["recall_roots"])
-    if not roots:
-        return {**record, "reason": "the profile, provider, and project recall roots do not overlap"}
     semantic = None
     if mode == "hybrid":
         if profile.embedding_model is None or profile.index_directory is None:
