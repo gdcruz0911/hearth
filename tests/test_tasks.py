@@ -1642,3 +1642,45 @@ class ReviewPermissionTests(RecallFixture):
 
         self.assertEqual([tasks.recall.may_receive(self.home / ".hearth", project, task_dir, name) for name in ("claude", "codex", "antigravity")],
                          [True, False, False])
+
+    def record(self, task: dict, name: str, provider: str, roots: list[str] | None) -> None:
+        saved = {"provider": provider, "evidence": [{"chunk_id": 1, "excerpt": "synthetic"}]}
+        tasks.recall.save(self.home / ".hearth/tasks" / task["id"], saved | ({"roots": roots} if roots is not None else {}), name)
+
+    def test_verification_is_refused_before_the_diff_reaches_an_unpermitted_verifier(self) -> None:
+        (self.repo / "VERIFY.md").write_text("Run the program and save its output as evidence.\n", encoding="utf-8")
+        git(self.repo, "add", "VERIFY.md")
+        git(self.repo, "commit", "-q", "-m", "add VERIFY.md")
+        self.configure({"claude": [str(self.vault)]}, [str(self.vault)])
+        self.cli("task", "new", "demo", "Add hello.txt", "--recall", "keyword")
+
+        self.assertEqual(self.loop(self.only_task(), "approve"), 1)
+
+        task = self.only_task()
+        self.assertEqual((task["stop_reason"], [run["role"] for run in task["runs"]]), ("no_permitted_verifier", ["implement"]))
+
+    def test_saved_roots_decide_and_a_revoked_provider_loses_even_its_own_output(self) -> None:
+        self.configure({"claude": [str(self.vault)], "codex": [str(self.vault)]}, [str(self.vault)])
+        self.cli("task", "new", "demo", "Add hello.txt", "--recall", "keyword")
+        task = self.only_task()
+        task_dir, project = self.home / ".hearth/tasks" / task["id"], json.loads((self.home / ".hearth/projects.json").read_text())["demo"]
+        self.assertEqual(self.saved(task, "claude")["roots"], [str(self.vault.resolve())])
+
+        self.configure({"codex": [str(self.vault)]}, [str(self.vault)])  # Claude's permission is revoked mid-task.
+        self.assertEqual([tasks.recall.may_receive(self.home / ".hearth", project, task_dir, name) for name in ("claude", "codex")], [False, True])
+
+        self.record(task, "legacy", "codex", None)  # Saved before roots were recorded: nobody can be shown to be covered.
+        self.assertFalse(tasks.recall.may_receive(self.home / ".hearth", project, task_dir, "codex"))
+
+    def test_a_fix_after_a_wider_reviewers_knowledge_answer_is_not_sent_to_a_narrower_implementer(self) -> None:
+        self.configure({"claude": [str(self.vault / "projects")], "codex": [str(self.vault)]}, [str(self.vault)])
+        self.cli("task", "new", "demo", "Add hello.txt", "--recall", "keyword")
+        task = self.only_task()
+        self.record(task, "knowledge-m1-codex", "codex", [str(self.vault.resolve())])  # The reviewer asked knowledge.
+
+        self.assertEqual(self.loop(task, "changes"), 1)
+
+        task = self.only_task()
+        fix = task["runs"][-1]
+        self.assertEqual((fix["role"], task["stop_reason"]), ("fix", "recall_not_permitted"))
+        self.assertFalse((self.home / ".hearth/tasks" / task["id"] / "runs" / fix["dir"] / "events.jsonl").exists())

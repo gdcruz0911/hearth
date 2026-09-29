@@ -50,28 +50,28 @@ def scope(home: Path, project: dict, provider: str) -> tuple[tuple[Path, ...], s
     return roots, None if roots else "the profile, provider, and project recall roots do not overlap", profile
 
 
-def may_receive(home: Path, project: dict, task_dir: Path, provider: str) -> bool:
-    """Whether `provider` may see what agents wrote in this task, such as its diff or review findings.
+def may_receive(home: Path, project: dict | None, task_dir: Path, provider: str) -> bool:
+    """Whether `provider` may now see what agents wrote in this task, such as its diff, findings, or a fix request.
 
     Agent-written text can quote any excerpt an agent received, and secret and path checks do not establish that another
-    provider may receive it. So once any provider has received recalled evidence, a provider may read the task's agent
-    output only if its own recall scope covers the scope of every provider that received evidence.
+    provider may receive it. So each recall record saves the roots its excerpts were permitted from, and once any record
+    holds evidence, a provider may read the task's agent output only if its current scope covers all of those roots.
+    Its own earlier excerpts get no exemption: a provider whose permission was revoked is refused too.
     """
-    sources = {record["provider"] for path in sorted((task_dir / "recall").glob("*.json"))
-               if (record := json.loads(path.read_text(encoding="utf-8"))).get("evidence")}
-    mine = scope(home, project, provider)[0]
-    for source in sources - {provider}:
-        theirs = scope(home, project, source)[0]
-        # A source whose scope can no longer be determined cannot be shown to be covered.
-        if not theirs or not all(any(root.is_relative_to(allowed) for allowed in mine) for root in theirs):
-            return False
-    return True
+    delivered = [record for path in sorted((task_dir / "recall").glob("*.json"))
+                 if (record := json.loads(path.read_text(encoding="utf-8"))).get("evidence")]
+    if not delivered:
+        return True
+    mine = scope(home, project, provider)[0] if project is not None else ()
+    # A record without saved roots, written before they were saved, cannot be shown to be covered.
+    return all(record.get("roots") and all(any(Path(root).is_relative_to(allowed) for allowed in mine) for root in record["roots"])
+               for record in delivered)
 
 
 def build(home: Path, project: dict, provider: str, goal: str, mode: str) -> dict:
     """Search for one destination provider and return what may be sent, or why nothing may."""
     record = {"provider": provider, "mode": mode, "query": goal, "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-              "scope": [], "status": None, "evidence": [], "withheld": [], "reason": None}
+              "scope": [], "roots": [], "status": None, "evidence": [], "withheld": [], "reason": None}
     roots, reason, profile = scope(home, project, provider)
     if reason:
         return {**record, "reason": reason}
@@ -102,7 +102,7 @@ def build(home: Path, project: dict, provider: str, goal: str, mode: str) -> dic
             continue
         evidence.append({key: item.get(key) for key in ("chunk_id", "document", "page", "location", "source")}
                         | {"excerpt": item["excerpt"][:EXCERPT_CHARS]})
-    return {**record, "scope": [root.name for root in roots], "status": report["status"],
+    return {**record, "scope": [root.name for root in roots], "roots": [str(root) for root in roots], "status": report["status"],
             "gate": report["gate"], "evidence": evidence[:EXCERPTS], "withheld": withheld}
 
 
