@@ -547,7 +547,7 @@ def _loop(args: argparse.Namespace) -> int:
         print(f"No single task matches {args.id}.\nNext: hearth task list, then use last, a full ID, or a unique ending of one", file=sys.stderr)
         return 1
     task = _read(task_dir)
-    if task["status"] not in ("done", "failed") or task["stop_reason"] not in (None, "check_failed", "guard_failed", "no_changes", "review_unparsed", "review_guide_unreadable", "verify_rejected", "rounds_exhausted"):
+    if task["status"] not in ("done", "failed") or task["stop_reason"] not in (None, "check_failed", "guard_failed", "no_changes", "review_unparsed", "review_guide_unreadable", "no_permitted_reviewer", "verify_rejected", "rounds_exhausted"):
         reason = f" ({task['stop_reason']})" if task["stop_reason"] else ""
         print(f"{task['id']} is {task['status']}{reason}; the loop continues only a finished task whose check ran.\nNext: hearth task show {task['id']}", file=sys.stderr)
         return 1
@@ -593,15 +593,22 @@ def _loop(args: argparse.Namespace) -> int:
                 verification += ("\nProtected tests, which the implementer cannot change: " + ", ".join(task["protected_tests"])
                                  + ".\nAnother model family wrote them first on purpose as part of this change, so adding them is in scope;"
                                  + " raise a problem with what they test as a finding on that file, and Hearth asks the person about it.\n")
+            permitted = [name for name in reviewers if recall.may_receive(_home(), project, task_dir, name)]
+            if not permitted:
+                print(f"{', '.join(reviewers)} may not receive this task's agent output, which can quote excerpts recalled for another "
+                      "provider (ADR-0024).\nNext: pick a reviewer whose recall scope covers this task's with --reviewer, or discard the task",
+                      file=sys.stderr)
+                return _end(task, task_dir, "no_permitted_reviewer")
             _wait_for_slot("support", task, task_dir)
             diff = _git(Path(task["worktree"]), "diff", f"{task['base']}..HEAD")
-            for reviewer in reviewers:
+            for reviewer in permitted:
                 prompt = REVIEW_PROMPT.format(id=task["id"], goal=task["goal"], base=task["base"][:12], diff=diff[:100_000], guidance=guidance,
                                               messages=_messages(task_dir, "review", reviewer), verification=verification)  # ponytail: a cap, not paging, for very large diffs.
                 result = _run(task, task_dir, "review", reviewer, REVIEWERS[reviewer], prompt, None, None, args.timeout, project["check"])
                 verdict = None if result["stop"] else _verdict(result["final"])
                 task["runs"][-1]["verdict"] = verdict and verdict["verdict"]
                 task["runs"][-1]["risk"] = verdict.get("risk") if verdict and isinstance(verdict.get("risk"), str) else None
+                task["runs"][-1]["findings"] = verdict and verdict["findings"]  # A review after a fix checks each one.
                 if verdict or result["stop"] == "timeout":
                     break  # An empty or failed review falls back to the next reviewer; a slow one does not.
             if not result["stop"] and _hold_for_person(task, task_dir, "done", None):
@@ -625,8 +632,7 @@ def _loop(args: argparse.Namespace) -> int:
                                          "Answer to keep them, which the reviewer will see, or discard the task to write new ones.", "refs": []})
                 _hold_for_person(task, task_dir, "done", None)
                 return 1
-            findings = "".join(f"- {item.get('standard', '')} {item.get('file', '')}:{item.get('line', '')} {item.get('problem', '')}\n" for item in verdict["findings"])
-            feedback = f"A reviewer from another model family asked for these changes:\n\n{findings}"
+            feedback = f"A reviewer from another model family asked for these changes:\n\n{_findings_text(verdict['findings'])}"
         if fixes == args.rounds:
             return _end(task, task_dir, "rounds_exhausted")
         fixes += 1
@@ -671,10 +677,19 @@ def _review_guidance(task: dict, context: str) -> str:
     if listed.returncode != 0 or shown.returncode != 0:
         raise ReviewGuideError(f"{REVIEW_GUIDE} exists at the base commit {task['base'][:12]} but could not be read: "
                                f"{(listed.stderr or shown.stderr).strip()}")
+    earlier = ""
+    if context == "review after a fix":
+        earlier = "\n\nFindings earlier reviews asked the implementer to correct, as those reviewers reported them; check each one:\n" + "".join(
+            f"\nReview {run['dir']}:\n" + (_findings_text(run["findings"]) if run.get("findings") else "- not recorded\n")
+            for run in task["runs"] if run["role"] == "review" and run.get("verdict") == "changes")
     return (f"Review context: {context}.\n"
             f"Follow the reviewer guide below, taken from {REVIEW_GUIDE} at the base commit {task['base'][:12]}; "
             "a copy changed in the worktree does not apply to this review.\n\n"
-            f"<reviewer-guide>\n{shown.stdout.strip()}\n</reviewer-guide>")
+            f"<reviewer-guide>\n{shown.stdout.strip()}\n</reviewer-guide>{earlier.rstrip()}")
+
+
+def _findings_text(findings: list) -> str:
+    return "".join(f"- {item.get('standard', '')} {item.get('file', '')}:{item.get('line', '')} {item.get('problem', '')}\n" for item in findings)
 
 
 def _verify(task: dict, task_dir: Path, project: dict, family: str, timeout: int) -> dict:
