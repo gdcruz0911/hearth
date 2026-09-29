@@ -5,6 +5,7 @@ The scenario comes from FAKE_AGENT_SCENARIO: edit, rewrite, idle, fail, auth, or
 A prompt that starts with "# Review" is answered with the next verdict in FAKE_REVIEWS: approve, changes, elsewhere, second-line, or garbage.
 A prompt that starts with "# Verify" follows the next scenario in FAKE_VERIFY: verified, failed, missing, edit, cache, or garbage.
 A test-writing prompt writes tests/test_hello.txt, plus notes.txt when FAKE_TESTS is "source".
+A prompt that starts with "# Ask" is answered with FAKE_ASK, by default a reply citing excerpt [1].
 A prompt that starts with "# Retro" is answered with the next reply in FAKE_RETRO: proposal, guard, or garbage.
 An editing or idle run also writes FAKE_OUTBOX, if set, to .hearth/outbox.jsonl as board messages,
 and an editing run appends FAKE_EXTRA, if set, to hello.txt, and ends with a PR title line unless FAKE_TITLE is none.
@@ -82,6 +83,10 @@ def main() -> int:
     if prompt.startswith("# Review"):
         Path.home().joinpath(".fake-last-review-prompt").write_text(prompt, encoding="utf-8")
         finish(VERDICTS[next_answer("reviews", "approve")])
+        return 0
+    if prompt.startswith("# Ask"):
+        Path.home().joinpath(".fake-last-ask-prompt").write_text(prompt, encoding="utf-8")
+        finish(os.environ.get("FAKE_ASK", "Greetings are warm [1]."))
         return 0
     if prompt.startswith("# Retro"):
         Path.home().joinpath(".fake-last-retro-prompt").write_text(prompt, encoding="utf-8")

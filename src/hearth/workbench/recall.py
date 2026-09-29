@@ -31,8 +31,11 @@ def effective_roots(*lists: list[str] | tuple[Path, ...]) -> tuple[Path, ...]:
     return tuple(dict.fromkeys(result))
 
 
-def scope(home: Path, project: dict, provider: str) -> tuple[tuple[Path, ...], str | None, object]:
-    """The folders `provider` may receive excerpts from for this project, or why it may receive none, and the profile."""
+def scope(home: Path, project: dict | None, provider: str) -> tuple[tuple[Path, ...], str | None, object]:
+    """The folders `provider` may receive excerpts from for this project, or why it may receive none, and the profile.
+
+    With no project, as for `hearth ask`, the scope is the profile's and the provider's roots alone.
+    """
     policy_path = home / "recall.json"
     if not policy_path.exists():
         return (), f"no recall policy at {policy_path.name}", None
@@ -40,13 +43,13 @@ def scope(home: Path, project: dict, provider: str) -> tuple[tuple[Path, ...], s
     provider_roots = policy.get("providers", {}).get(provider)
     if not provider_roots:
         return (), f"{provider} has no recall permission", None
-    if not project.get("recall_roots"):
+    if project is not None and not project.get("recall_roots"):
         return (), "the project sets no recall_roots", None
 
     from ..runtime import load_runtime_profile
 
     profile = load_runtime_profile(Path(policy["profile"]).expanduser())
-    roots = effective_roots(profile.recall_roots, provider_roots, project["recall_roots"])
+    roots = effective_roots(profile.recall_roots, provider_roots, *([project["recall_roots"]] if project is not None else []))
     return roots, None if roots else "the profile, provider, and project recall roots do not overlap", profile
 
 
@@ -68,7 +71,7 @@ def may_receive(home: Path, project: dict | None, task_dir: Path, provider: str)
                for record in delivered)
 
 
-def build(home: Path, project: dict, provider: str, goal: str, mode: str) -> dict:
+def build(home: Path, project: dict | None, provider: str, goal: str, mode: str) -> dict:
     """Search for one destination provider and return what may be sent, or why nothing may."""
     record = {"provider": provider, "mode": mode, "query": goal, "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
               "scope": [], "roots": [], "status": None, "evidence": [], "withheld": [], "reason": None}
