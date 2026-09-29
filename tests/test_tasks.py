@@ -874,15 +874,16 @@ class EffortTests(LoopTestCase):
         self.assertIn("model_reasoning_effort=high", self.first_event(task, "02-review-codex")["argv"])
         self.assertEqual(implement["model_used"], "fake-model")
 
-    def test_checking_roles_run_on_pinned_models_and_implementation_on_the_default(self) -> None:
+    def test_checking_roles_and_implementation_run_on_pinned_models(self) -> None:
         task = self.start()
         self.loop(task, "approve")
 
         task = self.only_task()
         implement, review = task["runs"]
-        self.assertIsNone(implement["model"])
-        self.assertEqual(review["model"], "gpt-6-luna")
-        self.assertIn("gpt-6-luna", self.first_event(task, "02-review-codex")["argv"])
+        self.assertEqual(implement["model"], "claude-sonnet-5-5")
+        self.assertIn("claude-sonnet-5-5", self.first_event(task, "01-implement-claude")["argv"])
+        self.assertEqual(review["model"], "gpt-6-sol")
+        self.assertIn("gpt-6-sol", self.first_event(task, "02-review-codex")["argv"])
 
     def test_an_explicit_effort_overrides_the_implement_default(self) -> None:
         self.write_projects(check="test -f hello.txt", providers=("claude", "codex"))
@@ -891,15 +892,27 @@ class EffortTests(LoopTestCase):
 
         self.assertEqual(self.only_task()["runs"][0]["effort"], "low")
 
-    def test_a_codex_implementer_records_its_configured_default_model(self) -> None:
-        (self.home / ".codex").mkdir()
-        (self.home / ".codex/config.toml").write_text('model = "gpt-test"\nmodel_reasoning_effort = "medium"\n', encoding="utf-8")
+    def test_a_codex_implementer_runs_on_its_pin_and_model_overrides_it(self) -> None:
         self.write_projects(check="test -f hello.txt", providers=("claude", "codex"))
 
         with mock.patch.dict(tasks.PROVIDERS, {"codex": FAKE_CODEX}):
             self.cli("task", "new", "demo", "Add hello.txt", "--agent", "codex")
+            self.cli("task", "new", "demo", "Add hello.txt", "--agent", "codex", "--model", "gpt-test")
 
-        self.assertEqual(self.only_task()["runs"][0]["model_used"], "gpt-test")
+        used = sorted(json.loads(path.read_text(encoding="utf-8"))["runs"][0]["model_used"] for path in (self.home / ".hearth/tasks").glob("*/task.json"))
+        self.assertEqual(used, ["gpt-6-sol", "gpt-test"])
+
+    def test_models_json_overrides_the_pins_for_every_role_and_model_still_wins(self) -> None:
+        (self.home / ".hearth/models.json").write_text(json.dumps({"claude": "claude-chosen", "codex": "gpt-chosen"}), encoding="utf-8")
+        task = self.start()
+        self.loop(task, "approve")
+        with mock.patch.dict(tasks.PROVIDERS, {"codex": FAKE_CODEX}):
+            self.cli("task", "new", "demo", "Add hello.txt", "--agent", "codex", "--model", "gpt-test")
+
+        first = self.only_task_by_id(task["id"])
+        self.assertEqual([(run["role"], run["model"]) for run in first["runs"]], [("implement", "claude-chosen"), ("review", "gpt-chosen")])
+        other = next(path for path in (self.home / ".hearth/tasks").glob("*/task.json") if path.parent.name != task["id"])
+        self.assertEqual(json.loads(other.read_text(encoding="utf-8"))["runs"][0]["model"], "gpt-test")
 
     def test_review_eval_runs_at_the_chosen_effort_and_antigravity_picks_the_matching_model(self) -> None:
         os.environ["FAKE_REVIEWS"] = ",".join(["approve"] * 6)
@@ -1038,7 +1051,7 @@ class PullRequestTests(LoopTestCase):
         self.assertIn("## Why\nAdd hello.txt\n", body)
         self.assertIn("## What changed\nhello.txt now greets the person.\nFiles: hello.txt\n", body)
         self.assertIn("## Risk\nlow: only adds hello.txt (codex)\n", body)
-        self.assertIn("- Reviewed: approved by codex (gpt-6-luna, high)", body)
+        self.assertIn("- Reviewed: approved by codex (gpt-6-sol, high)", body)
         self.assertIn("- CI: runs on this pull request", body)
         self.assertIn(f"Built by Hearth task {task['id']}: implement claude, review codex.", body)
         self.assertNotIn(str(self.home), body)

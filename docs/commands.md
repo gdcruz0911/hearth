@@ -2,6 +2,7 @@
 
 Link the command once with `ln -s "$PWD/.venv/bin/hearth" ~/.local/bin/hearth` from the repository, then run `hearth` from anywhere; `hearth <command> --help` shows every option.
 Wherever a command takes a task ID, `last` or a unique ending of the ID also works, such as `hearth task show last`.
+Agents run on the models in `~/.hearth/models.json`, one per provider, such as `{"claude": "claude-sonnet-5-5", "codex": "gpt-6-sol"}`, for every role; without it Hearth uses its built-in pins, never the apps' own defaults, and `--model` overrides both for one task.
 A test fails when a command is missing from this table, so it grows with every pull request that adds one.
 
 | Command | What it does |
