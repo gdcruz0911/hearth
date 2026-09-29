@@ -1759,3 +1759,117 @@ class AskTests(RecallFixture):
 
         self.assertEqual(self.ask()[0], 1)
         self.assertFalse((self.home / ".hearth/asks").exists())
+
+
+class OutboundTests(RecallFixture):
+    """A task that received notes excerpts publishes only after the person approves exactly what would be pushed (ADR-0024)."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.pushed: list[str] = []
+        self.gh: list[list[str]] = []
+        patches = [mock.patch.object(tasks, "_push", side_effect=lambda task: self.pushed.append(task["branch"])),
+                   mock.patch.object(tasks, "_gh", side_effect=self.fake_gh)]
+        for patch in patches:
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def fake_gh(self, args: list[str], cwd: Path) -> str:
+        self.gh.append(args)
+        return {"list": "[]", "create": "https://github.com/person/demo/pull/7\n"}.get(args[1], "")
+
+    def recall_task(self, permissions: dict | None = None) -> dict:
+        self.configure(permissions or {"claude": [str(self.vault)], "codex": [str(self.vault)]}, [str(self.vault)])
+        config = self.home / ".hearth/projects.json"
+        projects = json.loads(config.read_text(encoding="utf-8"))
+        projects["demo"]["pr"] = True
+        config.write_text(json.dumps(projects), encoding="utf-8")
+        self.cli("task", "new", "demo", "Add hello.txt", "--recall", "keyword")
+        return self.only_task()
+
+    def publish(self, task: dict, *argv: str) -> tuple[int, str]:
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            status = main(["task", "publish", task["id"], *argv])
+        return status, stdout.getvalue() + stderr.getvalue()
+
+    def approved_loop(self, task: dict) -> tuple[int, str]:
+        os.environ["FAKE_REVIEWS"] = "approve"
+        return self.cli("loop", task["id"])
+
+    def test_a_recall_task_shows_exactly_what_would_be_pushed_and_pushes_nothing_until_approved(self) -> None:
+        task = self.recall_task()
+
+        status, output = self.approved_loop(task)
+
+        (saved,) = (self.home / ".hearth/tasks" / task["id"] / "outbound").iterdir()
+        code = saved.stem
+        self.assertEqual((status, self.pushed, self.gh), (0, [], []))
+        self.assertIn("Title: feat: add hello.txt", output)
+        self.assertIn("+++ b/hello.txt", output)
+        self.assertIn(saved.read_text(encoding="utf-8").strip(), output)
+        self.assertEqual(self.publish(task, "--approve", "000000000000")[0], 0)
+        self.assertEqual(self.pushed, [])
+
+        status, _ = self.publish(task, "--approve", code)
+
+        self.assertEqual((status, self.pushed), (0, [task["branch"]]))
+        self.assertEqual(self.only_task()["outbound_approval"]["code"], code)
+        self.assertEqual(self.only_task()["pr"]["number"], 7)
+
+    def test_a_change_after_the_approval_code_was_shown_needs_a_new_approval(self) -> None:
+        task = self.recall_task()
+        self.approved_loop(task)
+        (code,) = [path.stem for path in (self.home / ".hearth/tasks" / task["id"] / "outbound").iterdir()]
+        worktree = Path(task["worktree"])
+        (worktree / "hello.txt").write_text("Hello, someone else.\n", encoding="utf-8")
+        git(worktree, "commit", "-q", "-am", "change after review")
+
+        self.publish(task, "--approve", code)
+
+        self.assertEqual(self.pushed, [])
+        self.assertEqual(len(list((self.home / ".hearth/tasks" / task["id"] / "outbound").iterdir())), 2)
+
+    def test_a_copied_excerpt_is_refused_even_when_approved_and_named_without_its_text(self) -> None:
+        os.environ["FAKE_EXTRA"] = "Hello files in this project greet the person warmly, by name.\n"  # The implementer copies a note.
+        task = self.recall_task()
+
+        status, output = self.approved_loop(task)
+
+        self.assertEqual((status, self.pushed, self.gh), (1, [], []))
+        self.assertFalse((self.home / ".hearth/tasks" / task["id"] / "outbound").exists())
+        self.assertEqual(self.publish(task, "--approve", "0" * 12)[0], 1)
+        _, refusal = self.publish(task)
+        self.assertIn("greeting.md chunk", refusal)
+        self.assertNotIn("greet the person warmly", refusal)
+
+    def test_a_task_that_received_no_excerpts_publishes_without_approval(self) -> None:
+        task = self.recall_task({"codex": [str(self.vault)]})  # Claude has no recall permission, so nothing was delivered.
+        self.assertFalse(tasks.recall.delivered(self.home / ".hearth/tasks" / task["id"]))
+        os.environ["FAKE_REVIEWS"] = "approve"
+
+        self.assertEqual(self.cli("loop", task["id"])[0], 0)
+
+        self.assertEqual(self.pushed, [task["branch"]])
+
+    def test_an_agent_cannot_approve_outbound_material(self) -> None:
+        task = self.recall_task()
+        self.approved_loop(task)
+        (code,) = [path.stem for path in (self.home / ".hearth/tasks" / task["id"] / "outbound").iterdir()]
+        os.environ["HEARTH_TASK"] = "20260929-000000"
+
+        status, refusal = self.publish(task, "--approve", code)
+
+        self.assertEqual((status, self.pushed), (1, []))
+        self.assertIn("Agents cannot approve outbound material", refusal)
+
+    def test_the_scan_names_chunks_for_a_copied_run_and_misses_a_paraphrase(self) -> None:
+        task = self.recall_task()
+        task_dir = self.home / ".hearth/tasks" / task["id"]
+        words = max((item["excerpt"] for record in tasks.recall.delivered(task_dir) for item in record["evidence"]), key=len).split()
+
+        copied = tasks.recall.matches(task_dir, "unrelated " + " ".join(words[:8]) + " tail")
+        reworded = tasks.recall.matches(task_dir, "Files here should say hello to whoever is named, warmly and briefly.")
+
+        self.assertEqual(sorted(copied[0]), ["chunk_id", "document"])
+        self.assertEqual(reworded, [])
