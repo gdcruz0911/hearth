@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 import sys
 from pathlib import Path
@@ -109,7 +110,8 @@ def main(argv: list[str] | None = None) -> int:
     tasks.add_parser(subcommands)
     evals.add_parser(subcommands)
     stats.add_parser(subcommands)
-    subcommands.add_parser("list", help="List imported documents without document text or source paths.")
+    lister = subcommands.add_parser("list", help="List imported documents without document text or source paths.")
+    lister.add_argument("--json", action="store_true", help="Print the imported documents as one JSON array.")
     healther = subcommands.add_parser(
         "health", help="Summarize private collection health without document text or source paths."
     )
@@ -235,7 +237,11 @@ def main(argv: list[str] | None = None) -> int:
                 print("No matching document found.")
                 print("Next: run list to review imported documents and their IDs.")
         elif args.command == "list":
-            _print_documents(service.list_documents())
+            documents = service.list_documents()
+            if args.json:
+                print(json.dumps([dataclasses.asdict(document) for document in documents]))
+            else:
+                _print_documents(documents)
         elif args.command == "health":
             health = service.collection_health()
             if args.json:
