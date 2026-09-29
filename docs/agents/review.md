@@ -9,6 +9,7 @@ Check the change against the goal and, where they exist, `AGENTS.md` and the sta
 Approve only when the change meets the goal, is tested, and has no problem you would block a merge for.
 Ask for changes to any edit the goal did not call for, especially one that weakens or skips a test (TEST-7).
 A finding that matches no standard is still a finding; leave its `standard` empty.
+CLI flag changed: when the diff adds or changes a command or flag, check `docs/commands.md` and ask for changes if it does not describe the change (DEL-5).
 
 ## Initial implementation
 
