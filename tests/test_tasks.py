@@ -1842,6 +1842,7 @@ class OutboundTests(RecallFixture):
         self.assertEqual(self.publish(task, "--approve", "0" * 12)[0], 1)
         _, refusal = self.publish(task)
         self.assertIn("greeting.md chunk", refusal)
+        self.assertIn("is not pushed by hand either", refusal)
         self.assertNotIn("greet the person warmly", refusal)
 
     def test_a_task_that_received_no_excerpts_publishes_without_approval(self) -> None:

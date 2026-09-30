@@ -1191,7 +1191,7 @@ def _outbound_gate(task: dict, task_dir: Path, title: str, body: str, approve: s
     if copied:
         print(f"Not publishing {task['id']}: it copies excerpts recalled from your notes, which GitHub must not receive (ADR-0024): "
               + ", ".join(f"{item['document']} chunk {item['chunk_id']}" for item in copied), file=sys.stderr)
-        print(f"Next: remove the copied text from {task['branch']}, or push it yourself if you decide it may leave", file=sys.stderr)
+        print(f"Next: remove the copied text from {task['branch']}; ADR-0024 keeps vault excerpts off GitHub, so this is not pushed by hand either", file=sys.stderr)
         return 1
     code = hashlib.sha256(f"{_git(repo, 'rev-parse', task['branch']).strip()}\0{title}\0{body}".encode()).hexdigest()[:12]
     material = f"Title: {title}\n\n{body}\n\nCommits and changes to push:\n\n{history}"
