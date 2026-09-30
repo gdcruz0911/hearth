@@ -945,16 +945,22 @@ def _retro(task: dict, task_dir: Path) -> int:
         id=task["id"], goal=task["goal"], base=task["base"][:12], diff=diff[:100_000], messages=_messages(task_dir, "retro"),
         escapes="".join(f"{number}. {escape['text']}\n" for number, escape in enumerate(escapes, 1)),
         runs="".join(f"- {run.get('dir', '')[:2]} {run['role']} {run['provider']}: {_outcome(run)}\n" for run in task["runs"]))
-    proposals = None
+    proposals, refused = None, []
     for agent in agents:
         _wait_for_slot("support", task, task_dir)
         result = _run(task, task_dir, "retro", agent, REVIEWERS[agent], prompt, None, None, 1800, project["check"])
+        if result["stop"] == "recall_not_permitted":
+            refused.append(agent)
         proposals = None if result["stop"] else _proposals(result["final"], len(escapes))
         if proposals or result["stop"] == "timeout":
             break  # An empty or unreadable retro falls back to the next agent, as a review does.
     task.update(saved)
     if not proposals:
         _write(task_dir, task)
+        if refused == agents:
+            print(f"{task['id']}: retro refused: its recall scope does not cover excerpts delivered in this task (ADR-0029), "
+                  f"for {', '.join(refused)}.\nNext: widen that provider's recall roots in ~/.hearth/recall.json, or add another provider to the project", file=sys.stderr)
+            return 1
         print(f"{task['id']}: no readable proposal; see the retro run's report.\nNext: hearth task show {task['id']}", file=sys.stderr)
         return 1
     for number, proposal in proposals.items():
