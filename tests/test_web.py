@@ -12,7 +12,7 @@ from urllib.parse import urlsplit
 from hearth.domain import DocumentRelationship
 from hearth.embedding import IndexBuildCancelled, IndexBuildStopped
 from hearth.service import HearthService
-from hearth.web import HearthWebServer
+from hearth.web import HearthWebApplication, HearthWebServer
 
 
 class FakeRelationshipIndex:
@@ -381,3 +381,29 @@ class HearthWebServerTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WorkbenchTasksEndpointTests(unittest.TestCase):
+    """The dashboard's task data comes from a function the CLI passes in, behind the capability path."""
+
+    def setUp(self) -> None:
+        self.temporary_directory = tempfile.TemporaryDirectory()
+        self.service = HearthService(Path(self.temporary_directory.name) / "hearth.sqlite")
+        self.addCleanup(self.temporary_directory.cleanup)
+        self.addCleanup(self.service.close)
+
+    def test_the_endpoint_serves_the_passed_in_task_data(self) -> None:
+        payload = {"tasks": [{"id": "20260930-000000", "status": "running"}], "slots": {"implement": {"limit": 2, "busy": 1}}}
+        app = HearthWebApplication(self.service, "token", workbench_tasks=lambda: payload)
+
+        response = app.respond("GET", "/token/api/workbench/tasks", b"")
+        outside = app.respond("GET", "/api/workbench/tasks", b"")
+
+        self.assertEqual((response.status, json.loads(response.body)), (200, payload))
+        self.assertEqual(outside.status, 404)
+
+    def test_without_the_workbench_the_endpoint_says_so(self) -> None:
+        response = HearthWebApplication(self.service, "token").respond("GET", "/token/api/workbench/tasks", b"")
+
+        self.assertEqual(response.status, 404)
+        self.assertIn("not connected", json.loads(response.body)["error"])

@@ -94,9 +94,12 @@ class HearthWebApplication:
         capability_token: str,
         choose_file: Callable[[], Path] = None,
         source_roots: tuple[Path, ...] = (),
+        workbench_tasks: Callable[[], Mapping[str, Any]] | None = None,
     ):
         self._service = service
         self._capability_token = capability_token
+        # Passed in by the CLI, the composition root, so this module never imports the workbench (CODE-1).
+        self._workbench_tasks = workbench_tasks
         self._choose_file = choose_file or choose_local_file
         self._source_roots = source_roots
         self._pending_actions: dict[str, _PendingAction] = {}
@@ -145,6 +148,10 @@ class HearthWebApplication:
             return self._json_response({"roots": [_source_root_payload(item) for item in self._service.source_roots(self._source_roots)]})
         if relative_path == "api/semantic-index":
             return self._json_response({"job": self._semantic_index_job_payload()})
+        if relative_path == "api/workbench/tasks":
+            if self._workbench_tasks is None:
+                return self._json_error(HTTPStatus.NOT_FOUND, "The workbench is not connected to this interface.")
+            return self._json_response(self._workbench_tasks())
         if relative_path.startswith("api/relationships/"):
             left_document_id, right_document_id = _relationship_document_ids(
                 relative_path.removeprefix("api/relationships/")
@@ -467,9 +474,10 @@ class HearthWebServer:
         choose_file: Callable[[], Path] = None,
         source_roots: tuple[Path, ...] = (),
         browser_opener: Callable[[str], bool] = webbrowser.open,
+        workbench_tasks: Callable[[], Mapping[str, Any]] | None = None,
     ):
         token = secrets.token_urlsafe(32)
-        self._application = HearthWebApplication(service, token, choose_file, source_roots)
+        self._application = HearthWebApplication(service, token, choose_file, source_roots, workbench_tasks)
         self._browser_opener = browser_opener
         self._http_server = _LoopbackHTTPServer(("127.0.0.1", port), _handler_type(self._application))
         self._http_server.timeout = 0.5
