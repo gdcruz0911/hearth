@@ -1992,3 +1992,22 @@ class CancelTests(TaskTestCase):
 
         task = self.only_task()
         self.assertEqual((task["status"], task["runs"]), ("cancelled", []))
+
+
+class RetroRefusalTests(RecallFixture):
+    def test_a_retro_refused_for_recall_says_so_instead_of_unreadable(self) -> None:
+        self.configure({"claude": [str(self.vault)], "codex": [str(self.vault)]}, [str(self.vault)])
+        self.cli("task", "new", "demo", "Add hello.txt", "--recall", "keyword")
+        task = self.only_task()
+        os.environ["FAKE_REVIEWS"] = "approve"
+        self.cli("loop", task["id"])
+        self.cli("task", "escape", task["id"], "hello.txt never says the person's name.")
+        self.configure({"claude": [str(self.vault)]}, [str(self.vault)])  # Codex, the only other family, loses recall.
+
+        stderr = io.StringIO()
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(stderr):
+            status = main(["task", "retro", task["id"]])
+
+        self.assertEqual(status, 1)
+        self.assertIn("refused: its recall scope does not cover excerpts delivered in this task (ADR-0029)", stderr.getvalue())
+        self.assertNotIn("no readable proposal", stderr.getvalue())
