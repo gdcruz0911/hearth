@@ -235,6 +235,8 @@ def add_parser(subcommands: argparse._SubParsersAction) -> None:
     show = actions.add_parser("show", help="Show one task and the commands to review and publish it.")
     show.add_argument("id")
     show.add_argument("--json", action="store_true", help="Print the task record as JSON.")
+    cancel = actions.add_parser("cancel", help="Stop a task's active run and let no further agent start; its work and receipts stay.")
+    cancel.add_argument("id")
     discard = actions.add_parser("discard", help="Preview, or with --apply remove, a task's worktree and branch.")
     discard.add_argument("id")
     discard.add_argument("--apply", action="store_true", help="Remove the worktree and branch; the task directory stays as a receipt.")
@@ -256,7 +258,19 @@ def refused_inside_task(action: str = "start tasks") -> bool:
     return True
 
 
+class Cancelled(Exception):
+    """Raised where a cancelled task would otherwise start or continue an agent run."""
+
+
 def run(args: argparse.Namespace) -> int:
+    try:
+        return _command(args)
+    except Cancelled as exc:
+        print(f"{exc} was cancelled; its worktree and receipts are kept.\nNext: hearth task show {exc}", file=sys.stderr)
+        return 1
+
+
+def _command(args: argparse.Namespace) -> int:
     if (args.command == "loop" or getattr(args, "task_command", None) == "new") and refused_inside_task():
         return 1
     if getattr(args, "task_command", None) == "promote" and refused_inside_task("promote reports into the person's notes"):
@@ -270,7 +284,8 @@ def run(args: argparse.Namespace) -> int:
     if args.task_command == "list":
         tasks = [_read(path.parent) for path in sorted(_home().glob("tasks/*/task.json"), reverse=True)]
         if args.json:
-            print(json.dumps(tasks))
+            slots = {kind: {"limit": limit, "busy": _busy(kind)} for kind, limit in SLOTS.items()}
+            print(json.dumps({"tasks": [_summary(task, _home() / "tasks" / task["id"]) for task in tasks], "slots": slots}))
         for task in [] if args.json else tasks:
             print(f"{task['id']}  {task['status']:<11}  {task['project']:<12}  {task['goal'][:60]}")
         if not tasks and not args.json:
@@ -320,6 +335,8 @@ def run(args: argparse.Namespace) -> int:
         return _implement(_projects()[task["project"]], task, task_dir)
     if args.task_command == "answer":
         return _answer(task, task_dir, args.text)
+    if args.task_command == "cancel":
+        return _cancel(task, task_dir)
     return _discard(task, task_dir, args.apply, args.discard_uncommitted)
 
 
@@ -521,6 +538,8 @@ def _run(task: dict, task_dir: Path, role: str, provider: str, template: list[st
     model = model or _model(provider, role)
     if provider == "antigravity" and model and re.search(r"-(low|high)$", model):
         model = re.sub(r"-(low|high)$", "-low" if effort == "low" else "-high", model)  # agy names its thinking level in the model.
+    if (task_dir / "cancel").exists():
+        raise Cancelled(task["id"])
     record = _record(task, task_dir, role, provider, model, effort, prompt)
     run_dir = task_dir / "runs" / record["dir"]
     if not recall.may_receive(_home(), _projects().get(task.get("project")) if (task_dir / "recall").is_dir() else None, task_dir, provider):
@@ -547,6 +566,9 @@ def _run(task: dict, task_dir: Path, role: str, provider: str, template: list[st
     record.update(session_id=parsed["session_id"], usage=parsed["usage"],
                   model_used=parsed["model"] or model)
     (run_dir / "report.md").write_text(parsed["final"], encoding="utf-8")
+    if (task_dir / "cancel").exists():
+        _write(task_dir, task)  # The killed run's record is kept; the outbox is left unread.
+        raise Cancelled(task["id"])
     _drain(task, task_dir, record)
     parsed["stop"] = "timeout" if timed_out else parsed["error"] or ("provider_error" if process.returncode else None)
     return parsed
@@ -1266,6 +1288,8 @@ def _family(provider: str, model: str | None) -> str:
 
 def _wait_for_slot(kind: str, task: dict, task_dir: Path) -> None:
     while _busy(kind) >= SLOTS[kind]:
+        if (task_dir / "cancel").exists():
+            raise Cancelled(task["id"])
         if task["status"] != "queued":
             task["status"] = "queued"
             _write(task_dir, task)
@@ -1439,9 +1463,69 @@ def _stop(process: subprocess.Popen) -> None:
             continue
 
 
+def _cancel(task: dict, task_dir: Path) -> int:
+    """Stop the active run's process group and mark the task so no further agent starts; nothing is deleted."""
+    if task["status"] in ("done", "cancelled"):
+        print(f"{task['id']} is already {task['status']}; nothing to cancel.\nNext: hearth task show {task['id']}", file=sys.stderr)
+        return 1
+    (task_dir / "cancel").write_text(_now() + "\n", encoding="utf-8")
+    run = task["runs"][-1] if task["runs"] else None
+    if run and _alive(run.get("pid")):
+        _stop_pid(run["pid"])
+    _write(task_dir, task)
+    print(f"{task['id']}  cancelled  {task['worktree']}")
+    if run and run.get("interactive"):
+        print(f"Next: close its tmux window yourself; the session may hold work you want to keep", file=sys.stderr)
+    return 0
+
+
+def _stop_pid(pid: int) -> None:
+    """Stop an agent started in its own session by another Hearth process: its process group, then the group again by force."""
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(pid, sig)  # ponytail: trusts the recorded pid; a reused pid would be a new session leader only by coincidence.
+        except ProcessLookupError:
+            return
+        for _ in range(50):
+            if not _alive(pid):
+                return
+            time.sleep(0.1)
+
+
+def _summary(task: dict, task_dir: Path) -> dict:
+    """What a dashboard needs about one task, derived from its record: never excerpt text, only where things are."""
+    last = task["runs"][-1] if task["runs"] else None
+    records = [(path.stem, json.loads(path.read_text(encoding="utf-8"))) for path in sorted((task_dir / "recall").glob("*.json"))]
+    runs_dir = task_dir / "runs"
+    return {
+        "id": task["id"], "project": task["project"], "goal": task["goal"], "status": task["status"],
+        "stage": last["role"] if last else None, "stop_reason": task["stop_reason"],
+        "failure": {"reason": task["stop_reason"], "run": last and last.get("dir")} if task["status"] in ("failed", "cancelled", "interrupted") else None,
+        "active_run": ({key: last.get(key) for key in ("dir", "role", "provider", "model", "started")}
+                       if last and task["status"] == "running" else None),
+        "queued": task["status"] == "queued",
+        "questions": [{key: question.get(key) for key in ("id", "from", "kind", "body")} for question in _open_questions(task_dir)],
+        "created": task["created"], "finished": task["finished"], "branch": task["branch"], "base": task["base"],
+        "review": task.get("review"), "pr": task.get("pr"),
+        "runs": [{"dir": run.get("dir"), "role": run["role"], "provider": run["provider"], "model": run.get("model_used") or run.get("model"),
+                  "started": run.get("started"), "finished": run.get("finished"), "outcome": _outcome(run), "verdict": run.get("verdict"),
+                  "claims": run.get("claims"), "not_checked": run.get("not_checked"), "risk": run.get("risk")} for run in task["runs"]],
+        # Scope names, counts, and document names only: excerpts stay in the task's recall records.
+        "recall": [{"record": name, "provider": record.get("provider"), "mode": record.get("mode"), "folders": record.get("scope") or [],
+                    "excerpts": len(record.get("evidence") or []), "documents": sorted({item["document"] for item in record.get("evidence") or []}),
+                    "withheld": len(record.get("withheld") or []), "not_sent_because": record.get("reason") or record.get("error")}
+                   for name, record in records],
+        "artifacts": {"receipts": str(task_dir), "worktree": task["worktree"],
+                      "diff": str(task_dir / "diff.patch") if (task_dir / "diff.patch").exists() else None,
+                      "reports": [str(runs_dir / run["dir"] / "report.md") for run in task["runs"] if run.get("dir") and (runs_dir / run["dir"] / "report.md").exists()],
+                      "evidence": [str(runs_dir / run["dir"] / "evidence") for run in task["runs"] if run.get("dir") and (runs_dir / run["dir"] / "evidence").is_dir()],
+                      "outbound": sorted(str(path) for path in (task_dir / "outbound").glob("*.md"))},
+    }
+
+
 def _show(task: dict, task_dir: Path, as_json: bool) -> None:
     if as_json:
-        print(json.dumps(task))
+        print(json.dumps(_summary(task, task_dir)))
         return
     print(f"{task['id']}  {task['status']}{f' ({task['stop_reason']})' if task['stop_reason'] else ''}")
     print(f"goal      {task['goal']}")
@@ -1541,6 +1625,9 @@ def _alive(pid: int | None) -> bool:
 
 
 def _write(task_dir: Path, task: dict) -> None:
+    if (task_dir / "cancel").exists():
+        # A loop process holds this task in memory; whatever it writes after a cancel still records the cancel.
+        task.update(status="cancelled", stop_reason="cancelled", cancelled=task.get("cancelled") or _now())
     temporary = task_dir / "task.json.tmp"
     temporary.write_text(json.dumps(task, indent=2) + "\n", encoding="utf-8")
     temporary.replace(task_dir / "task.json")

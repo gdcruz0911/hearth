@@ -8,6 +8,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -166,7 +167,7 @@ class TaskTests(TaskTestCase):
 
         _, output = self.cli("task", "list", "--json")
 
-        self.assertEqual(json.loads(output)[0]["status"], "interrupted")
+        self.assertEqual(json.loads(output)["tasks"][0]["status"], "interrupted")
 
     def test_the_headroom_gate_refuses_a_nearly_spent_provider_unless_forced(self) -> None:
         spent = [{"provider": "claude", "five_hour": 95, "week": 40}]
@@ -1873,3 +1874,104 @@ class OutboundTests(RecallFixture):
 
         self.assertEqual(sorted(copied[0]), ["chunk_id", "document"])
         self.assertEqual(reworded, [])
+
+
+class TaskStatusJsonTests(RecallFixture):
+    """task list --json and task show --json: what a dashboard needs, derived from the record, never excerpt text."""
+
+    def test_show_json_reports_stage_questions_recall_and_artifacts_without_excerpt_text(self) -> None:
+        self.configure({"claude": [str(self.vault)]}, [str(self.vault)])
+        os.environ.update(FAKE_AGENT_SCENARIO="idle", FAKE_OUTBOX='{"to": "person", "kind": "question", "body": "Which flag?"}')
+        self.cli("task", "new", "demo", "Add hello.txt", "--recall", "keyword")
+        task = self.only_task()
+
+        _, output = self.cli("task", "show", task["id"], "--json")
+
+        shown = json.loads(output)
+        self.assertEqual((shown["status"], shown["stage"], shown["queued"]), ("waiting", "implement", False))
+        self.assertEqual([question["body"] for question in shown["questions"]], ["Which flag?"])
+        (delivered,) = shown["recall"]
+        self.assertEqual((delivered["provider"], delivered["folders"]), ("claude", ["Hearth"]))
+        self.assertGreater(delivered["excerpts"], 0)
+        self.assertNotIn("greet the person warmly", output)
+        self.assertEqual(shown["artifacts"]["receipts"], str(self.home / ".hearth/tasks" / task["id"]))
+        self.assertTrue(shown["artifacts"]["reports"])
+
+    def test_list_json_is_one_object_with_tasks_and_slot_use(self) -> None:
+        self.configure({"claude": [str(self.vault)]}, [str(self.vault)])
+        self.cli("task", "new", "demo", "Add hello.txt")
+
+        _, output = self.cli("task", "list", "--json")
+
+        listed = json.loads(output)
+        self.assertEqual(listed["slots"], {"implement": {"limit": 2, "busy": 0}, "support": {"limit": 1, "busy": 0}})
+        self.assertEqual([task["status"] for task in listed["tasks"]], ["done"])
+        self.assertIsNone(listed["tasks"][0]["failure"])
+
+
+class CancelTests(TaskTestCase):
+    def cancel_elsewhere(self, task_id: str) -> subprocess.CompletedProcess:
+        # Another process, as when the person cancels from a second terminal or the dashboard.
+        env = {**os.environ, "PYTHONPATH": str(Path(tasks.__file__).parents[2])}
+        return subprocess.run([sys.executable, "-m", "hearth.cli", "task", "cancel", task_id], env=env, capture_output=True, text=True)
+
+    def running(self) -> tuple[threading.Thread, dict]:
+        os.environ["FAKE_AGENT_SCENARIO"] = "hang"
+        worker = threading.Thread(target=self.cli, args=("task", "new", "demo", "Add hello.txt"))
+        worker.start()
+        for _ in range(200):
+            tasks_dir = self.home / ".hearth/tasks"
+            found = list(tasks_dir.glob("*/task.json")) if tasks_dir.exists() else []
+            if found and (task := json.loads(found[0].read_text(encoding="utf-8")))["runs"] and task["runs"][0]["pid"]:
+                return worker, task
+            time.sleep(0.05)
+        self.fail("the run never started")
+
+    def test_cancelling_a_running_task_stops_its_agent_and_starts_nothing_else(self) -> None:
+        worker, task = self.running()
+        pid = task["runs"][0]["pid"]
+
+        result = self.cancel_elsewhere(task["id"])
+        worker.join(timeout=20)
+
+        task = self.only_task()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual((task["status"], task["stop_reason"]), ("cancelled", "cancelled"))
+        self.assertEqual([run["role"] for run in task["runs"]], ["implement"])
+        with self.assertRaises(ProcessLookupError):
+            os.kill(pid, 0)
+        self.assertTrue(Path(task["worktree"]).exists())
+        self.assertTrue((self.home / ".hearth/tasks" / task["id"] / "runs/01-implement-claude/prompt.md").exists())
+
+    def test_a_cancelled_task_cannot_be_looped_or_answered(self) -> None:
+        os.environ.update(FAKE_AGENT_SCENARIO="idle", FAKE_OUTBOX='{"to": "person", "kind": "question", "body": "Which flag?"}')
+        self.cli("task", "new", "demo", "Add hello.txt")
+        task = self.only_task()
+
+        self.assertEqual(self.cli("task", "cancel", task["id"])[0], 0)
+
+        self.assertEqual(self.only_task()["status"], "cancelled")
+        self.assertEqual(self.cli("loop", task["id"])[0], 1)
+        self.assertEqual(self.cli("task", "answer", task["id"], "Use --json.")[0], 1)
+        self.assertEqual(self.cli("task", "cancel", task["id"])[0], 1)
+        self.assertEqual(len(self.only_task()["runs"]), 1)
+
+    def test_a_task_waiting_for_a_slot_is_cancelled_before_any_run(self) -> None:
+        real_sleep = time.sleep
+        with mock.patch.object(tasks, "_busy", return_value=99), mock.patch.object(tasks.time, "sleep", lambda seconds: real_sleep(0.05)):
+            worker = threading.Thread(target=self.cli, args=("task", "new", "demo", "Add hello.txt"))
+            worker.start()
+            for _ in range(200):
+                found = list((self.home / ".hearth/tasks").glob("*/task.json")) if (self.home / ".hearth/tasks").exists() else []
+                if found and json.loads(found[0].read_text(encoding="utf-8"))["status"] == "queued":
+                    break
+                real_sleep(0.05)
+            task = self.only_task()
+            self.assertEqual(task["status"], "queued")
+
+            self.assertEqual(self.cancel_elsewhere(task["id"]).returncode, 0)
+            worker.join(timeout=20)
+
+        task = self.only_task()
+        self.assertEqual((task["status"], task["runs"]), ("cancelled", []))
