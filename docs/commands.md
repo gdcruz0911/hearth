@@ -25,8 +25,9 @@ A test fails when a command is missing from this table, so it grows with every p
 | `hearth usage` | Show five-hour and weekly plan use for Claude, Codex, and Antigravity. |
 | `hearth usage statusline` | Record Claude's limits from its status line JSON. |
 | `hearth task new <project> "<goal>"` | Run one agent on the goal in a new worktree, with receipts; `--attach FILE` adds files or images, and `--issue N` starts from a GitHub issue. |
-| `hearth task list` | List tasks, newest first. |
-| `hearth task show <id>` | Show a task and the commands to review and publish it. |
+| `hearth task list` | List tasks, newest first. Add `--json` for one object with every task's status, stage, open questions, queue state, failure reason, delivered recall without excerpt text, and artifact paths, plus slot use. |
+| `hearth task show <id>` | Show a task and the commands to review and publish it. Add `--json` for the same task object `task list --json` prints. |
+| `hearth task cancel <id>` | Stop a task's active run and let no further agent start; the task ends as `cancelled`, and its worktree, commits, and receipts stay. |
 | `hearth task discard <id>` | Preview, or with `--apply` remove, a task's worktree and branch. |
 | `hearth task new <project> "<goal>" --interactive` | Open the agent in a tmux window instead, with the goal as its first message. |
 | `hearth task answer <id> "<text>"` | Answer the question an agent left for you; `hearth loop` then continues the task. |
