@@ -284,8 +284,7 @@ def _command(args: argparse.Namespace) -> int:
     if args.task_command == "list":
         tasks = [_read(path.parent) for path in sorted(_home().glob("tasks/*/task.json"), reverse=True)]
         if args.json:
-            slots = {kind: {"limit": limit, "busy": _busy(kind)} for kind, limit in SLOTS.items()}
-            print(json.dumps({"tasks": [_summary(task, _home() / "tasks" / task["id"]) for task in tasks], "slots": slots}))
+            print(json.dumps(dashboard_tasks()))
         for task in [] if args.json else tasks:
             print(f"{task['id']}  {task['status']:<11}  {task['project']:<12}  {task['goal'][:60]}")
         if not tasks and not args.json:
@@ -1512,6 +1511,13 @@ def _stop_pid(pid: int, identity: str | None) -> bool:
                 return True
             time.sleep(0.1)
     return not _alive(pid)
+
+
+def dashboard_tasks() -> dict:
+    """Every task's summary, newest first, and slot use: what `task list --json` prints and the dashboard reads."""
+    tasks = [_read(path.parent) for path in sorted(_home().glob("tasks/*/task.json"), reverse=True)]
+    return {"tasks": [_summary(task, _home() / "tasks" / task["id"]) for task in tasks],
+            "slots": {kind: {"limit": limit, "busy": _busy(kind)} for kind, limit in SLOTS.items()}}
 
 
 def _summary(task: dict, task_dir: Path) -> dict:
