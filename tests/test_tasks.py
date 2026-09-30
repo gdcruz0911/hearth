@@ -1944,6 +1944,23 @@ class CancelTests(TaskTestCase):
         self.assertTrue(Path(task["worktree"]).exists())
         self.assertTrue((self.home / ".hearth/tasks" / task["id"] / "runs/01-implement-claude/prompt.md").exists())
 
+    def test_a_reused_process_id_is_not_signalled(self) -> None:
+        os.environ["FAKE_AGENT_SCENARIO"] = "idle"
+        self.cli("task", "new", "demo", "Add hello.txt")
+        stranger = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"], start_new_session=True)
+        self.addCleanup(stranger.kill)
+        task = self.only_task()
+        task.update(status="running", finished=None)
+        task["runs"][0]["pid"] = stranger.pid  # The run's ID now belongs to an unrelated process, as after reuse.
+        (self.home / ".hearth/tasks" / task["id"] / "task.json").write_text(json.dumps(task), encoding="utf-8")
+
+        result = self.cancel_elsewhere(task["id"])
+
+        self.assertEqual(result.returncode, 0)
+        self.assertIsNone(stranger.poll())
+        self.assertIn("could not be shown to be this task's run, so it was not signalled", result.stderr)
+        self.assertEqual(self.only_task()["status"], "cancelled")
+
     def test_a_cancelled_task_cannot_be_looped_or_answered(self) -> None:
         os.environ.update(FAKE_AGENT_SCENARIO="idle", FAKE_OUTBOX='{"to": "person", "kind": "question", "body": "Which flag?"}')
         self.cli("task", "new", "demo", "Add hello.txt")

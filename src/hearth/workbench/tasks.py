@@ -552,6 +552,7 @@ def _run(task: dict, task_dir: Path, role: str, provider: str, template: list[st
         process = subprocess.Popen(argv, cwd=task["worktree"], stdin=subprocess.PIPE, stdout=events, stderr=errors, text=True,
                                    start_new_session=True, env={**os.environ, "HEARTH_TASK": task["id"]})
         record["pid"] = process.pid
+        record["pid_identity"] = _identity(process.pid)  # Lets a later cancel prove it signals this run, not a reused ID.
         task["status"] = "running"
         _write(task_dir, task)
         timed_out = False
@@ -1470,26 +1471,41 @@ def _cancel(task: dict, task_dir: Path) -> int:
         return 1
     (task_dir / "cancel").write_text(_now() + "\n", encoding="utf-8")
     run = task["runs"][-1] if task["runs"] else None
-    if run and _alive(run.get("pid")):
-        _stop_pid(run["pid"])
+    unproven = bool(run and _alive(run.get("pid")) and not _stop_pid(run["pid"], run.get("pid_identity")))
     _write(task_dir, task)
     print(f"{task['id']}  cancelled  {task['worktree']}")
+    if unproven:
+        print(f"Process {run['pid']} is running but could not be shown to be this task's run, so it was not signalled.\n"
+              "Next: check it with ps before stopping it yourself; no further agent will start for this task", file=sys.stderr)
     if run and run.get("interactive"):
         print(f"Next: close its tmux window yourself; the session may hold work you want to keep", file=sys.stderr)
     return 0
 
 
-def _stop_pid(pid: int) -> None:
-    """Stop an agent started in its own session by another Hearth process: its process group, then the group again by force."""
+def _identity(pid: int) -> str | None:
+    """A process's group and start time, which a reused process ID does not share; None once it has exited."""
+    shown = subprocess.run(["ps", "-o", "pgid=,lstart=", "-p", str(pid)], capture_output=True, text=True)
+    return " ".join(shown.stdout.split()) or None if shown.returncode == 0 else None
+
+
+def _stop_pid(pid: int, identity: str | None) -> bool:
+    """Stop the run's process group, first politely, then by force, only while the process still has the identity recorded
+    at launch and leads its own group; returns False when the process could not be shown to be that run."""
     for sig in (signal.SIGTERM, signal.SIGKILL):
+        current = _identity(pid)
+        if current is None:
+            return True
+        if identity is None or current != identity or current.split()[0] != str(pid):
+            return False
         try:
-            os.killpg(pid, sig)  # ponytail: trusts the recorded pid; a reused pid would be a new session leader only by coincidence.
+            os.killpg(pid, sig)
         except ProcessLookupError:
-            return
+            return True
         for _ in range(50):
             if not _alive(pid):
-                return
+                return True
             time.sleep(0.1)
+    return not _alive(pid)
 
 
 def _summary(task: dict, task_dir: Path) -> dict:
