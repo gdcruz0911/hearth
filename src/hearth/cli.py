@@ -34,7 +34,7 @@ from .runtime import (
 )
 from .service import HearthService
 from .web import HearthWebServer, _document_payload
-from .workbench import ask, evals, stats, tasks, usage
+from .workbench import ask, evals, stats, tasks, transcript, usage
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -268,7 +268,8 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 _print_source_import_result(service.import_source_plan(plan))
         elif args.command == "web":
-            server = HearthWebServer(service, port=args.port, source_roots=args.source_roots, workbench_tasks=tasks.dashboard_tasks)
+            server = HearthWebServer(service, port=args.port, source_roots=args.source_roots, workbench_tasks=tasks.dashboard_tasks,
+                                     workbench_transcript=transcript.read)
             print(f"Hearth is running locally at {server.url}", flush=True)
             print("It is bound to 127.0.0.1 only. Press Ctrl+C to stop it.", flush=True)
             if not args.no_open:
