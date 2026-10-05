@@ -1537,7 +1537,8 @@ def _summary(task: dict, task_dir: Path) -> dict:
         "review": task.get("review"), "pr": task.get("pr"),
         "runs": [{"dir": run.get("dir"), "role": run["role"], "provider": run["provider"], "model": run.get("model_used") or run.get("model"),
                   "started": run.get("started"), "finished": run.get("finished"), "outcome": _outcome(run), "verdict": run.get("verdict"),
-                  "claims": run.get("claims"), "not_checked": run.get("not_checked"), "risk": run.get("risk")} for run in task["runs"]],
+                  "claims": run.get("claims"), "not_checked": run.get("not_checked"), "risk": run.get("risk"),
+                  "interactive": bool(run.get("interactive"))} for run in task["runs"]],
         # Scope names, counts, and document names only: excerpts stay in the task's recall records.
         "recall": [{"record": name, "provider": record.get("provider"), "mode": record.get("mode"), "folders": record.get("scope") or [],
                     "excerpts": len(record.get("evidence") or []), "documents": sorted({item["document"] for item in record.get("evidence") or []}),

@@ -419,3 +419,32 @@ class WorkbenchTasksEndpointTests(unittest.TestCase):
 
         self.assertEqual((ok.status, calls), (200, [("20260930-120000", "01-implement-claude", 42)]))
         self.assertEqual((bad.status, unknown.status), (400, 404))
+
+
+class DashboardPageTests(unittest.TestCase):
+    """The dashboard is the home page; the knowledge page moved to knowledge; nothing loads from another host (UI-4)."""
+
+    def setUp(self) -> None:
+        self.temporary_directory = tempfile.TemporaryDirectory()
+        self.service = HearthService(Path(self.temporary_directory.name) / "hearth.sqlite")
+        self.addCleanup(self.temporary_directory.cleanup)
+        self.addCleanup(self.service.close)
+        self.app = HearthWebApplication(self.service, "token")
+
+    def test_the_home_page_is_the_dashboard_and_the_knowledge_page_moved(self) -> None:
+        home = self.app.respond("GET", "/token/", b"")
+        knowledge = self.app.respond("GET", "/token/knowledge", b"")
+
+        self.assertIn(b"Needs you", home.body)
+        self.assertIn(b'href="knowledge"', home.body)
+        self.assertIn(b"map-surface", knowledge.body)
+
+    def test_dashboard_assets_load_nothing_from_another_host_and_never_insert_html(self) -> None:
+        for name, kind in (("assets/dashboard.css", "text/css"), ("assets/dashboard.js", "application/javascript")):
+            with self.subTest(asset=name):
+                response = self.app.respond("GET", f"/token/{name}", b"")
+                self.assertEqual((response.status, response.content_type.split(";")[0]), (200, kind))
+                self.assertNotRegex(response.body.decode(), r"https?://|@import|url\(")
+        script = self.app.respond("GET", "/token/assets/dashboard.js", b"").body.decode()
+        self.assertNotIn("innerHTML", script)
+        self.assertNotIn("insertAdjacentHTML", script)

@@ -1890,6 +1890,7 @@ class TaskStatusJsonTests(RecallFixture):
 
         shown = json.loads(output)
         self.assertEqual((shown["status"], shown["stage"], shown["queued"]), ("waiting", "implement", False))
+        self.assertFalse(shown["runs"][0]["interactive"])
         self.assertEqual([question["body"] for question in shown["questions"]], ["Which flag?"])
         (delivered,) = shown["recall"]
         self.assertEqual((delivered["provider"], delivered["folders"]), ("claude", ["Hearth"]))

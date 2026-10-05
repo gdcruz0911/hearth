@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark light">
+    <title>Hearth</title>
+    <link rel="stylesheet" href="assets/dashboard.css">
+    <script defer src="assets/dashboard.js"></script>
+  </head>
+  <body>
+    <div class="app">
+      <aside class="side">
+        <h1 class="brand"><span class="ember-dot" aria-hidden="true"></span>Hearth</h1>
+        <nav aria-label="Pages">
+          <a class="nav-item current" href="./" aria-current="page">Dashboard</a>
+          <a class="nav-item" href="knowledge">Knowledge</a>
+        </nav>
+        <h2 class="side-heading">Projects</h2>
+        <ul id="projects" class="projects"></ul>
+        <button id="theme" class="theme" type="button">Light mode</button>
+      </aside>
+      <main class="main">
+        <p id="status" class="status" role="status" aria-live="polite">Loading tasks.</p>
+        <section aria-labelledby="needs-heading">
+          <h2 id="needs-heading">Needs you</h2>
+          <ul id="needs" class="rows"></ul>
+        </section>
+        <section aria-labelledby="progress-heading">
+          <div class="section-head">
+            <h2 id="progress-heading">In progress</h2>
+            <p id="slots" class="slots"></p>
+          </div>
+          <ul id="progress" class="rows"></ul>
+        </section>
+        <section aria-labelledby="recent-heading">
+          <h2 id="recent-heading">Recent</h2>
+          <ul id="recent" class="rows"></ul>
+        </section>
+      </main>
+    </div>
+  </body>
+</html>
