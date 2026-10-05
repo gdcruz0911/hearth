@@ -12,31 +12,62 @@
     <div class="app">
       <aside class="side">
         <h1 class="brand"><span class="ember-dot" aria-hidden="true"></span>Hearth</h1>
-        <nav aria-label="Pages">
-          <a class="nav-item current" href="./" aria-current="page">Dashboard</a>
-          <a class="nav-item" href="knowledge">Knowledge</a>
+        <nav aria-label="Views">
+          <a class="nav-item" href="#/hub" data-view="hub">Hub</a>
+          <a class="nav-item" href="#/tasks" data-view="tasks">Tasks</a>
+          <a class="nav-item" href="#/knowledge" data-view="knowledge">Knowledge</a>
         </nav>
         <h2 class="side-heading">Projects</h2>
         <ul id="projects" class="projects"></ul>
-        <button id="theme" class="theme" type="button">Light mode</button>
+        <div class="settings">
+          <label class="setting">Open on
+            <select id="default-view">
+              <option value="hub">Hub</option>
+              <option value="tasks">Tasks</option>
+              <option value="knowledge">Knowledge</option>
+            </select>
+          </label>
+          <button id="theme" class="theme" type="button">Light mode</button>
+        </div>
       </aside>
       <main class="main">
         <p id="status" class="status" role="status" aria-live="polite">Loading tasks.</p>
-        <section aria-labelledby="needs-heading">
-          <h2 id="needs-heading">Needs you</h2>
-          <ul id="needs" class="rows"></ul>
-        </section>
-        <section aria-labelledby="progress-heading">
-          <div class="section-head">
-            <h2 id="progress-heading">In progress</h2>
-            <p id="slots" class="slots"></p>
-          </div>
-          <ul id="progress" class="rows"></ul>
-        </section>
-        <section aria-labelledby="recent-heading">
-          <h2 id="recent-heading">Recent</h2>
-          <ul id="recent" class="rows"></ul>
-        </section>
+
+        <div class="view" data-view="hub" hidden>
+          <section class="pinned" aria-labelledby="hub-needs-heading">
+            <h2 id="hub-needs-heading">Needs you</h2>
+            <ul id="hub-needs" class="rows"></ul>
+          </section>
+          <section aria-labelledby="hub-heading">
+            <h2 id="hub-heading">How it connects</h2>
+            <p class="empty">The graph of projects, tasks, agents, and knowledge comes in the next step; the Tasks tab lists everything meanwhile.</p>
+          </section>
+        </div>
+
+        <div class="view" data-view="tasks" hidden>
+          <section aria-labelledby="needs-heading">
+            <h2 id="needs-heading">Needs you</h2>
+            <ul id="needs" class="rows"></ul>
+          </section>
+          <section aria-labelledby="progress-heading">
+            <div class="section-head">
+              <h2 id="progress-heading">In progress</h2>
+              <p id="slots" class="slots"></p>
+            </div>
+            <ul id="progress" class="rows"></ul>
+          </section>
+          <section aria-labelledby="recent-heading">
+            <h2 id="recent-heading">Recent</h2>
+            <ul id="recent" class="rows"></ul>
+          </section>
+        </div>
+
+        <div class="view" data-view="knowledge" hidden>
+          <section aria-labelledby="knowledge-heading">
+            <h2 id="knowledge-heading">Knowledge</h2>
+            <p class="empty">Asking, sources, and collection health move here next. Until then, use the <a href="knowledge">classic knowledge page</a>.</p>
+          </section>
+        </div>
       </main>
     </div>
   </body>
