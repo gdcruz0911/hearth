@@ -407,3 +407,15 @@ class WorkbenchTasksEndpointTests(unittest.TestCase):
 
         self.assertEqual(response.status, 404)
         self.assertIn("not connected", json.loads(response.body)["error"])
+
+    def test_the_transcript_route_passes_task_run_and_offset_and_rejects_other_shapes(self) -> None:
+        calls = []
+        app = HearthWebApplication(self.service, "token", workbench_transcript=lambda *args: calls.append(args) or {"items": []})
+
+        ok = app.respond("GET", "/token/api/workbench/transcript/20260930-120000/01-implement-claude/42", b"")
+        bad = app.respond("GET", "/token/api/workbench/transcript/20260930-120000/01-implement-claude/x", b"")
+        unknown = HearthWebApplication(self.service, "token", workbench_transcript=lambda *args: None).respond(
+            "GET", "/token/api/workbench/transcript/20260930-120000/01-implement-claude/0", b"")
+
+        self.assertEqual((ok.status, calls), (200, [("20260930-120000", "01-implement-claude", 42)]))
+        self.assertEqual((bad.status, unknown.status), (400, 404))

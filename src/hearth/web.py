@@ -95,8 +95,10 @@ class HearthWebApplication:
         choose_file: Callable[[], Path] = None,
         source_roots: tuple[Path, ...] = (),
         workbench_tasks: Callable[[], Mapping[str, Any]] | None = None,
+        workbench_transcript: Callable[[str, str, int], Mapping[str, Any] | None] | None = None,
     ):
         self._service = service
+        self._workbench_transcript = workbench_transcript
         self._capability_token = capability_token
         # Passed in by the CLI, the composition root, so this module never imports the workbench (CODE-1).
         self._workbench_tasks = workbench_tasks
@@ -152,6 +154,16 @@ class HearthWebApplication:
             if self._workbench_tasks is None:
                 return self._json_error(HTTPStatus.NOT_FOUND, "The workbench is not connected to this interface.")
             return self._json_response(self._workbench_tasks())
+        if relative_path.startswith("api/workbench/transcript/"):
+            if self._workbench_transcript is None:
+                return self._json_error(HTTPStatus.NOT_FOUND, "The workbench is not connected to this interface.")
+            parts = relative_path.removeprefix("api/workbench/transcript/").split("/")
+            if len(parts) != 3 or not parts[2].isdigit():
+                return self._json_error(HTTPStatus.BAD_REQUEST, "Ask for a transcript as task/run/offset.")
+            found = self._workbench_transcript(parts[0], parts[1], int(parts[2]))
+            if found is None:
+                return self._json_error(HTTPStatus.NOT_FOUND, "No such task.")
+            return self._json_response(found)
         if relative_path.startswith("api/relationships/"):
             left_document_id, right_document_id = _relationship_document_ids(
                 relative_path.removeprefix("api/relationships/")
@@ -475,9 +487,10 @@ class HearthWebServer:
         source_roots: tuple[Path, ...] = (),
         browser_opener: Callable[[str], bool] = webbrowser.open,
         workbench_tasks: Callable[[], Mapping[str, Any]] | None = None,
+        workbench_transcript: Callable[[str, str, int], Mapping[str, Any] | None] | None = None,
     ):
         token = secrets.token_urlsafe(32)
-        self._application = HearthWebApplication(service, token, choose_file, source_roots, workbench_tasks)
+        self._application = HearthWebApplication(service, token, choose_file, source_roots, workbench_tasks, workbench_transcript)
         self._browser_opener = browser_opener
         self._http_server = _LoopbackHTTPServer(("127.0.0.1", port), _handler_type(self._application))
         self._http_server.timeout = 0.5
