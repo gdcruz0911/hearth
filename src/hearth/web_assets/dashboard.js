@@ -1,8 +1,9 @@
-// The dashboard's home: what needs the person, what is running, and what finished, from api/workbench/tasks.
+// Hearth's app shell: the Hub, Tasks, and Knowledge views, with task data from api/workbench/tasks.
 // Every value is written with textContent, so text agents wrote can never become markup.
 const root = new URL(".", window.location.href).pathname;
 const KNOWN = new Set(["running", "queued", "waiting", "done", "failed", "cancelled", "interrupted"]);
 const RECENT = 12;
+const VIEWS = ["hub", "tasks", "knowledge"];
 
 function el(tag, className, text) {
   const node = document.createElement(tag);
@@ -69,11 +70,13 @@ function render(data) {
   const progress = tasks.filter((task) => task.status === "running" || task.status === "queued");
   const recent = tasks.filter((task) => !needs.includes(task) && !progress.includes(task)).slice(0, RECENT);
 
-  fill(document.getElementById("needs"), needs, (task) => {
+  const needsRow = (task) => {
     const item = row(task, `${task.project} · ${reason(task)}`);
     item.append(el("code", "command", command(task)));
     return item;
-  }, "Nothing needs you.");
+  };
+  fill(document.getElementById("needs"), needs, needsRow, "Nothing needs you.");
+  fill(document.getElementById("hub-needs"), needs, needsRow, "Nothing needs you.");
 
   fill(document.getElementById("progress"), progress, (task) => {
     const run = task.active_run;
@@ -121,22 +124,51 @@ async function refresh() {
   }
 }
 
+function stored(key, fallback) {
+  try { return localStorage.getItem(key) || fallback; } catch { return fallback; } // storage may be blocked
+}
+
+function store(key, value) {
+  try { localStorage.setItem(key, value); } catch { /* storage may be blocked */ }
+}
+
+function route() {
+  // UI-6: one shell; the hash names the view, and an empty hash opens the person's default view.
+  const asked = window.location.hash.replace(/^#\//, "");
+  const view = VIEWS.includes(asked) ? asked : stored("hearth-default-view", "hub");
+  document.querySelectorAll(".view").forEach((node) => { node.hidden = node.dataset.view !== view; });
+  document.querySelectorAll(".nav-item").forEach((link) => {
+    const current = link.dataset.view === view;
+    link.classList.toggle("current", current);
+    if (current) link.setAttribute("aria-current", "page"); else link.removeAttribute("aria-current");
+  });
+}
+
+function defaultView() {
+  const select = document.getElementById("default-view");
+  select.value = stored("hearth-default-view", "hub");
+  select.addEventListener("change", () => store("hearth-default-view", select.value));
+}
+
 function theme() {
   const button = document.getElementById("theme");
-  let light = window.matchMedia("(prefers-color-scheme: light)").matches;
-  try { light = (localStorage.getItem("hearth-theme") || (light ? "light" : "dark")) === "light"; } catch { /* storage may be blocked */ }
+  const system = window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
+  let light = stored("hearth-theme", system) === "light";
   const apply = () => {
     document.documentElement.classList.toggle("light", light);
     button.textContent = light ? "Dark mode" : "Light mode";
   };
   button.addEventListener("click", () => {
     light = !light;
-    try { localStorage.setItem("hearth-theme", light ? "light" : "dark"); } catch { /* storage may be blocked */ }
+    store("hearth-theme", light ? "light" : "dark");
     apply();
   });
   apply();
 }
 
 theme();
+defaultView();
+route();
+window.addEventListener("hashchange", route);
 refresh();
 setInterval(refresh, 5000);

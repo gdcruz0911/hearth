@@ -439,6 +439,16 @@ class DashboardPageTests(unittest.TestCase):
         self.assertIn(b'href="knowledge"', home.body)
         self.assertIn(b"map-surface", knowledge.body)
 
+    def test_the_shell_has_hub_tasks_and_knowledge_views_and_a_default_view_setting(self) -> None:
+        home = self.app.respond("GET", "/token/", b"").body.decode()
+
+        for view in ("hub", "tasks", "knowledge"):
+            with self.subTest(view=view):
+                self.assertIn(f'href="#/{view}" data-view="{view}"', home)
+                self.assertIn(f'class="view" data-view="{view}"', home)
+        self.assertIn('id="default-view"', home)
+        self.assertIn('id="hub-needs"', home)
+
     def test_dashboard_assets_load_nothing_from_another_host_and_never_insert_html(self) -> None:
         for name, kind in (("assets/dashboard.css", "text/css"), ("assets/dashboard.js", "application/javascript")):
             with self.subTest(asset=name):

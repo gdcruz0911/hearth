@@ -17,7 +17,7 @@ A test fails when a command is missing from this table, so it grows with every p
 | `hearth remove <path>` | Remove a document's records; the file stays. |
 | `hearth sources preview` | List eligible files in connected folders without importing. |
 | `hearth sources import` | Import the eligible files the preview listed. |
-| `hearth web` | Open the local web interface on this Mac only: the dashboard of what needs you, what is running, and what finished, with the knowledge map under Knowledge. |
+| `hearth web` | Open the local web interface on this Mac only: one app with Hub, Tasks, and Knowledge tabs, showing what needs you, what is running, and what finished; choose the tab it opens on in the sidebar. |
 | `hearth recall "<question>"` | For agents: search only the profile's `recall_roots` and print one JSON value like `search --json`, with the scope named; refuses when no recall roots are set. |
 | `hearth evaluate <corpus>` | Run a synthetic or public evaluation corpus. |
 | `hearth evaluate-questions <question-set> --out <records.jsonl>` | Record every retrieval stage for a labeled question set against the current collection, scoring only supported and unsupported cases. |
