@@ -209,6 +209,13 @@ class HearthWebApplication:
             if not preview_id or "/" in preview_id:
                 return self._not_found()
             return self._apply_source_import(preview_id)
+        if relative_path == "api/search/report":
+            payload = _json_body(body)
+            question = payload.get("question")
+            if not isinstance(question, str) or not question.strip():
+                raise WebRequestError("Enter a question before searching the local collection.")
+            # Accepted evidence with freshness, kept apart from what was only retrieved (design.md UI-7).
+            return self._json_response(self._service.search_report(question, keyword_only=payload.get("keyword") is True))
         if relative_path == "api/search":
             payload = _json_body(body)
             question = payload.get("question")
@@ -595,6 +602,10 @@ def _handler_type(application: HearthWebApplication) -> type[BaseHTTPRequestHand
             self.send_header("Referrer-Policy", "no-referrer")
             self.send_header("X-Content-Type-Options", "nosniff")
             self.send_header("X-Frame-Options", "DENY")
+            # One request per connection: this server handles one connection at a time, so a page that polls on a
+            # kept-alive connection would otherwise starve every other request.
+            self.send_header("Connection", "close")
+            self.close_connection = True
             self.end_headers()
             if method != "HEAD":
                 self.wfile.write(response.body)

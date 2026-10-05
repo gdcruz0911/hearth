@@ -52,6 +52,23 @@ h2 { font-size: 15px; margin: 0 0 10px; }
 .badge.cancelled, .badge.other { color: var(--muted); }
 .command { font-family: var(--mono); font-size: 12px; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; margin-top: 6px; display: inline-block; user-select: all; }
 .empty { color: var(--muted); font-size: 13px; }
+.badge.current { color: var(--muted); }
+.badge.stale { color: var(--stale); }
+.ask { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; }
+.ask input[type=search], .filter { flex: 1; min-width: 200px; background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; font: inherit; }
+.ask button { background: var(--ember); color: var(--bg); border: 0; border-radius: 6px; padding: 8px 16px; font: inherit; font-weight: 600; cursor: pointer; }
+.keyword { color: var(--muted); font-size: 13px; display: flex; gap: 4px; align-items: center; }
+.ask-result { display: flex; flex-direction: column; gap: 8px; }
+.group { font-size: 13px; margin: 8px 0 0; }
+.excerpt { margin: 8px 0 0; padding: 6px 10px; border-left: 3px solid var(--line); color: var(--text); white-space: pre-wrap; font-size: 13px; max-height: 7.5em; overflow: hidden; }
+.excerpt.open { max-height: none; }
+.more { background: none; border: 0; color: var(--ember); cursor: pointer; font: inherit; font-size: 13px; padding: 4px 0 0; }
+.candidates summary { color: var(--muted); cursor: pointer; font-size: 13px; }
+.candidates .rows { margin-top: 8px; }
+.candidate { padding: 4px 2px; font-size: 13px; color: var(--muted); }
+.sources { list-style: none; margin: 0 0 8px; padding: 0; max-height: 420px; overflow: auto; border: 1px solid var(--line); border-radius: 8px; }
+.source { display: flex; gap: 10px; align-items: center; padding: 6px 12px; border-bottom: 1px solid var(--line); }
+.source:last-child { border-bottom: 0; }
 a { color: var(--ember); }
 /* UI-5: only a running agent moves, with a slow heartbeat; reduced motion keeps a steady dot. */
 .pulse { width: 8px; height: 8px; border-radius: 50%; background: var(--ember); animation: beat 1.6s ease-in-out infinite; }
