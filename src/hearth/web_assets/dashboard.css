@@ -1,0 +1,55 @@
+/* Tokens and meanings come from docs/standards/design.md (UI-2); contrast was computed there. */
+:root {
+  --bg: #17191d; --side: #121418; --panel: #1d2025; --hover: #282c33; --line: #30343c;
+  --text: #ebecef; --muted: #969da9; --ember: #f2a26e; --attention: #9bbcff;
+  --ok: #8bc6a4; --stale: #d8cf6b; --failed: #f29191;
+  --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+:root.light {
+  --bg: #f7f8fa; --side: #eceff3; --panel: #ffffff; --hover: #e1e6ef; --line: #d9dee7;
+  --text: #222b3c; --muted: #677184; --ember: #a8481c; --attention: #315dc5;
+  --ok: #2f6e53; --stale: #6f6512; --failed: #b3261e;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--bg); color: var(--text);
+  font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+.app { display: grid; grid-template-columns: 220px minmax(0, 1fr); min-height: 100vh; }
+.side { background: var(--side); border-right: 1px solid var(--line); padding: 20px 14px; display: flex; flex-direction: column; gap: 6px; }
+.brand { font-size: 17px; margin: 0 0 14px; display: flex; align-items: center; gap: 8px; }
+.ember-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--ember); }
+.nav-item { color: var(--muted); text-decoration: none; padding: 6px 8px; border-radius: 6px; }
+.nav-item.current, .nav-item:hover { color: var(--text); background: var(--hover); }
+.side-heading { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; margin: 18px 8px 4px; }
+.projects { list-style: none; margin: 0; padding: 0; }
+.projects li { display: flex; justify-content: space-between; padding: 5px 8px; border-radius: 6px; }
+.projects .count { color: var(--muted); }
+.theme { margin-top: auto; background: none; border: 1px solid var(--line); color: var(--muted); border-radius: 6px; padding: 6px; cursor: pointer; font: inherit; }
+.main { padding: 24px 32px; max-width: 1100px; }
+.status { color: var(--muted); margin: 0 0 8px; }
+.status.error { color: var(--failed); }
+section { margin-bottom: 26px; }
+h2 { font-size: 15px; margin: 0 0 10px; }
+.section-head { display: flex; align-items: baseline; justify-content: space-between; }
+.slots { color: var(--muted); margin: 0; font-size: 13px; }
+.rows { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.row { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px 14px; }
+.row-top { display: flex; gap: 10px; align-items: center; }
+.goal { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.meta { color: var(--muted); font-size: 13px; margin-top: 2px; }
+.id { font-family: var(--mono); font-size: 12px; color: var(--muted); }
+.badge { font-size: 12px; padding: 1px 8px; border-radius: 10px; border: 1px solid currentColor; white-space: nowrap; }
+.badge.running, .badge.queued { color: var(--ember); }
+.badge.waiting { color: var(--attention); }
+.badge.done { color: var(--ok); }
+.badge.failed, .badge.interrupted { color: var(--failed); }
+.badge.cancelled, .badge.other { color: var(--muted); }
+.command { font-family: var(--mono); font-size: 12px; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; margin-top: 6px; display: inline-block; user-select: all; }
+.empty { color: var(--muted); font-size: 13px; }
+a { color: var(--ember); }
+/* UI-5: only a running agent moves, with a slow heartbeat; reduced motion keeps a steady dot. */
+.pulse { width: 8px; height: 8px; border-radius: 50%; background: var(--ember); animation: beat 1.6s ease-in-out infinite; }
+@keyframes beat { 0%, 100% { opacity: .35; transform: scale(.85); } 15% { opacity: 1; transform: scale(1.1); } 30% { opacity: .6; transform: scale(.95); } }
+@media (prefers-reduced-motion: reduce) { .pulse { animation: none; } }
+@media (max-width: 760px) { .app { grid-template-columns: 1fr; } .side { border-right: 0; border-bottom: 1px solid var(--line); } .main { padding: 16px; } }
