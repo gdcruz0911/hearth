@@ -10,6 +10,9 @@ A test fails when a command is missing from this table, so it grows with every p
 | `hearth import <path>` | Import one note or PDF. |
 | `hearth search "<question>"` | Answer from cited evidence, or abstain. Add `--keyword` to search exact words only, skipping semantic search, and `--json` for one JSON value that separates accepted evidence from retrieved candidates. |
 | `hearth ask "<question>"` | Answer from your notes with one tool-less Claude turn, limited to its recall roots; shows the reply only when it cites excerpts, then each cited excerpt verbatim, and otherwise abstains. Add `--keyword` for exact words. The exchange is saved under `~/.hearth/asks/`. |
+| `hearth google connect --account <email> --client <file>` | Sign in to your brief Google account in the browser, asking only for read-only mail and a calendar Hearth creates for itself. Refuses a consent that grants more or less, or a different account. Keeps the client and refresh token in the Keychain; `--client` is the Desktop app JSON from Google Cloud, needed the first time. Refused inside a task. |
+| `hearth google status` | Show the connected account and scopes without contacting Google. Add `--json` for one JSON value. |
+| `hearth google disconnect` | Show what would be deleted; `--apply` deletes Hearth's Google tokens from the Keychain. Remove Hearth from your Google account's connections too. |
 | `hearth list` | List imported documents and their IDs. Add `--json` for one JSON array with each document's ID, name, and page, chunk, and OCR page counts, never text or source paths. |
 | `hearth inspect <id>` | Show one document's provenance metadata. |
 | `hearth health` | Summarize collection attention items and next actions. |
