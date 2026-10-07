@@ -142,6 +142,8 @@ class HearthWebApplication:
             return self._asset("dashboard.css", "text/css; charset=utf-8")
         if relative_path == "assets/dashboard.js":
             return self._asset("dashboard.js", "application/javascript; charset=utf-8")
+        if relative_path == "assets/hub.js":
+            return self._asset("hub.js", "application/javascript; charset=utf-8")
         if relative_path == "assets/app.css":
             return self._asset("app.css", "text/css; charset=utf-8")
         if relative_path == "assets/app.js":
