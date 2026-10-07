@@ -34,7 +34,7 @@ from .runtime import (
 )
 from .service import HearthService
 from .web import HearthWebServer, _document_payload
-from .workbench import ask, evals, stats, tasks, transcript, usage
+from .workbench import ask, evals, google, stats, tasks, transcript, usage
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -109,6 +109,7 @@ def main(argv: list[str] | None = None) -> int:
     tasks.add_parser(subcommands)
     evals.add_parser(subcommands)
     stats.add_parser(subcommands)
+    google.add_parser(subcommands)
     lister = subcommands.add_parser("list", help="List imported documents without document text or source paths.")
     lister.add_argument("--json", action="store_true", help="Print the imported documents as one JSON array.")
     healther = subcommands.add_parser(
@@ -160,6 +161,8 @@ def main(argv: list[str] | None = None) -> int:
         return stats.run(args)
     if args.command == "ask":
         return ask.run(args)
+    if args.command == "google":
+        return google.run(args)
     if args.command == "profile":
         if (args.embedding_model is None) != (args.index_directory is None):
             parser.error("--embedding-model and --index-directory must be provided together.")
