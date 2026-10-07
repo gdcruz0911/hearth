@@ -17,6 +17,7 @@ from pathlib import Path
 
 from . import usage
 from . import recall
+from . import vault_notes
 
 # Implementer invocations, confirmed against each installed version (see the workbench specification's Run table).
 # "{options}" becomes the model and effort flags, "{check}" the project's check command,
@@ -102,6 +103,8 @@ A question to knowledge searches the keeper's notes, limited to what you may rec
 A question to the person pauses the task until they answer, so ask only what you cannot decide from the code and docs.
 End with what changed, which checks you ran and their results, and any open questions.
 If something failed or you could not check it, say so plainly; never claim a check you did not run.
+If you learned something a later task should know, you may add a section `## Notes for the vault` before the PR lines,
+with each note under its own `### Title`; the person decides whether to keep it, so keep notes short and specific.
 Finish with one line `PR title: type: summary`, where type is feat, fix, docs, test, refactor, chore, perf, or ci, in 72 characters at most,
 and one line `PR summary: <one sentence saying what changed>`.
 """)
@@ -218,7 +221,7 @@ def add_parser(subcommands: argparse._SubParsersAction) -> None:
     ci.add_argument("id")
     ci.add_argument("--timeout", type=int, default=1800, help="Seconds before a fix run is stopped. Defaults to 1800.")
     retro.add_argument("--approve", type=int, metavar="N", help="Start escape N's stored proposal as a tests-first task instead of running a retro.")
-    promote = actions.add_parser("promote", help="Copy a task's final report into your notes folder's reports/, for you to edit and import.")
+    promote = actions.add_parser("promote", help="Write a task's final report into reports/ and its agent notes into agent-notes/, committed as the agent.")
     promote.add_argument("id")
     promote.add_argument("--apply", action="store_true", help="Write the file; without it, only show what would be written.")
     approve = actions.add_parser("approve-tests", help="Approve a tests-first task's tests, then start implementing.")
@@ -1058,38 +1061,166 @@ def _fix(project: dict, task: dict, task_dir: Path, label: str, feedback: str, t
     _finish(project, task, task_dir, result["stop"])
 
 
+NOTES_HEADING = re.compile(r"^## Notes for the vault[ \t]*$", re.M)
+NOTE_CHARS = 4000
+
+
+def _split_notes(report: str) -> tuple[str, list[tuple[str, str]]]:
+    """ADR-0036: the report without its `## Notes for the vault` section, and that section's `### Title` notes."""
+    match = NOTES_HEADING.search(report)
+    if match is None:
+        return report, []
+    after = report[match.end():]
+    following = re.search(r"^(?:## |PR title:)", after, re.M)  # The PR lines close a report, so they end the section too.
+    section, rest = (after[:following.start()], after[following.start():]) if following else (after, "")
+    notes = [(title.strip(), body.strip()) for title, body in re.findall(r"^### ([^\n]+)\n(.*?)(?=^### |\Z)", section, re.M | re.S)]
+    return (report[:match.start()] + rest).strip(), notes
+
+
 def _promote(task: dict, task_dir: Path, apply: bool) -> int:
-    """Copy the task's final report into the notes folder for the person to edit; never imports, commits, or overwrites."""
+    """Write the task's final report and its agent notes into the vault, recorded before writing and committed as the agent.
+
+    ADR-0036: Hearth records each file in the vault note record, then writes it, then commits only the files it wrote,
+    and a retry continues from the record instead of writing anything twice. The person's own notes are never touched.
+    """
     run = next((run for run in reversed(task["runs"]) if run["role"] in ("implement", "fix") and run.get("dir")
                 and (task_dir / "runs" / run["dir"] / "report.md").exists()), None)
     if run is None:
         print(f"{task['id']} has no implementer report to promote.\nNext: hearth task show {task['id']}", file=sys.stderr)
         return 1
-    policy = _home() / "recall.json"
-    vault = Path(json.loads(policy.read_text(encoding="utf-8")).get("vault", "~/Hearth") if policy.exists() else "~/Hearth").expanduser()
-    target = vault / "reports" / f"{(task.get('finished') or task['created'])[:10]}-{task['id']}.md"
-    report = (task_dir / "runs" / run["dir"] / "report.md").read_text(encoding="utf-8").strip()
+    home, provider = _home(), run["provider"]
+    vault = vault_notes.vault(home)
+    original = (task_dir / "runs" / run["dir"] / "report.md").read_text(encoding="utf-8").strip()
+    report, notes = _split_notes(original)
+    today = time.strftime("%Y-%m-%d")
+
+    def header(key: str) -> str:
+        return f"---\nhearth-note: {key}\nauthor: {provider}\ntask: {task['id']}\nrun: {run['dir']}\nwritten: {today}\n---\n\n"
+
     pull = f", pull request {task['pr']['url']}" if task.get("pr") else ""
-    text = (f"# {task['goal']}\n\nPromoted from Hearth task {task['id']} on {time.strftime('%Y-%m-%d')}: project {task['project']}, "
-            f"status {task['status']}{pull}.\nWritten by {run['provider']} in run {run['dir']}; it is the agent's own report, "
-            f"not verified fact, so edit it before importing.\n\n{report}\n")
-    leaks = sorted({kind for kind, pattern in GUARD_PATTERNS if re.search(pattern, text)})
-    problems = ([f"it contains {', '.join(leaks)} (CODE-6); remove it from the report first"] if leaks else []) + \
-               ([f"{target.name} already exists in {target.parent.name}/, and promote never overwrites"] if target.exists() else []) + \
-               ([f"there is no reports/ folder in {vault.name}"] if not target.parent.is_dir() else [])
-    print(f"{task['id']}  {'writes' if apply and not problems else 'would write'}  {vault.name}/reports/{target.name}  "
-          f"({len(text.splitlines())} lines, from {run['dir']})")
-    for problem in problems:
-        print(f"  not promoted: {problem}", file=sys.stderr)
+    report_id = vault_notes.note_id(task["id"], run["dir"], "report")
+    files = [{"id": report_id, "path": vault / "reports" / f"{(task.get('finished') or task['created'])[:10]}-{task['id']}.md",
+              "text": header(report_id) + f"# {task['goal']}\n\nPromoted from Hearth task {task['id']} on {today}: project {task['project']}, "
+                      f"status {task['status']}{pull}.\nWritten by {provider} in run {run['dir']}; it is the agent's own report, "
+                      f"not verified fact, so edit it before importing.\n\n{report}\n"}]
+    skipped = []
+    for title, body in notes:
+        name = (re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:60] or "note") + ".md"
+        leaks = sorted({kind for kind, pattern in GUARD_PATTERNS if re.search(pattern, title + body)})
+        if leaks or len(body) > NOTE_CHARS:
+            skipped.append(f"{name}: it contains {', '.join(leaks)} (CODE-6)" if leaks else f"{name}: it is over {NOTE_CHARS} characters")
+            continue
+        key = vault_notes.note_id(task["id"], run["dir"], title)
+        files.append({"id": key, "path": vault / "agent-notes" / provider / name,
+                      "text": header(key) + f"# {title}\n\nWritten by {provider} in Hearth task {task['id']}; an agent's note, "
+                                            f"not verified fact. Move it into notes/ to accept it.\n\n{body}\n"})
+
+    # ADR-0036 and ADR-0029: promotion never widens who may read the task's recalled evidence, quoted or paraphrased.
+    records = recall.delivered(task_dir)
+    scope = sorted({folder for record in records for folder in record.get("roots") or []})
+    policy = home / "recall.json"
+    readers = {}
+    for name in sorted(json.loads(policy.read_text(encoding="utf-8")).get("providers", {}) if policy.exists() else {}):
+        roots = recall.scope(home, None, name)[0]
+        reports = (vault / "reports").resolve()
+        if any(reports.is_relative_to(root) or root.is_relative_to(reports) for root in roots):
+            readers[name] = roots
+    problems = [f"it contains {kind} (CODE-6); remove it from the report first"
+                for kind in sorted({kind for kind, pattern in GUARD_PATTERNS if re.search(pattern, files[0]["text"])})]
+    if any(not record.get("roots") for record in records):
+        problems.append("a recall record of this task has no saved folders, so who may read its output cannot be established (ADR-0029)")
+    problems += [f"{name} can recall reports/ but not everything this task was given (ADR-0036)"
+                 for name, roots in readers.items() if not vault_notes.covers(scope, roots)]
+    if not (vault / "reports").is_dir():
+        problems.append(f"there is no reports/ folder in {vault.name}")
+    try:
+        entries = vault_notes.load(home)
+    except (OSError, ValueError) as exc:
+        entries = {}
+        problems.append(f"the vault note record cannot be read ({exc}); fix {vault_notes.LEDGER} first")
+
+    write, commit, listed, done = [], [], [], []
+    for file in files:
+        entry, label = entries.get(file["id"]), f"{file['path'].relative_to(vault)}"
+        if entry is None:
+            if not file["path"].exists():
+                write.append(file)
+            elif file is files[0]:
+                problems.append(f"{file['path'].name} already exists in reports/, and promote never overwrites")
+            else:
+                skipped.append(f"{file['path'].name}: it already exists, and promote never overwrites")
+            continue
+        path = Path(entry["path"])
+        current = vault_notes.digest(path.read_text(encoding="utf-8")) if path.exists() else None
+        if entry["state"] == "committed":
+            done.append(label)
+        elif current is None and entry["state"] == "intended":
+            if not apply:
+                listed.append(f"{label} was recorded but never written; --apply writes it")
+            write.append(file)
+        elif current is None:
+            listed.append(f"{label} is recorded as written but is missing")
+        elif current != entry["sha256"]:
+            listed.append(f"{label} changed since it was written, so it is not committed under {provider}'s name")
+        else:
+            commit.append(entry | {"state": "written"})
+
+    verb = "writes" if apply and not problems else "would write"
+    for file in write:
+        print(f"{task['id']}  {verb}  {vault.name}/{file['path'].relative_to(vault)}  ({len(file['text'].splitlines())} lines, from {run['dir']})")
+    if readers:
+        print(f"  once promoted, recallable by {', '.join(readers)}", file=sys.stderr)
+    for copied in recall.matches(task_dir, original):
+        print(f"  copies text from {copied['document']}, chunk {copied['chunk_id']}", file=sys.stderr)
+    for line in problems + skipped + listed:
+        print(f"  not promoted: {line}", file=sys.stderr)
     if problems:
         return 1
     if not apply:
-        print(text)
+        for file in write:
+            print(file["text"])
         print(f"Next: hearth task promote {task['id']} --apply", file=sys.stderr)
         return 0
-    target.write_text(text, encoding="utf-8")
-    print(f"Next: edit {vault.name}/reports/{target.name}, then import it with hearth sources import; nothing was imported or committed", file=sys.stderr)
+    for file in write:
+        entry = {"id": file["id"], "state": "intended", "path": str(file["path"]), "provider": provider, "task": task["id"],
+                 "run": run["dir"], "sha256": vault_notes.digest(file["text"]), "scope": scope}
+        vault_notes.record(home, entry)
+        file["path"].parent.mkdir(parents=True, exist_ok=True)
+        file["path"].write_text(file["text"], encoding="utf-8")
+        vault_notes.record(home, entry | {"state": "written"})
+        commit.append(entry | {"state": "written"})
+    failed = _commit_vault(vault, [Path(entry["path"]) for entry in commit], provider, task["id"]) if commit else None
+    if failed:
+        print(f"  not committed: {failed}; the files stay written and recorded.\nNext: fix that, then run hearth task promote {task['id']} --apply again",
+              file=sys.stderr)
+        return 1
+    for entry in commit:
+        vault_notes.record(home, entry | {"state": "committed"})
+    if done and not commit:
+        print(f"{task['id']} already promoted: {', '.join(done)}", file=sys.stderr)
+    if skipped or listed:
+        print(f"Next: fix the notes listed above in {run['dir']}/report.md, or handle the changed files yourself", file=sys.stderr)
+        return 1
+    if commit:
+        print(f"Next: edit {vault.name}/{Path(commit[0]['path']).relative_to(vault)}"
+              + (f", and move notes from {vault.name}/agent-notes/{provider}/ into notes/ to accept them" if len(commit) > 1 else ""), file=sys.stderr)
     return 0
+
+
+def _commit_vault(vault: Path, paths: list[Path], provider: str, task_id: str) -> str | None:
+    """ADR-0036: commit exactly `paths`, with the agent as author and the person as committer, or say why not."""
+    if subprocess.run(["git", "-C", str(vault), "rev-parse", "--git-dir"], capture_output=True).returncode:
+        return f"{vault.name} is not a Git repository"
+    for marker in ("MERGE_HEAD", "rebase-merge", "rebase-apply"):
+        if (vault / _git(vault, "rev-parse", "--git-path", marker).strip()).exists():
+            return f"{vault.name} is mid-merge or mid-rebase"
+    names = [str(path.relative_to(vault)) for path in paths]
+    author = f"--author={provider} (Hearth task {task_id}) <{provider}@hearth.invalid>"
+    for args in (["add", "--", *names], ["commit", "-q", "-m", f"Add {provider}'s notes from Hearth task {task_id}", author, "--", *names]):
+        result = subprocess.run(["git", "-C", str(vault), *args], capture_output=True, text=True)
+        if result.returncode:
+            return f"git {args[0]} failed: {(result.stderr or result.stdout).strip()}"
+    return None
 
 
 def _pull_request(task: dict, task_dir: Path) -> tuple[str, str]:

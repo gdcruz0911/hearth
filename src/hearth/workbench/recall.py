@@ -120,6 +120,11 @@ def build(home: Path, project: dict | None, provider: str, goal: str, mode: str)
         raise RecallError(f"Recall could not run: {exc}\nNext: rebuild the semantic index, or use --recall keyword") from exc
     finally:
         service.close()
+    from . import vault_notes
+
+    vault = vault_notes.vault(home)
+    notes = vault_notes.locate(home, vault)
+    named = {root.name: root for root in roots}  # A location is its recall root's name and the path inside it.
     evidence, withheld = [], []
     for item in report["evidence"]:
         # ADR-0024: outbound text is checked for secrets and private paths; a matching excerpt is not sent.
@@ -127,8 +132,15 @@ def build(home: Path, project: dict | None, provider: str, goal: str, mode: str)
         if kinds:
             withheld.append({"chunk_id": item["chunk_id"], "kinds": kinds})
             continue
+        # ADR-0036: agent-written files go out only as the record allows, labeled with who wrote them.
+        parts = Path(item.get("location") or "").parts
+        path = named[parts[0]].joinpath(*parts[1:]) if parts and parts[0] in named else None
+        allowed, note = vault_notes.allows(notes, vault, path, roots) if path else (False, "its location is unknown")
+        if not allowed:
+            withheld.append({"chunk_id": item["chunk_id"], "reason": note})
+            continue
         evidence.append({key: item.get(key) for key in ("chunk_id", "document", "page", "location", "source")}
-                        | {"excerpt": item["excerpt"][:EXCERPT_CHARS]})
+                        | {"excerpt": item["excerpt"][:EXCERPT_CHARS]} | ({"origin": note} if note else {}))
     return {**record, "scope": [root.name for root in roots], "roots": [str(root) for root in roots], "status": report["status"],
             "gate": report["gate"], "evidence": evidence[:EXCERPTS], "withheld": withheld}
 
@@ -146,6 +158,8 @@ def block(record: dict) -> str:
     ]
     for item in record["evidence"]:
         lines.append(f"- {item['document']}, page {item['page']}, chunk {item['chunk_id']}, {item['source']}, at {item['location']}:")
+        if item.get("origin"):
+            lines.append(f"  ({item['origin']}; not the keeper's own words)")
         lines.extend(f"  > {line}" for line in item["excerpt"].splitlines() or [""])
     return "\n".join(lines) + "\n"
 
