@@ -368,12 +368,17 @@
       const docs = [...new Set((task.recall || []).flatMap((record) => record.documents || []))];
       if (docs.length) parts.push(el("h3", "group", "Knowledge it was given"), el("p", "meta", docs.join(", ")));
       parts.push(el("code", "command", H().command(task)));
+      const page = el("a", "link-button", "Open the task page");
+      page.href = `#/tasks/${encodeURIComponent(task.id)}`;
+      parts.push(page);
     } else if (node.type === "run") {
       const run = node.run;
       parts.push(field("Role", run.role), field("Provider", run.provider), field("Model", run.model), field("Outcome", run.outcome));
       const log = el("ol", "transcript");
       log.setAttribute("aria-live", "polite");
-      parts.push(el("h3", "group", node.status === "running" ? "Live session" : "Session"), log);
+      const page = el("a", "link-button", "Open full session");
+      page.href = `#/tasks/${encodeURIComponent(node.task.id)}/${encodeURIComponent(run.dir)}`;
+      parts.push(page, el("h3", "group", node.status === "running" ? "Live session" : "Session"), log);
       startTranscript(node.task.id, run.dir, log);
     } else if (node.type === "document") {
       const doc = node.doc;
@@ -430,38 +435,14 @@
     if (reduceMotion.matches) done(); else setTimeout(done, 180);
   }
 
-  // An agent's session, read from its events as they arrive (#60's transcript endpoint).
+  // An agent's session, read by the shared reader in dashboard.js.
   function startTranscript(taskId, run, list) {
-    const session = { offset: 0, timer: 0, stopped: false };
-    state.transcript = session;
-    const kinds = { start: "Started", message: "Said", tool: "Ran", output: "Output", result: "Result", error: "Error" };
-    const poll = async () => {
-      try {
-        const page = await H().api(`workbench/transcript/${encodeURIComponent(taskId)}/${encodeURIComponent(run)}/${session.offset}`);
-        if (session.stopped) return;
-        for (const item of page.items) {
-          const entry = H().el("li", `turn ${item.kind}${item.error ? " error" : ""}`);
-          entry.append(H().el("span", "turn-kind", item.tool ? `${kinds[item.kind] || item.kind} ${item.tool}` : kinds[item.kind] || item.kind),
-            H().el(item.kind === "message" || item.kind === "result" ? "p" : "pre", "turn-text", item.text));
-          list.append(entry);
-        }
-        // Follow a live session as it grows; a finished one opens at its beginning.
-        if (page.items.length && !page.finished) list.lastElementChild.scrollIntoView({ block: "nearest" });
-        const more = page.offset > session.offset;
-        session.offset = page.offset;
-        if (!page.finished || more) session.timer = setTimeout(poll, more ? 50 : 2000);
-        if (page.finished && !more && !list.children.length) list.append(H().el("li", "empty", "This run recorded no events."));
-      } catch (error) {
-        if (!session.stopped) list.append(H().el("li", "turn error", error.message));
-      }
-    };
-    poll();
+    state.transcript = H().session(taskId, run, list);
   }
 
   function stopTranscript() {
     if (!state.transcript) return;
-    state.transcript.stopped = true;
-    clearTimeout(state.transcript.timer);
+    state.transcript.stop();
     state.transcript = null;
   }
 
@@ -546,7 +527,9 @@
         openInspector(state.nodes.get(state.selected)); // keep the open task current
       }
     });
-    document.addEventListener("hearth:view", (event) => { if (event.detail === "hub") { applyView(); reheat(0.2); } });
+    document.addEventListener("hearth:view", (event) => {
+      if (event.detail === "hub") { applyView(); reheat(0.2); } else { stopTranscript(); closeInspector(); } // One session poller at a time.
+    });
     state.view = home();
     applyView();
     loadMap();

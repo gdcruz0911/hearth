@@ -1673,6 +1673,7 @@ def _summary(task: dict, task_dir: Path) -> dict:
         # Scope names, counts, and document names only: excerpts stay in the task's recall records.
         "recall": [{"record": name, "provider": record.get("provider"), "mode": record.get("mode"), "folders": record.get("scope") or [],
                     "excerpts": len(record.get("evidence") or []), "documents": sorted({item["document"] for item in record.get("evidence") or []}),
+                    "stale": sorted({item["document"] for item in record.get("evidence") or [] if item.get("source") not in (None, "current")}),
                     "withheld": len(record.get("withheld") or []), "not_sent_because": record.get("reason") or record.get("error")}
                    for name, record in records],
         "artifacts": {"receipts": str(task_dir), "worktree": task["worktree"],

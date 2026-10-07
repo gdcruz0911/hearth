@@ -437,6 +437,19 @@ class WorkbenchTasksEndpointTests(unittest.TestCase):
         self.assertEqual((bad.status, unknown.status), (400, 404))
 
 
+    def test_the_diff_route_passes_the_task_and_rejects_other_shapes(self) -> None:
+        calls = []
+        app = HearthWebApplication(self.service, "token", workbench_diff=lambda task: calls.append(task) or {"diff": None})
+
+        ok = app.respond("GET", "/token/api/workbench/diff/20260930-120000", b"")
+        bad = app.respond("GET", "/token/api/workbench/diff/20260930-120000/extra", b"")
+        unknown = HearthWebApplication(self.service, "token", workbench_diff=lambda task: None).respond(
+            "GET", "/token/api/workbench/diff/20260930-120000", b"")
+
+        self.assertEqual((ok.status, calls), (200, ["20260930-120000"]))
+        self.assertEqual((bad.status, unknown.status), (400, 404))
+
+
 class DashboardPageTests(unittest.TestCase):
     """The dashboard is the home page; the knowledge page moved to knowledge; nothing loads from another host (UI-4)."""
 

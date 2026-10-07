@@ -63,22 +63,31 @@
           </div>
         </div>
 
-        <div class="view" data-view="tasks" hidden>
-          <section aria-labelledby="needs-heading">
-            <h2 id="needs-heading">Needs you</h2>
-            <ul id="needs" class="rows"></ul>
-          </section>
-          <section aria-labelledby="progress-heading">
-            <div class="section-head">
-              <h2 id="progress-heading">Running</h2>
-              <p id="slots" class="slots"></p>
-            </div>
-            <ul id="progress" class="rows"></ul>
-          </section>
-          <section aria-labelledby="recent-heading">
-            <h2 id="recent-heading">Recent</h2>
-            <ul id="recent" class="rows"></ul>
-          </section>
+        <div class="view tasks-view" data-view="tasks" hidden>
+          <div class="tasks-layout">
+            <nav class="task-list" aria-label="Tasks">
+              <div class="section-head">
+                <h2>Tasks</h2>
+                <p id="slots" class="slots"></p>
+              </div>
+              <h3 id="needs-heading" class="list-heading">Needs you</h3>
+              <ul id="needs" class="cards" aria-labelledby="needs-heading"></ul>
+              <h3 id="progress-heading" class="list-heading">In progress</h3>
+              <ul id="progress" class="cards" aria-labelledby="progress-heading"></ul>
+              <details id="finished-group" class="finished">
+                <summary class="list-heading">Finished <span id="finished-count" class="count"></span></summary>
+                <ul id="finished" class="cards"></ul>
+              </details>
+            </nav>
+            <article id="task-detail" class="task-detail">
+              <div id="task-summary"></div>
+              <section id="task-session" class="task-session" hidden>
+                <h3 id="session-heading" class="group"></h3>
+                <ol id="session-log" class="transcript" aria-live="polite"></ol>
+              </section>
+            </article>
+            <aside id="task-diff" class="task-diff" aria-label="Changes"></aside>
+          </div>
         </div>
 
         <div class="view" data-view="knowledge" hidden>
