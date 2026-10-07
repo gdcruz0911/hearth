@@ -91,6 +91,22 @@ class HearthWebServerTests(unittest.TestCase):
         self.service.close()
         self.temporary_directory.cleanup()
 
+    def test_a_client_that_keeps_its_connection_open_does_not_starve_another(self) -> None:
+        # The dashboard polls every few seconds; on a kept-alive connection it used to block every other request.
+        parsed = urlsplit(self.server.url)
+        holder = http.client.HTTPConnection(parsed.hostname, parsed.port, timeout=3)
+        holder.request("GET", self._path("api/health"))
+        held = holder.getresponse()
+        held.read()
+        self.addCleanup(holder.close)
+        other = http.client.HTTPConnection(parsed.hostname, parsed.port, timeout=2)
+        self.addCleanup(other.close)
+
+        other.request("GET", self._path("api/documents"))
+        answered = other.getresponse()
+
+        self.assertEqual((held.getheader("Connection"), answered.status), ("close", 200))
+
     def test_serves_a_capability_scoped_loopback_interface_without_cors(self) -> None:
         root_response, root_body = self._request("GET", self._path())
         missing_token_response, _ = self._request("GET", "/")
@@ -458,3 +474,37 @@ class DashboardPageTests(unittest.TestCase):
         script = self.app.respond("GET", "/token/assets/dashboard.js", b"").body.decode()
         self.assertNotIn("innerHTML", script)
         self.assertNotIn("insertAdjacentHTML", script)
+
+
+class SearchReportEndpointTests(unittest.TestCase):
+    """The Knowledge tab asks through search_report, which keeps accepted evidence apart from what was only retrieved."""
+
+    def setUp(self) -> None:
+        self.temporary_directory = tempfile.TemporaryDirectory()
+        root = Path(self.temporary_directory.name)
+        note = root / "operations.md"
+        note.write_text("# Operations\n\nThe deployment owner is Ada.\n", encoding="utf-8")
+        self.service = HearthService(root / "hearth.sqlite")
+        self.service.import_document(str(note))
+        self.addCleanup(self.temporary_directory.cleanup)
+        self.addCleanup(self.service.close)
+        self.app = HearthWebApplication(self.service, "token")
+
+    def ask(self, payload: dict) -> tuple[int, dict]:
+        response = self.app.respond("POST", "/token/api/search/report", json.dumps(payload).encode())
+        return response.status, json.loads(response.body)
+
+    def test_an_answer_carries_accepted_evidence_with_freshness_and_the_gates_limit(self) -> None:
+        status, report = self.ask({"question": "Who is the deployment owner?", "keyword": True})
+
+        self.assertEqual((status, report["status"], report["retrieval"]["mode"]), (200, "supported", "keyword"))
+        self.assertIn("Ada", report["evidence"][0]["excerpt"])
+        self.assertEqual(report["evidence"][0]["source"], "current")
+        self.assertIn("does not show that the evidence answers", report["gate"]["note"])
+        self.assertTrue(all("excerpt" not in candidate for candidate in report["candidates"]))
+
+    def test_an_empty_question_is_refused(self) -> None:
+        status, body = self.ask({"question": "  "})
+
+        self.assertEqual(status, 400)
+        self.assertIn("Enter a question", body["error"])

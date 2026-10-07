@@ -124,6 +124,118 @@ async function refresh() {
   }
 }
 
+async function api(path, body) {
+  const response = await fetch(`${root}api/${path}`, body === undefined ? { cache: "no-store" } : {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+  });
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || "Hearth could not complete that.");
+  return data;
+}
+
+function freshness(source) {
+  const current = source === "current";
+  return el("span", `badge ${current ? "current" : "stale"}`, shown(source));
+}
+
+function where(item) {
+  return `${shown(item.document)} · page ${shown(item.page)} · chunk ${shown(item.chunk_id)}`;
+}
+
+function renderAnswer(report) {
+  const result = document.getElementById("ask-result");
+  const supported = report.status === "supported";
+  const head = el("div", "row-top");
+  head.append(el("span", `badge ${supported ? "done" : "cancelled"}`, supported ? "answer found" : "abstained"),
+    el("span", "meta", `${shown(report.retrieval && report.retrieval.mode)} search · index ${shown(report.retrieval && report.retrieval.semantic_index)}`));
+  const parts = [head];
+  const evidence = report.evidence || [];
+  if (evidence.length) {
+    // UI-7: what the evidence check accepted is labeled not verified, apart from what was only retrieved.
+    parts.push(el("h3", "group", "Accepted by the evidence check, not verified"));
+    parts.push(el("p", "meta", shown(report.gate && report.gate.note)));
+    const list = el("ul", "rows");
+    evidence.forEach((item) => {
+      const row = el("li", "row evidence");
+      const top = el("div", "row-top");
+      top.append(el("span", "goal", where(item)), freshness(item.source));
+      const excerpt = el("blockquote", "excerpt", shown(item.excerpt));
+      row.append(top, excerpt);
+      if (shown(item.excerpt).length > 400) {
+        const toggle = el("button", "more", "Show all");
+        toggle.type = "button";
+        toggle.addEventListener("click", () => {
+          toggle.textContent = excerpt.classList.toggle("open") ? "Show less" : "Show all";
+        });
+        row.append(toggle);
+      }
+      list.append(row);
+    });
+    parts.push(list);
+  } else {
+    parts.push(el("p", "meta", "Hearth found no excerpt it could cite, so it does not answer."));
+  }
+  const others = (report.candidates || []).filter((item) => !item.cited);
+  if (others.length) {
+    const more = el("details", "candidates");
+    more.append(el("summary", "", `Also retrieved, not cited (${others.length}); text not shown`));
+    const list = el("ul", "rows");
+    others.forEach((item) => {
+      const row = el("li", "row-top candidate");
+      row.append(el("span", "goal", where(item)), freshness(item.source));
+      list.append(row);
+    });
+    more.append(list);
+    parts.push(more);
+  }
+  result.replaceChildren(...parts);
+}
+
+async function loadKnowledge() {
+  try {
+    const [health, documents] = await Promise.all([api("health"), api("documents")]);
+    document.getElementById("health").textContent =
+      `${health.document_count} documents · ${health.chunk_count} chunks · semantic index ${shown(health.semantic_index_status)}`;
+    const attention = new Map((health.source_attention || []).map((item) => [item.document_id, item.status]));
+    fill(document.getElementById("attention"), health.source_attention || [], (item) => {
+      const row = el("li", "row row-top");
+      row.append(el("span", "goal", shown(item.document_name)), freshness(item.status));
+      return row;
+    }, "Every source is current.");
+    const all = documents.documents || [];
+    const filter = document.getElementById("source-filter");
+    const draw = () => {
+      const term = filter.value.trim().toLowerCase();
+      const matching = all.filter((item) => String(item.name).toLowerCase().includes(term));
+      fill(document.getElementById("sources"), matching, (item) => {
+        const row = el("li", "source");
+        row.append(el("span", "goal", shown(item.name)), el("span", "meta", `${shown(item.page_count)} pages`),
+          freshness(attention.get(item.id) || "current"));
+        return row;
+      }, term ? "No source matches." : "No sources imported yet.");
+    };
+    filter.oninput = draw;
+    draw();
+  } catch (error) {
+    document.getElementById("health").textContent = error.message;
+  }
+}
+
+function knowledge() {
+  const form = document.getElementById("ask-form");
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const question = document.getElementById("ask-question").value;
+    const result = document.getElementById("ask-result");
+    result.replaceChildren(el("p", "meta", "Searching your collection."));
+    try {
+      renderAnswer(await api("search/report", { question, keyword: document.getElementById("ask-keyword").checked }));
+    } catch (error) {
+      result.replaceChildren(el("p", "status error", error.message));
+    }
+  });
+}
+
 function stored(key, fallback) {
   try { return localStorage.getItem(key) || fallback; } catch { return fallback; } // storage may be blocked
 }
@@ -137,6 +249,7 @@ function route() {
   const asked = window.location.hash.replace(/^#\//, "");
   const view = VIEWS.includes(asked) ? asked : stored("hearth-default-view", "hub");
   document.querySelectorAll(".view").forEach((node) => { node.hidden = node.dataset.view !== view; });
+  if (view === "knowledge") loadKnowledge();
   document.querySelectorAll(".nav-item").forEach((link) => {
     const current = link.dataset.view === view;
     link.classList.toggle("current", current);
@@ -168,6 +281,7 @@ function theme() {
 
 theme();
 defaultView();
+knowledge();
 route();
 window.addEventListener("hashchange", route);
 refresh();
