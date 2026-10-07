@@ -15,7 +15,7 @@ from pathlib import Path
 from unittest import mock
 
 from hearth.cli import main
-from hearth.workbench import ask, tasks
+from hearth.workbench import ask, tasks, vault_notes
 
 REAL_ASK = {name: list(argv) for name, argv in ask.ASK.items()}  # Before any test patches it.
 FAKE_AGENT = [sys.executable, str(Path(__file__).with_name("fake_agent.py")), "{options}", "--allowedTools", "Bash({check} *)"]
@@ -1480,11 +1480,37 @@ class KnowledgeBoardTests(RecallFixture):
         self.assertNotIn("ANSWER-FOR-CODEX-ONLY", prompts["claude"])
 
 
+NOTES_REPORT = """Added hello.txt.
+
+## Notes for the vault
+
+### Hello greetings stay short
+
+Keep hello.txt to one line.
+
+### Second thought
+
+Body two.
+
+PR title: feat: add hello.txt
+PR summary: Adds hello.txt.
+"""
+
+
 class PromoteTests(TaskTestCase):
+    """ADR-0036: promote writes the report and agent notes, records who wrote them first, and commits them as the agent."""
+
     def setUp(self) -> None:
         super().setUp()
-        self.reports = self.home / "Hearth/reports"
+        self.vault = self.home / "Hearth"
+        self.reports = self.vault / "reports"
         self.reports.mkdir(parents=True)
+        git(self.vault, "init", "-q", "-b", "main")
+        git(self.vault, "config", "user.email", "person@example.com")
+        git(self.vault, "config", "user.name", "Person")
+        (self.vault / "README.md").write_text("# Notes\n", encoding="utf-8")
+        git(self.vault, "add", "-A")
+        git(self.vault, "commit", "-q", "-m", "init")
         self.cli("task", "new", "demo", "Add hello.txt")
         self.task = self.only_task()
         self.report = self.home / ".hearth/tasks" / self.task["id"] / "runs/01-implement-claude/report.md"
@@ -1498,23 +1524,66 @@ class PromoteTests(TaskTestCase):
     def target(self) -> Path:
         return self.reports / f"{(self.task.get('finished') or self.task['created'])[:10]}-{self.task['id']}.md"
 
-    def test_the_preview_writes_nothing_and_apply_writes_the_report_with_its_provenance_once(self) -> None:
+    def notes(self) -> Path:
+        return self.vault / "agent-notes/claude"
+
+    def ledger(self) -> dict:
+        return vault_notes.load(self.home / ".hearth")
+
+    def authors(self, path: Path) -> list[str]:
+        return git(self.vault, "log", "--format=%an|%cn", "--", str(path.relative_to(self.vault))).splitlines()
+
+    def test_the_preview_writes_nothing_and_apply_writes_and_commits_the_report_as_the_agent_once(self) -> None:
         status, shown, _ = self.promote()
-        self.assertEqual((status, list(self.reports.iterdir())), (0, []))
+        self.assertEqual((status, list(self.reports.iterdir()), self.ledger()), (0, [], {}))
         self.assertIn(f"Promoted from Hearth task {self.task['id']}", shown)
 
-        applied, _, next_step = self.promote("--apply")
+        applied, _, _ = self.promote("--apply")
 
         written = self.target().read_text(encoding="utf-8")
         self.assertEqual(applied, 0)
-        self.assertTrue(written.startswith("# Add hello.txt\n"))
+        self.assertTrue(written.startswith("---\nhearth-note: "))
+        self.assertIn("\n# Add hello.txt\n", written)
         self.assertIn("it is the agent's own report, not verified fact", written)
         self.assertIn(self.report.read_text(encoding="utf-8").strip(), written)
-        self.assertIn("nothing was imported or committed", next_step)
-        again, _, refused = self.promote("--apply")
-        self.assertEqual(again, 1)
-        self.assertIn("never overwrites", refused)
+        self.assertEqual(self.authors(self.target()), [f"claude (Hearth task {self.task['id']})|Person"])
+        self.assertEqual([entry["state"] for entry in self.ledger().values()], ["committed"])
+        again, _, said = self.promote("--apply")
+        self.assertEqual(again, 0)
+        self.assertIn("already promoted", said)
         self.assertEqual(self.target().read_text(encoding="utf-8"), written)
+        self.assertEqual(len(self.authors(self.target())), 1)
+
+    def test_notes_are_split_out_of_the_report_and_written_as_attributed_files(self) -> None:
+        self.report.write_text(NOTES_REPORT, encoding="utf-8")
+
+        status, _, _ = self.promote("--apply")
+
+        report = self.target().read_text(encoding="utf-8")
+        note = (self.notes() / "hello-greetings-stay-short.md").read_text(encoding="utf-8")
+        self.assertEqual(status, 0)
+        self.assertNotIn("Notes for the vault", report)
+        self.assertNotIn("Keep hello.txt to one line", report)
+        self.assertIn("Added hello.txt.", report)
+        self.assertIn("PR title: feat: add hello.txt", report)
+        self.assertNotIn("PR title", (self.notes() / "second-thought.md").read_text(encoding="utf-8"))
+        self.assertIn("Keep hello.txt to one line.", note)
+        self.assertIn(f"author: claude\ntask: {self.task['id']}\n", note)
+        self.assertEqual(sorted(path.name for path in self.notes().iterdir()), ["hello-greetings-stay-short.md", "second-thought.md"])
+        self.assertEqual(self.authors(self.notes() / "second-thought.md"), [f"claude (Hearth task {self.task['id']})|Person"])
+        self.assertEqual([entry["scope"] for entry in self.ledger().values()], [[], [], []])  # No recall was delivered.
+
+    def test_a_note_that_fails_a_check_is_skipped_and_the_others_are_written(self) -> None:
+        long = "\n\n### Long\n\n" + "word " * 900
+        self.report.write_text(NOTES_REPORT.replace("Body two.", "See /Users/someone/hello.sh." + long), encoding="utf-8")
+
+        status, _, said = self.promote("--apply")
+
+        self.assertEqual(status, 1)
+        self.assertEqual([path.name for path in self.notes().iterdir()], ["hello-greetings-stay-short.md"])
+        self.assertIn("second-thought.md: it contains absolute home path", said)
+        self.assertIn("long.md: it is over 4000 characters", said)
+        self.assertTrue(self.target().exists())
 
     def test_a_report_with_a_private_path_is_not_promoted(self) -> None:
         self.report.write_text("Edited /Users/someone/project/hello.txt.\n", encoding="utf-8")
@@ -1540,6 +1609,75 @@ class PromoteTests(TaskTestCase):
 
         self.assertEqual((status, list(self.reports.iterdir())), (1, []))
         self.assertIn("Agents cannot promote reports into the person's notes", refused)
+
+    def crash_on(self, state: str) -> mock._patch:
+        """Stop promote right after it records `state` for a file, as a crash would."""
+        real = vault_notes.record
+
+        def record(home: Path, entry: dict) -> None:
+            real(home, entry)
+            if entry["state"] == state:
+                raise KeyboardInterrupt
+
+        return mock.patch.object(tasks.vault_notes, "record", side_effect=record)
+
+    def test_a_crash_after_writing_leaves_a_recorded_file_that_the_next_apply_commits_without_rewriting(self) -> None:
+        with self.crash_on("written"), self.assertRaises(KeyboardInterrupt):
+            self.promote("--apply")
+        written = self.target().read_text(encoding="utf-8")
+        self.assertEqual([entry["state"] for entry in self.ledger().values()], ["written"])
+
+        status, _, _ = self.promote("--apply")
+
+        self.assertEqual(status, 0)
+        self.assertEqual(self.target().read_text(encoding="utf-8"), written)
+        self.assertEqual(self.authors(self.target()), [f"claude (Hearth task {self.task['id']})|Person"])
+
+    def test_a_crash_before_writing_is_reported_and_written_only_by_a_new_apply(self) -> None:
+        with self.crash_on("intended"), self.assertRaises(KeyboardInterrupt):
+            self.promote("--apply")
+        self.assertFalse(self.target().exists())
+
+        _, _, previewed = self.promote()
+        self.assertIn("recorded but never written", previewed)
+        self.assertFalse(self.target().exists())
+        status, _, _ = self.promote("--apply")
+
+        self.assertEqual(status, 0)
+        self.assertEqual(self.authors(self.target()), [f"claude (Hearth task {self.task['id']})|Person"])
+
+    def test_a_failed_commit_keeps_the_files_and_a_later_apply_commits_only_unchanged_ones(self) -> None:
+        self.report.write_text(NOTES_REPORT, encoding="utf-8")
+        merge_head = Path(git(self.vault, "rev-parse", "--git-path", "MERGE_HEAD").strip())
+        merge_head = merge_head if merge_head.is_absolute() else self.vault / merge_head
+        merge_head.write_text("0" * 40 + "\n", encoding="utf-8")
+
+        status, _, said = self.promote("--apply")
+
+        self.assertEqual(status, 1)
+        self.assertIn("mid-merge or mid-rebase", said)
+        self.assertTrue(self.target().exists())
+        self.assertEqual({entry["state"] for entry in self.ledger().values()}, {"written"})
+        merge_head.unlink()
+        edited = self.notes() / "second-thought.md"
+        edited.write_text(edited.read_text(encoding="utf-8") + "The person added this.\n", encoding="utf-8")
+
+        status, _, said = self.promote("--apply")
+
+        self.assertEqual(status, 1)
+        self.assertIn("second-thought.md changed since it was written", said)
+        self.assertEqual(self.authors(edited), [])
+        self.assertEqual(self.authors(self.notes() / "hello-greetings-stay-short.md"), [f"claude (Hearth task {self.task['id']})|Person"])
+        self.assertIn("The person added this.", edited.read_text(encoding="utf-8"))
+
+    def test_only_the_written_files_are_committed_and_the_persons_staged_work_stays_staged(self) -> None:
+        (self.vault / "README.md").write_text("# Notes, edited by the person\n", encoding="utf-8")
+        git(self.vault, "add", "README.md")
+
+        self.promote("--apply")
+
+        self.assertEqual(git(self.vault, "diff", "--cached", "--name-only").split(), ["README.md"])
+        self.assertEqual(git(self.vault, "show", "--name-only", "--format=", "HEAD").split(), [str(self.target().relative_to(self.vault))])
 
 
 class ReviewGuideTests(LoopTestCase):
@@ -1700,6 +1838,150 @@ class ReviewPermissionTests(RecallFixture):
         fix = task["runs"][-1]
         self.assertEqual((fix["role"], task["stop_reason"]), ("fix", "recall_not_permitted"))
         self.assertFalse((self.home / ".hearth/tasks" / task["id"] / "runs" / fix["dir"] / "events.jsonl").exists())
+
+
+class VaultNoteRecallTests(RecallFixture):
+    """ADR-0036: recall filters agent-written files by the record, whatever the recall roots say."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.configure({"claude": [str(self.vault)], "codex": [str(self.vault / "notes")]}, [str(self.vault)])
+        self.project = json.loads((self.home / ".hearth/projects.json").read_text(encoding="utf-8"))["demo"]
+
+    def add(self, relative: str, text: str) -> Path:
+        from hearth.service import HearthService
+
+        path = self.vault / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+        service = HearthService(self.home / "knowledge.sqlite")
+        service._import_document(str(path), rebuild_index=False)
+        service.close()
+        return path
+
+    def note(self, relative: str, scope: list[str] | None, marker: str = "AGENTNOTE") -> Path:
+        path = self.add(relative, f"---\nhearth-note: n1\nauthor: claude\ntask: t-1\n---\n\nAdd hello txt: {marker} greetings stay short.\n")
+        entry = {"id": "n1", "state": "committed", "path": str(path), "provider": "claude", "task": "t-1", "run": "01-implement-claude",
+                 "sha256": vault_notes.digest(path.read_text(encoding="utf-8"))}
+        vault_notes.record(self.home / ".hearth", entry | ({"scope": scope} if scope is not None else {}))
+        return path
+
+    def recall(self, provider: str = "claude") -> dict:
+        return tasks.recall.build(self.home / ".hearth", self.project, provider, "Add hello.txt", "keyword")
+
+    def sent(self, record: dict) -> str:
+        return json.dumps(record["evidence"])
+
+    def test_an_unaccepted_agent_note_never_reaches_an_agent_even_inside_its_recall_roots(self) -> None:
+        self.note("agent-notes/claude/tip.md", [])
+
+        record = self.recall()
+
+        self.assertNotIn("AGENTNOTE", self.sent(record))
+        self.assertIn("not accepted", json.dumps(record["withheld"]))
+
+    def test_an_accepted_note_keeps_its_origin_label_after_the_person_moves_it(self) -> None:
+        path = self.note("agent-notes/claude/tip.md", [])
+        accepted = self.vault / "notes/tip.md"
+        path.rename(accepted)
+        from hearth.service import HearthService
+
+        service = HearthService(self.home / "knowledge.sqlite")
+        service._import_document(str(accepted), rebuild_index=False)
+        service.close()
+
+        record = self.recall()
+
+        item = next(item for item in record["evidence"] if "AGENTNOTE" in item["excerpt"])
+        self.assertEqual(item["origin"], "written by claude in task t-1, accepted by the keeper")
+        self.assertIn("written by claude in task t-1, accepted by the keeper", tasks.recall.block(record))
+
+    def test_a_recorded_note_without_a_scope_is_refused(self) -> None:
+        self.note("notes/tip.md", None)
+
+        record = self.recall()
+
+        self.assertNotIn("AGENTNOTE", self.sent(record))
+
+    def test_a_note_from_a_wider_task_scope_reaches_only_providers_that_cover_it(self) -> None:
+        self.note("notes/tip.md", [str(self.vault.resolve())])
+
+        self.assertIn("AGENTNOTE", self.sent(self.recall("claude")))
+        self.assertNotIn("AGENTNOTE", self.sent(self.recall("codex")))
+
+    def test_a_report_with_no_record_is_refused(self) -> None:
+        self.add("reports/old.md", "Add hello txt: OLDREPORT greetings stay short.\n")
+
+        record = self.recall()
+
+        self.assertNotIn("OLDREPORT", self.sent(record))
+        self.assertIn("no record", json.dumps(record["withheld"]))
+
+    def test_an_unreadable_record_refuses_the_note_folders_but_not_the_rest_of_the_vault(self) -> None:
+        self.note("notes/tip.md", [])
+        with (self.home / ".hearth" / vault_notes.LEDGER).open("a", encoding="utf-8") as ledger:
+            ledger.write("not json\n")
+
+        record = self.recall()
+
+        locations = {item["location"] for item in record["evidence"]}
+        self.assertEqual(locations, {"Hearth/projects/demo/decision.md"})
+        self.assertIn("record cannot be read", json.dumps(record["withheld"]))
+
+    def test_a_lost_origin_withholds_notes_from_providers_that_do_not_cover_it(self) -> None:
+        vault_notes.record(self.home / ".hearth", {"id": "gone", "state": "committed", "path": str(self.vault / "notes/gone.md"),
+                                                   "provider": "claude", "task": "t-2", "run": "r", "sha256": "0" * 64,
+                                                   "scope": [str(self.vault.resolve())]})
+
+        self.assertIn("greet the person warmly", self.sent(self.recall("claude")))
+        withheld = self.recall("codex")
+        self.assertNotIn("greet the person warmly", self.sent(withheld))
+        self.assertIn("origin is lost", json.dumps(withheld["withheld"]))
+
+
+class RecallPromoteTests(RecallFixture):
+    """ADR-0036: promotion never widens who may read a task's recalled evidence."""
+
+    def promote(self, *argv: str) -> tuple[int, str]:
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+            status = main(["task", "promote", self.only_task()["id"], *argv])
+        return status, output.getvalue()
+
+    def setUp(self) -> None:
+        super().setUp()
+        (self.vault / "reports").mkdir()
+        git(self.vault, "init", "-q", "-b", "main")
+        git(self.vault, "config", "user.email", "person@example.com")
+        git(self.vault, "config", "user.name", "Person")
+
+    def test_promotion_is_refused_while_a_reader_of_reports_lacks_the_tasks_scope(self) -> None:
+        self.configure({"claude": [str(self.vault)], "codex": [str(self.vault / "reports")]}, [str(self.vault)])
+        self.cli("task", "new", "demo", "Add hello.txt", "--recall", "keyword")
+
+        status, said = self.promote("--apply")
+
+        self.assertEqual(status, 1)
+        self.assertIn("codex can recall reports/ but not everything this task was given", said)
+        self.assertEqual(list((self.vault / "reports").iterdir()), [])
+
+    def test_the_preview_names_the_readers_and_lists_copied_excerpts(self) -> None:
+        self.configure({"claude": [str(self.vault)], "codex": [str(self.vault)]}, [str(self.vault)])
+        self.cli("task", "new", "demo", "Add hello.txt", "--recall", "keyword")
+        report = self.home / ".hearth/tasks" / self.only_task()["id"] / "runs/01-implement-claude/report.md"
+        report.write_text("Done. Hello files in this project greet the person warmly, by name.\n", encoding="utf-8")
+
+        status, said = self.promote()
+
+        self.assertEqual(status, 0)
+        self.assertIn("recallable by claude, codex", said)
+        self.assertIn("copies text from greeting.md", said)
+
+        applied, _ = self.promote("--apply")
+
+        self.assertEqual(applied, 0)
+        entry = next(iter(vault_notes.load(self.home / ".hearth").values()))
+        self.assertEqual(entry["scope"], [str(self.vault.resolve())])
 
 
 class AskTests(RecallFixture):
