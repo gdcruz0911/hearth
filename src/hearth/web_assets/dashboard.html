@@ -7,6 +7,7 @@
     <title>Hearth</title>
     <link rel="stylesheet" href="assets/dashboard.css">
     <script defer src="assets/dashboard.js"></script>
+    <script defer src="assets/hub.js"></script>
   </head>
   <body>
     <div class="app">
@@ -17,6 +18,7 @@
           <a class="nav-item" href="#/tasks" data-view="tasks">Tasks</a>
           <a class="nav-item" href="#/knowledge" data-view="knowledge">Knowledge</a>
         </nav>
+        <p id="live" class="live" title="Refreshes every 5 seconds"><span class="live-dot" aria-hidden="true"></span><span id="live-text">Connecting</span></p>
         <h2 class="side-heading">Projects</h2>
         <ul id="projects" class="projects"></ul>
         <div class="settings">
@@ -31,17 +33,34 @@
         </div>
       </aside>
       <main class="main">
-        <p id="status" class="status" role="status" aria-live="polite">Loading tasks.</p>
+        <p id="status" class="status" role="status" aria-live="polite" hidden></p>
 
-        <div class="view" data-view="hub" hidden>
-          <section class="pinned" aria-labelledby="hub-needs-heading">
-            <h2 id="hub-needs-heading">Needs you</h2>
-            <ul id="hub-needs" class="rows"></ul>
-          </section>
-          <section aria-labelledby="hub-heading">
-            <h2 id="hub-heading">How it connects</h2>
-            <p class="empty">The graph of projects, tasks, agents, and knowledge comes in the next step; the Tasks tab lists everything meanwhile.</p>
-          </section>
+        <div class="view hub-view" data-view="hub" hidden>
+          <div id="hub-stage" class="hub-stage" aria-label="How projects, tasks, agents, and knowledge connect">
+            <svg id="hub-svg" class="hub-svg" role="img" aria-labelledby="hub-title">
+              <title id="hub-title">Hearth hub graph</title>
+              <g id="hub-viewport"><g id="hub-links"></g><g id="hub-nodes"></g></g>
+            </svg>
+            <section class="needs-float" aria-labelledby="hub-needs-heading">
+              <h2 id="hub-needs-heading">Needs you <span id="hub-needs-count" class="count-pill"></span></h2>
+              <ul id="hub-needs" class="mini-rows"></ul>
+            </section>
+            <div class="hub-tools" role="group" aria-label="Show in the graph">
+              <button type="button" class="chip on" data-type="task" aria-pressed="true">Tasks</button>
+              <button type="button" class="chip on" data-type="run" aria-pressed="true">Agents</button>
+              <button type="button" class="chip on" data-type="document" aria-pressed="true">Knowledge</button>
+              <button type="button" class="chip" id="hub-reset" aria-label="Recenter the graph">Recenter</button>
+            </div>
+            <aside id="inspector" class="inspector" aria-labelledby="inspector-title" hidden>
+              <header class="inspector-head">
+                <h2 id="inspector-title"></h2>
+                <button type="button" id="inspector-close" class="icon-button" aria-label="Close">
+                  <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8"/></svg>
+                </button>
+              </header>
+              <div id="inspector-body" class="inspector-body"></div>
+            </aside>
+          </div>
         </div>
 
         <div class="view" data-view="tasks" hidden>
@@ -51,7 +70,7 @@
           </section>
           <section aria-labelledby="progress-heading">
             <div class="section-head">
-              <h2 id="progress-heading">In progress</h2>
+              <h2 id="progress-heading">Running</h2>
               <p id="slots" class="slots"></p>
             </div>
             <ul id="progress" class="rows"></ul>
@@ -64,10 +83,10 @@
 
         <div class="view" data-view="knowledge" hidden>
           <section aria-labelledby="ask-heading">
-            <h2 id="ask-heading">Ask your notes and documents</h2>
+            <h2 id="ask-heading" class="visually-hidden">Ask</h2>
             <form id="ask-form" class="ask">
               <input id="ask-question" type="search" placeholder="What did we decide about recall scope?" aria-label="Question" autocomplete="off">
-              <label class="keyword"><input id="ask-keyword" type="checkbox"> Exact words only</label>
+              <label class="keyword"><input id="ask-keyword" type="checkbox"> Exact words</label>
               <button type="submit">Ask</button>
             </form>
             <div id="ask-result" class="ask-result" aria-live="polite"></div>
@@ -80,10 +99,10 @@
           <section aria-labelledby="sources-heading">
             <div class="section-head">
               <h2 id="sources-heading">Sources</h2>
-              <input id="source-filter" type="search" placeholder="Filter by name" aria-label="Filter sources" class="filter">
+              <a class="quiet-link" href="knowledge">Import and folders</a>
             </div>
+            <input id="source-filter" type="search" placeholder="Filter sources" aria-label="Filter sources" class="filter">
             <ul id="sources" class="sources"></ul>
-            <p class="meta">Importing, folder review, the semantic index, and the map are still on the <a href="knowledge">classic knowledge page</a>.</p>
           </section>
         </div>
       </main>

@@ -461,19 +461,21 @@ class DashboardPageTests(unittest.TestCase):
         for view in ("hub", "tasks", "knowledge"):
             with self.subTest(view=view):
                 self.assertIn(f'href="#/{view}" data-view="{view}"', home)
-                self.assertIn(f'class="view" data-view="{view}"', home)
+                self.assertRegex(home, f'class="view[^"]*" data-view="{view}"')
         self.assertIn('id="default-view"', home)
         self.assertIn('id="hub-needs"', home)
 
     def test_dashboard_assets_load_nothing_from_another_host_and_never_insert_html(self) -> None:
-        for name, kind in (("assets/dashboard.css", "text/css"), ("assets/dashboard.js", "application/javascript")):
+        for name, kind in (("assets/dashboard.css", "text/css"), ("assets/dashboard.js", "application/javascript"),
+                           ("assets/hub.js", "application/javascript")):
             with self.subTest(asset=name):
                 response = self.app.respond("GET", f"/token/{name}", b"")
                 self.assertEqual((response.status, response.content_type.split(";")[0]), (200, kind))
-                self.assertNotRegex(response.body.decode(), r"https?://|@import|url\(")
-        script = self.app.respond("GET", "/token/assets/dashboard.js", b"").body.decode()
-        self.assertNotIn("innerHTML", script)
-        self.assertNotIn("insertAdjacentHTML", script)
+                # The SVG namespace is an identifier, not a request; nothing else may name another host.
+                body = response.body.decode().replace('"http://www.w3.org/2000/svg"', "")
+                self.assertNotRegex(body, r"https?://|@import|url\(")
+                self.assertNotIn("innerHTML", body)
+                self.assertNotIn("insertAdjacentHTML", body)
 
 
 class SearchReportEndpointTests(unittest.TestCase):

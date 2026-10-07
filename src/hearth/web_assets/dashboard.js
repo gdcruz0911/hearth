@@ -4,6 +4,8 @@ const root = new URL(".", window.location.href).pathname;
 const KNOWN = new Set(["running", "queued", "waiting", "done", "failed", "cancelled", "interrupted"]);
 const RECENT = 12;
 const VIEWS = ["hub", "tasks", "knowledge"];
+const seen = new Map(); // Task id to its last status, so only real arrivals and changes move.
+let firstRender = true;
 
 function el(tag, className, text) {
   const node = document.createElement(tag);
@@ -51,7 +53,10 @@ function command(task) {
 }
 
 function row(task, detail) {
-  const item = el("li", "row");
+  // Motion carries state only: a task that just appeared rises in, one whose status changed flashes once.
+  const motion = firstRender ? "" : !seen.has(task.id) ? " arrive" : seen.get(task.id) !== task.status ? " changed" : "";
+  const item = el("li", `row${motion}`);
+  item.dataset.id = task.id;
   const top = el("div", "row-top");
   if (task.status === "running") top.append(el("span", "pulse"));
   top.append(el("span", "goal", shown(task.goal)), badge(task.status), el("span", "id", task.id));
@@ -76,7 +81,6 @@ function render(data) {
     return item;
   };
   fill(document.getElementById("needs"), needs, needsRow, "Nothing needs you.");
-  fill(document.getElementById("hub-needs"), needs, needsRow, "Nothing needs you.");
 
   fill(document.getElementById("progress"), progress, (task) => {
     const run = task.active_run;
@@ -116,11 +120,17 @@ async function refresh() {
     const body = await response.json();
     if (!response.ok) throw new Error(body.error || "Hearth could not read tasks.");
     render(body);
-    status.className = "status";
-    status.textContent = `Updated ${new Date().toLocaleTimeString()}.`;
+    (Array.isArray(body.tasks) ? body.tasks : []).forEach((task) => seen.set(task.id, task.status));
+    firstRender = false;
+    window.Hearth.latest = body;
+    document.dispatchEvent(new CustomEvent("hearth:tasks", { detail: body }));
+    status.hidden = true;
+    live(true, `Live · ${new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`);
   } catch (error) {
+    status.hidden = false;
     status.className = "status error";
     status.textContent = error.message;
+    live(false, "Offline");
   }
 }
 
@@ -209,7 +219,7 @@ async function loadKnowledge() {
       const matching = all.filter((item) => String(item.name).toLowerCase().includes(term));
       fill(document.getElementById("sources"), matching, (item) => {
         const row = el("li", "source");
-        row.append(el("span", "goal", shown(item.name)), el("span", "meta", `${shown(item.page_count)} pages`),
+        row.append(el("span", "goal", shown(item.name)), el("span", "meta", item.page_count === 1 ? "1 page" : `${shown(item.page_count)} pages`),
           freshness(attention.get(item.id) || "current"));
         return row;
       }, term ? "No source matches." : "No sources imported yet.");
@@ -236,6 +246,11 @@ function knowledge() {
   });
 }
 
+function live(ok, text) {
+  document.getElementById("live").classList.toggle("offline", !ok);
+  document.getElementById("live-text").textContent = text;
+}
+
 function stored(key, fallback) {
   try { return localStorage.getItem(key) || fallback; } catch { return fallback; } // storage may be blocked
 }
@@ -248,7 +263,16 @@ function route() {
   // UI-6: one shell; the hash names the view, and an empty hash opens the person's default view.
   const asked = window.location.hash.replace(/^#\//, "");
   const view = VIEWS.includes(asked) ? asked : stored("hearth-default-view", "hub");
-  document.querySelectorAll(".view").forEach((node) => { node.hidden = node.dataset.view !== view; });
+  document.querySelectorAll(".view").forEach((node) => {
+    const show = node.dataset.view === view;
+    if (show && node.hidden) {
+      node.classList.remove("entering");
+      void node.offsetWidth; // restart the crossfade when switching back to a view
+      node.classList.add("entering");
+    }
+    node.hidden = !show;
+  });
+  document.dispatchEvent(new CustomEvent("hearth:view", { detail: view }));
   if (view === "knowledge") loadKnowledge();
   document.querySelectorAll(".nav-item").forEach((link) => {
     const current = link.dataset.view === view;
@@ -278,6 +302,9 @@ function theme() {
   });
   apply();
 }
+
+// Shared with hub.js, which draws the same tasks as a graph.
+window.Hearth = { el, shown, badge, reason, command, api, root, latest: null };
 
 theme();
 defaultView();
