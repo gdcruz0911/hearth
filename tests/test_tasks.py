@@ -2177,6 +2177,7 @@ class TaskStatusJsonTests(RecallFixture):
         (delivered,) = shown["recall"]
         self.assertEqual((delivered["provider"], delivered["folders"]), ("claude", ["Hearth"]))
         self.assertGreater(delivered["excerpts"], 0)
+        self.assertEqual(delivered["stale"], [])
         self.assertNotIn("greet the person warmly", output)
         self.assertEqual(shown["artifacts"]["receipts"], str(self.home / ".hearth/tasks" / task["id"]))
         self.assertTrue(shown["artifacts"]["reports"])
