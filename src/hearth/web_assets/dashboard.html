@@ -8,6 +8,7 @@
     <link rel="stylesheet" href="assets/dashboard.css">
     <script defer src="assets/dashboard.js"></script>
     <script defer src="assets/hub.js"></script>
+    <script defer src="assets/knowledge.js"></script>
   </head>
   <body>
     <div class="app">
@@ -101,15 +102,31 @@
             <div id="ask-result" class="ask-result" aria-live="polite"></div>
           </section>
           <section aria-labelledby="health-heading">
-            <h2 id="health-heading">Collection</h2>
+            <div class="section-head">
+              <h2 id="health-heading">Collection</h2>
+              <div class="toolbar">
+                <button id="kn-import" class="btn" type="button">Import a file</button>
+                <button id="kn-scan" class="btn" type="button" disabled>Review new files</button>
+              </div>
+            </div>
             <p id="health" class="meta"></p>
+            <p id="kn-folders" class="meta"></p>
+            <p id="kn-status" class="status" role="status" aria-live="polite" hidden></p>
             <ul id="attention" class="rows"></ul>
           </section>
+          <section id="kn-panel" class="kn-panel" aria-label="Review" aria-live="polite" hidden></section>
+          <section aria-labelledby="map-heading">
+            <h2 id="map-heading">Map</h2>
+            <svg id="kn-map" class="kmap" viewBox="0 0 640 340" role="group" aria-label="Interactive knowledge map"></svg>
+            <p id="kn-map-summary" class="meta"></p>
+          </section>
+          <section aria-labelledby="index-heading">
+            <h2 id="index-heading">Semantic index</h2>
+            <div id="kn-index" class="kn-index"></div>
+            <p id="kn-warning" class="status error" role="status" hidden></p>
+          </section>
           <section aria-labelledby="sources-heading">
-            <div class="section-head">
-              <h2 id="sources-heading">Sources</h2>
-              <a class="quiet-link" href="knowledge">Import and folders</a>
-            </div>
+            <h2 id="sources-heading">Sources</h2>
             <input id="source-filter" type="search" placeholder="Filter sources" aria-label="Filter sources" class="filter">
             <ul id="sources" class="sources"></ul>
           </section>

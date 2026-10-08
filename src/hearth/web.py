@@ -19,7 +19,6 @@ from urllib.parse import urlsplit
 
 from .embedding import IndexBuildCancelled, IndexBusy, IndexBuildStopped
 from .domain import (
-    Answer,
     CollectionHealth,
     Chunk,
     DocumentRelationship,
@@ -38,7 +37,7 @@ from .service import HearthService
 _ASSET_DIRECTORY = Path(__file__).with_name("web_assets")
 _MAX_REQUEST_BODY_BYTES = 64 * 1024
 _PREVIEW_LIFETIME_SECONDS = 5 * 60
-_TASK_PREVIEW_LIFETIME_SECONDS = 2 * 60  # ADR-0037; the knowledge previews above keep their own until step C retires them.
+_TASK_PREVIEW_LIFETIME_SECONDS = 2 * 60  # ADR-0037; the knowledge previews above keep their own.
 _TASK_ACTIONS = frozenset({"cancel", "answer", "approve-tests"})  # ADR-0037's first actions; publishing stays terminal-only.
 _CONNECTION_TIMEOUT_SECONDS = 5
 _MAP_RELATIONSHIP_LIMIT = 120
@@ -202,18 +201,14 @@ class HearthWebApplication:
     def _get(self, relative_path: str) -> _WebResponse:
         if relative_path == "":
             return self._asset("dashboard.html", "text/html; charset=utf-8")
-        if relative_path == "knowledge":
-            return self._asset("index.html", "text/html; charset=utf-8")
         if relative_path == "assets/dashboard.css":
             return self._asset("dashboard.css", "text/css; charset=utf-8")
         if relative_path == "assets/dashboard.js":
             return self._asset("dashboard.js", "application/javascript; charset=utf-8")
         if relative_path == "assets/hub.js":
             return self._asset("hub.js", "application/javascript; charset=utf-8")
-        if relative_path == "assets/app.css":
-            return self._asset("app.css", "text/css; charset=utf-8")
-        if relative_path == "assets/app.js":
-            return self._asset("app.js", "application/javascript; charset=utf-8")
+        if relative_path == "assets/knowledge.js":
+            return self._asset("knowledge.js", "application/javascript; charset=utf-8")
         if relative_path == "api/health":
             return self._json_response(_health_payload(self._service.collection_health()))
         if relative_path == "api/documents":
@@ -294,12 +289,6 @@ class HearthWebApplication:
                 raise WebRequestError("Enter a question before searching the local collection.")
             # Accepted evidence with freshness, kept apart from what was only retrieved (design.md UI-7).
             return self._json_response(self._service.search_report(question, keyword_only=payload.get("keyword") is True))
-        if relative_path == "api/search":
-            payload = _json_body(body)
-            question = payload.get("question")
-            if not isinstance(question, str) or not question.strip():
-                raise WebRequestError("Enter a question before searching the local collection.")
-            return self._json_response({"answer": _answer_payload(self._service.answer(question))})
         if relative_path.startswith("api/documents/") and relative_path.endswith("/preview"):
             prefix = relative_path.removesuffix("/preview")
             parts = prefix.split("/")
@@ -941,24 +930,5 @@ def _inspection_payload(inspection: DocumentInspection) -> dict[str, Any]:
                 ],
             }
             for page in inspection.pages
-        ],
-    }
-
-
-def _answer_payload(answer: Answer) -> dict[str, Any]:
-    return {
-        "status": answer.status,
-        "text": answer.text,
-        "citations": [
-            {
-                "document_name": citation.document_name,
-                "page_number": citation.page_number,
-                "section": citation.section,
-                "chunk_id": citation.chunk_id,
-                "quote": citation.quote,
-                "extraction_method": citation.extraction_method,
-                "ocr_confidence": citation.ocr_confidence,
-            }
-            for citation in answer.citations
         ],
     }
