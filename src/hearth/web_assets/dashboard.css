@@ -278,3 +278,33 @@ pre.turn-text { font-family: var(--mono); }
   .hub-stage { height: calc(100vh - 110px); }
   .needs-float { width: calc(100% - 32px); top: auto; bottom: 16px; max-height: 40%; overflow: auto; }
 }
+
+/* ---------- knowledge tools: buttons, review panel, map ---------- */
+.toolbar { display: flex; gap: 8px; }
+.btn { background: none; color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 5px 12px; font: inherit; font-size: 13px; cursor: pointer;
+  transition: transform 120ms var(--ease-out), background-color 150ms ease, border-color 150ms ease; }
+.btn:active { transform: scale(0.97); }
+.btn:disabled { color: var(--muted); cursor: default; }
+.btn.primary { background: var(--ember); color: var(--bg); border-color: var(--ember); font-weight: 600; }
+.btn.danger { color: var(--failed); border-color: var(--failed); }
+.btn.link { border: 0; padding: 2px 0; color: var(--ember); display: block; text-align: left; }
+@media (hover: hover) and (pointer: fine) { .btn:not(:disabled):not(.primary):hover { background: var(--hover); } }
+.kn-panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 16px; }
+.kn-panel .group:first-child { margin-top: 0; }
+.kn-panel .row + .row, .kn-panel .row { margin-top: 6px; }
+.preview { border: 1px solid var(--ember); border-radius: 8px; padding: 8px 12px; margin-top: 8px; }
+.actions { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
+.plain { margin: 4px 0; padding-left: 18px; font-size: 13px; }
+.kn-index progress { width: 100%; accent-color: var(--ember); }
+.source .link-button { white-space: nowrap; }
+.kmap { width: 100%; max-height: 340px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; display: block; }
+.kmap-link { stroke: var(--line); stroke-width: 1.2; }
+.kmap-node { cursor: pointer; outline: none; }
+.kmap-node circle { fill: var(--panel); stroke: var(--muted); stroke-width: 1.5; transition: transform 160ms var(--ease-out); transform-box: fill-box; transform-origin: center; }
+.kmap-node.hearth circle { fill: var(--ember); stroke: none; }
+.kmap-node.neighborhood circle { stroke: var(--attention); stroke-width: 2; }
+.kmap-node.document circle { fill: var(--muted); stroke: none; }
+.kmap-node.selected circle, .kmap-node:focus-visible circle { stroke: var(--ember); stroke-width: 3; }
+.kmap-node text { fill: var(--muted); font-size: 11px; text-anchor: middle; pointer-events: none; paint-order: stroke; stroke: var(--panel); stroke-width: 3px; }
+@media (hover: hover) and (pointer: fine) { .kmap-node:hover circle { transform: scale(1.15); } }
+@media (prefers-reduced-motion: reduce) { .btn:active, .kmap-node:hover circle { transform: none; } .kmap-node circle { transition: none; } }

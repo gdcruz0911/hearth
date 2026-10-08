@@ -1,4 +1,5 @@
 // Hearth's app shell: the Hub, Tasks, and Knowledge views, with task data from api/workbench/tasks.
+// knowledge.js adds the Knowledge tab's import, folders, map, and index tools.
 // Every value is written with textContent, so text agents wrote can never become markup.
 const root = new URL(".", window.location.href).pathname;
 // ADR-0037: the session token arrives once in the URL fragment, is cleared from the address bar, and lives only in this
@@ -482,8 +483,11 @@ async function loadKnowledge() {
       const matching = all.filter((item) => String(item.name).toLowerCase().includes(term));
       fill(document.getElementById("sources"), matching, (item) => {
         const row = el("li", "source");
+        const open = el("button", "link-button", "Details");
+        open.type = "button";
+        open.addEventListener("click", () => document.dispatchEvent(new CustomEvent("hearth:source", { detail: item.id })));
         row.append(el("span", "goal", shown(item.name)), el("span", "meta", item.page_count === 1 ? "1 page" : `${shown(item.page_count)} pages`),
-          freshness(attention.get(item.id) || "current"));
+          freshness(attention.get(item.id) || "current"), open);
         return row;
       }, term ? "No source matches." : "No sources imported yet.");
     };
@@ -570,12 +574,10 @@ function theme() {
 }
 
 // Shared with hub.js, which draws the same tasks as a graph.
-window.Hearth = { el, shown, badge, reason, command, api, session, root, latest: null };
+window.Hearth = { el, shown, badge, reason, command, api, session, root, loadKnowledge, latest: null };
 
 theme();
 defaultView();
-// The classic knowledge page is another page, so its link carries the token the same way the launch did.
-document.querySelectorAll('a[href="knowledge"]').forEach((link) => { link.href = `knowledge#session=${sessionToken}`; });
 knowledge();
 route();
 window.addEventListener("hashchange", route);

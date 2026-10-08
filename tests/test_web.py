@@ -145,14 +145,14 @@ class HearthWebServerTests(unittest.TestCase):
         imported = self._json_request("POST", "api/import")
         documents = self._json_request("GET", "api/documents")
         inspection = self._json_request("GET", "api/documents/1")
-        answer = self._json_request("POST", "api/search", {"question": "Who is the deployment owner?"})
+        answer = self._json_request("POST", "api/search/report", {"question": "Who is the deployment owner?"})
 
         self.assertEqual(imported["import"]["document"]["name"], "facts.md")
         self.assertEqual(documents["documents"][0]["id"], 1)
         self.assertEqual(inspection["document"]["name"], "facts.md")
         self.assertEqual(inspection["pages"][0]["section"], "Operations")
-        self.assertEqual(answer["answer"]["status"], "supported")
-        self.assertIn("Ada", answer["answer"]["text"])
+        self.assertEqual(answer["status"], "supported")
+        self.assertIn("Ada", answer["evidence"][0]["excerpt"])
         rendered = json.dumps({"import": imported, "documents": documents, "inspection": inspection})
         self.assertNotIn(str(self.note), rendered)
         self.assertNotIn("The deployment owner is Ada.", rendered)
@@ -361,12 +361,12 @@ class HearthWebServerTests(unittest.TestCase):
 
         applied = self._json_request("POST", f"api/previews/{preview['id']}/apply")["applied"]
         reused_response, reused = self._request("POST", self._path(f"api/previews/{preview['id']}/apply"))
-        answer = self._json_request("POST", "api/search", {"question": "Who is the deployment owner?"})
+        answer = self._json_request("POST", "api/search/report", {"question": "Who is the deployment owner?"})
 
         self.assertEqual(applied["action"], "reindex")
         self.assertEqual(reused_response.status, 409)
         self.assertIn(b"Preview the action again", reused)
-        self.assertIn("Lin", answer["answer"]["text"])
+        self.assertIn("Lin", answer["evidence"][0]["excerpt"])
 
     def test_previewed_record_removal_leaves_the_source_file_untouched(self) -> None:
         self._json_request("POST", "api/import")
@@ -534,7 +534,7 @@ class SessionTests(unittest.TestCase):
 
     def test_the_page_and_its_files_need_the_cookie(self) -> None:
         cookie, _ = self.credentials()
-        for path in ("/", "/knowledge", "/assets/dashboard.js", "/assets/app.js"):
+        for path in ("/", "/assets/dashboard.js", "/assets/knowledge.js"):
             with self.subTest(path=path):
                 refused = self.app.respond("GET", path, b"", {"Host": HOST})
                 allowed = self.app.respond("GET", path, b"", {"Host": HOST, "Cookie": cookie})
@@ -659,7 +659,7 @@ class TaskPreviewTests(unittest.TestCase):
 
 
 class DashboardPageTests(unittest.TestCase):
-    """The dashboard is the home page; the knowledge page moved to knowledge; nothing loads from another host (UI-4)."""
+    """The dashboard is the home page and holds the knowledge tools; nothing loads from another host (UI-4)."""
 
     def setUp(self) -> None:
         self.temporary_directory = tempfile.TemporaryDirectory()
@@ -669,13 +669,30 @@ class DashboardPageTests(unittest.TestCase):
         self.app = HearthWebApplication(self.service, "token")
         self.call = signed_in(self.app)
 
-    def test_the_home_page_is_the_dashboard_and_the_knowledge_page_moved(self) -> None:
+    def test_the_home_page_is_the_dashboard_and_the_classic_knowledge_page_is_gone(self) -> None:
         home = self.call("GET", "/")
-        knowledge = self.call("GET", "/knowledge")
 
         self.assertIn(b"Needs you", home.body)
-        self.assertIn(b'href="knowledge"', home.body)
-        self.assertIn(b"map-surface", knowledge.body)
+        for path in ("/knowledge", "/assets/app.js", "/assets/app.css"):
+            with self.subTest(path=path):
+                self.assertEqual(self.call("GET", path).status, 404)
+        for name in ("index.html", "app.js", "app.css"):
+            self.assertFalse((ASSETS / name).exists(), name)
+
+    def test_the_knowledge_tab_has_import_folders_map_and_index_tools(self) -> None:
+        home = self.call("GET", "/").body.decode()
+        script = self.call("GET", "/assets/knowledge.js")
+
+        for element in ("kn-import", "kn-scan", "kn-map", "kn-index", "kn-warning", "kn-panel"):
+            self.assertIn(f'id="{element}"', home)
+        self.assertIn('src="assets/knowledge.js"', home)
+        self.assertEqual((script.status, script.content_type.split(";")[0]), (200, "application/javascript"))
+        for route in ("import", "sources/preview", "source-previews/", "semantic-index/preview", "semantic-index/cancel", "/actions/", "previews/",
+                      "elapsed_seconds", "cpu_seconds", "peak_resident_memory_bytes", "evidence_units_per_minute", "job.warning"):
+            self.assertIn(route, script.body.decode())
+
+    def test_the_removed_answer_route_is_gone(self) -> None:
+        self.assertEqual(self.call("POST", "/api/search", b'{"question": "x"}').status, 404)
 
     def test_the_shell_has_hub_tasks_and_knowledge_views_and_a_default_view_setting(self) -> None:
         home = self.call("GET", "/").body.decode()
@@ -689,7 +706,7 @@ class DashboardPageTests(unittest.TestCase):
 
     def test_dashboard_assets_load_nothing_from_another_host_and_never_insert_html(self) -> None:
         for name, kind in (("assets/dashboard.css", "text/css"), ("assets/dashboard.js", "application/javascript"),
-                           ("assets/hub.js", "application/javascript")):
+                           ("assets/hub.js", "application/javascript"), ("assets/knowledge.js", "application/javascript")):
             with self.subTest(asset=name):
                 response = self.call("GET", f"/{name}")
                 self.assertEqual((response.status, response.content_type.split(";")[0]), (200, kind))
@@ -721,7 +738,7 @@ class HostileContentTests(unittest.TestCase):
         for script in self.scripts():
             for target in re.findall(r"\.href\s*=\s*([^;]+);", script.read_text(encoding="utf-8")):
                 with self.subTest(script=script.name, target=target):
-                    self.assertRegex(target.strip(), r"^(`#/|`knowledge#|safeLink\()")
+                    self.assertRegex(target.strip(), r"^(`#/|safeLink\()")
 
     def test_the_pages_have_no_inline_scripts_or_event_handlers(self) -> None:
         for page in sorted(ASSETS.glob("*.html")):
