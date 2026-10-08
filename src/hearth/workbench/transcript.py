@@ -7,19 +7,17 @@ supervisor's status summary (ADR-0033).
 from __future__ import annotations
 
 import json
-import re
 
 from . import tasks
 
 LIMIT = 256_000  # Bytes read per call; the page asks again from the returned offset.
 TEXT = 20_000  # Characters kept per item.
 DIFF_LIMIT = 400_000  # Bytes of a task's diff the dashboard shows; a larger diff is cut at a line and says so.
-TASK_ID = re.compile(r"^[0-9]{8}-[0-9]{6}(-[0-9]+)?$")
 
 
 def read(task_id: str, run: str, offset: int) -> dict | None:
     """Complete events of one run after `offset`, translated, with the next offset; None for an unknown task."""
-    if not TASK_ID.match(task_id) or offset < 0:
+    if not tasks.TASK_ID.match(task_id) or offset < 0:
         raise ValueError("Unknown task or offset.")
     task_dir = tasks._home() / "tasks" / task_id
     if not (task_dir / "task.json").is_file():
@@ -42,7 +40,7 @@ def read(task_id: str, run: str, offset: int) -> dict | None:
 
 def diff(task_id: str) -> dict | None:
     """The task's saved diff for the person's dashboard, with its line counts; None for an unknown task."""
-    if not TASK_ID.match(task_id):
+    if not tasks.TASK_ID.match(task_id):
         raise ValueError("Unknown task.")
     task_dir = tasks._home() / "tasks" / task_id
     if not (task_dir / "task.json").is_file():

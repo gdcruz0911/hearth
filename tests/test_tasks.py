@@ -5,6 +5,7 @@ import contextlib
 import io
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -136,6 +137,19 @@ class TaskTests(TaskTestCase):
 
         self.assertEqual(status, 1)
         self.assertFalse((self.home / ".hearth/tasks").exists())
+
+    def test_an_agent_cannot_cancel_a_task(self) -> None:
+        os.environ["FAKE_AGENT_SCENARIO"] = "idle"
+        self.cli("task", "new", "demo", "Add hello.txt")
+        task = self.only_task()
+        task.update(status="waiting", finished=None)
+        (self.home / ".hearth/tasks" / task["id"] / "task.json").write_text(json.dumps(task), encoding="utf-8")
+        os.environ["HEARTH_TASK"] = "20260927-000000"
+
+        status, _ = self.cli("task", "cancel", task["id"])
+
+        self.assertEqual((status, self.only_task()["status"]), (1, "waiting"))
+        self.assertFalse((self.home / ".hearth/tasks" / task["id"] / "cancel").exists())
 
     def test_a_failed_check_fails_the_task(self) -> None:
         self.write_projects(check="exit 3")
@@ -2297,6 +2311,108 @@ class CancelTests(TaskTestCase):
         self.assertEqual(self.cli("task", "answer", task["id"], "Use --json.")[0], 1)
         self.assertEqual(self.cli("task", "cancel", task["id"])[0], 1)
         self.assertEqual(len(self.only_task()["runs"]), 1)
+
+    def test_the_dashboard_offers_cancel_only_for_a_valid_unfinished_task(self) -> None:
+        os.environ["FAKE_AGENT_SCENARIO"] = "idle"
+        self.cli("task", "new", "demo", "Add hello.txt")
+        task = self.only_task()
+        task.update(status="waiting", finished=None)
+        (self.home / ".hearth/tasks" / task["id"] / "task.json").write_text(json.dumps(task), encoding="utf-8")
+
+        self.assertEqual(tasks.dashboard_task_state(task["id"], "cancel"), "waiting:1")
+        shutil.copytree(self.home / ".hearth/tasks" / task["id"], self.home / ".hearth/tasks/not-an-id")  # Only the ID check refuses it.
+        for task_id, action in ((("not-an-id", "cancel"),) + ((task["id"], "answer"), ("..", "cancel"), ("", "cancel"), ("../tasks", "cancel"), ("20260101-000000", "cancel"))):
+            with self.subTest(task=task_id, action=action):
+                self.assertIsNone(tasks.dashboard_task_state(task_id, action))
+        self.cli("task", "cancel", task["id"])
+        self.assertIsNone(tasks.dashboard_task_state(task["id"], "cancel"))
+
+    def test_a_dashboard_cancel_stops_the_run_and_records_where_it_came_from(self) -> None:
+        worker, task = self.running()
+        pid = task["runs"][0]["pid"]
+
+        result = tasks.dashboard_action(task["id"], "cancel", {}, tasks.dashboard_task_state(task["id"], "cancel"))
+        worker.join(timeout=20)
+
+        self.assertEqual(result, {"task": task["id"], "status": "cancelled", "process_stopped": True})
+        self.assertIn("dashboard", (self.home / ".hearth/tasks" / task["id"] / "cancel").read_text(encoding="utf-8"))
+        self.assertEqual(self.only_task()["status"], "cancelled")
+        with self.assertRaises(ProcessLookupError):
+            os.kill(pid, 0)
+
+    def test_a_dashboard_cancel_says_when_it_could_not_stop_the_process(self) -> None:
+        os.environ["FAKE_AGENT_SCENARIO"] = "idle"
+        self.cli("task", "new", "demo", "Add hello.txt")
+        stranger = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"], start_new_session=True)
+        self.addCleanup(stranger.kill)
+        task = self.only_task()
+        task.update(status="running", finished=None)
+        task["runs"][0]["pid"] = stranger.pid
+        (self.home / ".hearth/tasks" / task["id"] / "task.json").write_text(json.dumps(task), encoding="utf-8")
+
+        result = tasks.dashboard_action(task["id"], "cancel", {}, tasks.dashboard_task_state(task["id"], "cancel"))
+
+        self.assertEqual((result["status"], result["process_stopped"]), ("cancelled", False))
+        self.assertIsNone(stranger.poll())
+
+    def test_a_dashboard_cancel_rechecks_the_state_where_it_cancels(self) -> None:
+        os.environ["FAKE_AGENT_SCENARIO"] = "idle"
+        self.cli("task", "new", "demo", "Add hello.txt")
+        task = self.only_task()
+        task.update(status="waiting", finished=None)
+        (self.home / ".hearth/tasks" / task["id"] / "task.json").write_text(json.dumps(task), encoding="utf-8")
+
+        # The web server's own recheck passed against this state, and then a run was added before the cancel.
+        self.assertIsNone(tasks.dashboard_action(task["id"], "cancel", {}, "waiting:0"))
+        self.assertEqual(self.only_task()["status"], "waiting")
+        self.assertFalse((self.home / ".hearth/tasks" / task["id"] / "cancel").exists())
+
+    def test_a_run_starts_and_is_recorded_only_while_it_holds_the_task_lock(self) -> None:
+        self.write_projects(check="test -f hello.txt", providers=("claude", "codex"))
+        os.environ.update(FAKE_AGENT_SCENARIO="idle", FAKE_OUTBOX='{"to": "person", "kind": "question", "body": "Which flag?"}')
+        self.cli("task", "new", "demo", "Add hello.txt")
+        os.environ.pop("FAKE_OUTBOX")
+        task = self.only_task()
+        task_dir = self.home / ".hearth/tasks" / task["id"]
+        self.cli("task", "answer", task["id"], "Use --json.")
+        os.environ["FAKE_REVIEWS"] = "approve"
+
+        with tasks._task_lock(task_dir):
+            worker = threading.Thread(target=self.cli, args=("loop", task["id"]))
+            worker.start()
+            time.sleep(1)
+            # Held by a dashboard cancel, the lock keeps the next run from starting until its state is settled.
+            self.assertEqual(sorted(path.name for path in (task_dir / "runs").iterdir()), ["01-implement-claude"])
+        worker.join(timeout=30)
+        self.assertGreater(len(self.only_task()["runs"]), 1)
+
+    def test_a_dashboard_cancel_previewed_before_a_new_run_is_refused(self) -> None:
+        from hearth.service import HearthService
+        from hearth.web import HearthWebApplication
+        os.environ["FAKE_AGENT_SCENARIO"] = "idle"
+        self.cli("task", "new", "demo", "Add hello.txt")
+        task = self.only_task()
+        task.update(status="waiting", finished=None)
+        record = self.home / ".hearth/tasks" / task["id"] / "task.json"
+        record.write_text(json.dumps(task), encoding="utf-8")
+        service = HearthService(self.home / "hearth.sqlite")
+        self.addCleanup(service.close)
+        app = HearthWebApplication(service, "token", workbench_task_state=tasks.dashboard_task_state, workbench_task_action=tasks.dashboard_action)
+        launch = dict(app.respond("GET", app.launch_path, b"", {"Host": "127.0.0.1:1"}).headers)
+        headers = {"Host": "127.0.0.1:1", "Origin": "http://127.0.0.1:1", "Cookie": launch["Set-Cookie"].split(";")[0],
+                   "X-Hearth-Session": launch["Location"].split("#session=")[1]}
+        path = f"/api/tasks/{task['id']}/actions/cancel/"
+        preview = lambda: json.loads(app.respond("POST", path + "preview", b"{}", headers).body)["preview"]["id"]
+        apply = lambda preview_id: app.respond("POST", path + "apply", json.dumps({"preview": preview_id}).encode(), headers)
+
+        stale = preview()
+        task["runs"].append({**task["runs"][0], "dir": "02-fix-claude", "role": "fix"})
+        record.write_text(json.dumps(task), encoding="utf-8")
+
+        self.assertEqual(apply(stale).status, 409)
+        self.assertEqual(self.only_task()["status"], "waiting")
+        self.assertEqual(apply(preview()).status, 200)
+        self.assertEqual(self.only_task()["status"], "cancelled")
 
     def test_a_task_waiting_for_a_slot_is_cancelled_before_any_run(self) -> None:
         real_sleep = time.sleep

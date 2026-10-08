@@ -169,6 +169,51 @@ function field(label, value) {
   return row;
 }
 
+// The task a cancel is being previewed or was applied for, kept across the five-second refresh (ADR-0037).
+let cancelling = null;
+
+async function cancelStep(task, step) {
+  try {
+    if (step === "preview") {
+      const { preview } = await api(`tasks/${encodeURIComponent(task.id)}/actions/cancel/preview`, {});
+      cancelling = { task: task.id, preview: preview.id };
+    } else if (step === "apply") {
+      const { applied } = await api(`tasks/${encodeURIComponent(task.id)}/actions/cancel/apply`, { preview: cancelling.preview });
+      cancelling = { task: task.id, message: applied.status !== "cancelled" ? `Not cancelled: the task is now ${shown(applied.status)}.`
+        : applied.process_stopped ? "Cancelled. Its worktree and receipts are kept."
+        : "Marked cancelled, but its process could not be shown to be this task's run, so it was not stopped. Check it with ps before stopping it yourself." };
+    } else {
+      cancelling = null;
+    }
+  } catch (error) {
+    cancelling = { task: task.id, message: error.message };
+  }
+  refresh();
+}
+
+function cancelBox(task) {
+  const box = el("section", "cancel-box");
+  const state = cancelling && cancelling.task === task.id ? cancelling : null;
+  if (state && state.preview) {
+    const run = (task.runs || [])[task.runs.length - 1];
+    box.append(el("p", "", run && task.status === "running"
+      ? `Cancelling stops the ${shown(run.role)} run by ${shown(run.provider)} and starts no further agent. The worktree and receipts are kept.`
+      : "Cancelling starts no further agent for this task. The worktree and receipts are kept."));
+    const confirm = el("button", "ask-button", "Confirm cancel");
+    const keep = el("button", "link-button", "Keep the task");
+    confirm.addEventListener("click", () => cancelStep(task, "apply"));
+    keep.addEventListener("click", () => cancelStep(task, "dismiss"));
+    box.append(confirm, keep);
+    return box;
+  }
+  if (state && state.message) box.append(el("p", "meta", state.message));
+  if (task.status === "done" || task.status === "cancelled") return state ? box : null;
+  const start = el("button", "link-button", "Cancel this task…");
+  start.addEventListener("click", () => cancelStep(task, "preview"));
+  box.append(start);
+  return box;
+}
+
 function detail(task) {
   const summary = document.getElementById("task-summary");
   const sessionBox = document.getElementById("task-session");
@@ -211,6 +256,8 @@ function detail(task) {
     parts.push(box);
   }
   if (task.stop_reason) parts.push(field("Stopped because", task.stop_reason));
+  const cancel = cancelBox(task);
+  if (cancel) parts.push(cancel);
 
   const timeline = el("ol", "timeline");
   for (const run of task.runs || []) {

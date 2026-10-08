@@ -272,7 +272,8 @@ def main(argv: list[str] | None = None) -> int:
                 _print_source_import_result(service.import_source_plan(plan))
         elif args.command == "web":
             server = HearthWebServer(service, port=args.port, source_roots=args.source_roots, workbench_tasks=tasks.dashboard_tasks,
-                                     workbench_transcript=transcript.read, workbench_diff=transcript.diff)
+                                     workbench_transcript=transcript.read, workbench_diff=transcript.diff,
+                                     workbench_task_state=tasks.dashboard_task_state, workbench_task_action=tasks.dashboard_action)
             print(f"Hearth is running locally at {server.url}", flush=True)
             print("It is bound to 127.0.0.1 only. Press Ctrl+C to stop it.", flush=True)
             if not args.no_open:
