@@ -1,4 +1,7 @@
 const rootPath = new URL(".", window.location.href).pathname;
+// ADR-0037: the dashboard hands this page its session token in the fragment; it stays in memory and goes in a header.
+const sessionToken = window.location.hash.startsWith("#session=") ? window.location.hash.slice("#session=".length) : "";
+if (sessionToken) history.replaceState(null, "", window.location.pathname);
 const svgNamespace = "http://www.w3.org/2000/svg";
 const state = {
   documents: [],
@@ -33,11 +36,12 @@ const elements = {
 
 function api(path, options = {}) {
   return fetch(`${rootPath}api/${path}`, {
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", "X-Hearth-Session": sessionToken },
     cache: "no-store",
     ...options,
   }).then(async (response) => {
     const payload = await response.json();
+    if (response.status === 401) throw new Error("This page's session ended. Run hearth web in your terminal to open a fresh one.");
     if (!response.ok) throw new Error(payload.error || "Hearth could not complete that local action.");
     return payload;
   });

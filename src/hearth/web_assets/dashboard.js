@@ -1,6 +1,11 @@
 // Hearth's app shell: the Hub, Tasks, and Knowledge views, with task data from api/workbench/tasks.
 // Every value is written with textContent, so text agents wrote can never become markup.
 const root = new URL(".", window.location.href).pathname;
+// ADR-0037: the session token arrives once in the URL fragment, is cleared from the address bar, and lives only in this
+// page's memory; every API call sends it in a header beside the cookie. A reload or another page needs it passed again.
+const sessionToken = window.location.hash.startsWith("#session=") ? window.location.hash.slice("#session=".length) : "";
+if (sessionToken) history.replaceState(null, "", window.location.pathname);
+const SESSION_LOST = "This dashboard session ended. Run hearth web in your terminal to open a fresh one.";
 const KNOWN = new Set(["running", "queued", "waiting", "done", "failed", "cancelled", "interrupted"]);
 const VIEWS = ["hub", "tasks", "knowledge"];
 const DOTS = 8; // Run dots on a task card.
@@ -361,8 +366,9 @@ function files(text) {
 async function refresh() {
   const status = document.getElementById("status");
   try {
-    const response = await fetch(`${root}api/workbench/tasks`, { cache: "no-store" });
+    const response = await fetch(`${root}api/workbench/tasks`, { cache: "no-store", headers: { "X-Hearth-Session": sessionToken } });
     const body = await response.json();
+    if (response.status === 401) throw new Error(SESSION_LOST);
     if (!response.ok) throw new Error(body.error || "Hearth could not read tasks.");
     render(body);
     (Array.isArray(body.tasks) ? body.tasks : []).forEach((task) => seen.set(task.id, task.status));
@@ -380,10 +386,11 @@ async function refresh() {
 }
 
 async function api(path, body) {
-  const response = await fetch(`${root}api/${path}`, body === undefined ? { cache: "no-store" } : {
-    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+  const response = await fetch(`${root}api/${path}`, body === undefined ? { cache: "no-store", headers: { "X-Hearth-Session": sessionToken } } : {
+    method: "POST", headers: { "Content-Type": "application/json", "X-Hearth-Session": sessionToken }, body: JSON.stringify(body),
   });
   const data = await response.json();
+  if (response.status === 401) throw new Error(SESSION_LOST);
   if (!response.ok) throw new Error(data.error || "Hearth could not complete that.");
   return data;
 }
@@ -556,6 +563,8 @@ window.Hearth = { el, shown, badge, reason, command, api, session, root, latest:
 
 theme();
 defaultView();
+// The classic knowledge page is another page, so its link carries the token the same way the launch did.
+document.querySelectorAll('a[href="knowledge"]').forEach((link) => { link.href = `knowledge#session=${sessionToken}`; });
 knowledge();
 route();
 window.addEventListener("hashchange", route);
