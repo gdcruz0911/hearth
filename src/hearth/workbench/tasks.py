@@ -20,12 +20,15 @@ from . import recall
 from . import vault_notes
 
 # Implementer invocations, confirmed against each installed version (see the workbench specification's Run table).
+# Headless workers skip the person's own CLI config and account connectors: without these flags, a 2026-10-08 run gave
+# Claude workers the person's plugins, agents, and web tools (and, by the model's own report, claude.ai connectors), and Codex
+# workers a browser-control server.
 # "{options}" becomes the model and effort flags, "{check}" the project's check command,
 # and "{prompt}" is for a CLI that cannot read the prompt on standard input.
 PROVIDERS = {
     "claude": ["claude", "{options}", "-p", "--output-format", "stream-json", "--verbose", "--permission-mode", "acceptEdits",
-               "--allowedTools", "Bash({check} *)"],
-    "codex": ["codex", "exec", "{options}", "--json", "--sandbox", "workspace-write", "-"],
+               "--setting-sources", "project,local", "--strict-mcp-config", "--tools", "Bash,Read,Edit,Write,Glob,Grep", "--allowedTools", "Bash({check} *)"],
+    "codex": ["codex", "exec", "{options}", "--json", "--ignore-user-config", "--sandbox", "workspace-write", "-"],
     "antigravity": ["agy", "{options}", "--output-format", "stream-json", "--mode", "accept-edits", "-p", "{prompt}"],
 }
 # The same CLIs opened for the person in a tmux window, with the prompt as the first message.
@@ -37,8 +40,9 @@ INTERACTIVE = {
 # Ignored files a worktree lacks but an agent needs; tracked files are already in every worktree.
 # Read-only invocations for review runs; each is confirmed against the installed version before first use (TEST-6).
 REVIEWERS = {
-    "claude": ["claude", "{options}", "-p", "--output-format", "stream-json", "--verbose", "--allowedTools", "Read", "Grep", "Glob"],
-    "codex": ["codex", "exec", "{options}", "--json", "--sandbox", "read-only", "-"],
+    "claude": ["claude", "{options}", "-p", "--output-format", "stream-json", "--verbose", "--setting-sources", "project,local", "--strict-mcp-config",
+               "--tools", "Read,Grep,Glob", "--allowedTools", "Read", "Grep", "Glob"],
+    "codex": ["codex", "exec", "{options}", "--json", "--ignore-user-config", "--sandbox", "read-only", "-"],
     "antigravity": ["agy", "{options}", "--output-format", "stream-json", "--mode", "plan", "-p", "{prompt}"],
 }
 # Antigravity first spends the plan that is otherwise idle; it needs the read-only allow rules in the spec,
@@ -57,9 +61,9 @@ RETRO_KINDS = ("guard", "test", "verify", "standard", "eval")  # In order of pre
 # Verifiers run the real program, so they need commands: Codex in its workspace sandbox, and Claude limited to the
 # project's check and its "verify" command prefix. Headless agy refuses unlisted commands, so it cannot verify.
 VERIFIERS = {
-    "codex": ["codex", "exec", "{options}", "--json", "--sandbox", "workspace-write", "-"],
+    "codex": ["codex", "exec", "{options}", "--json", "--ignore-user-config", "--sandbox", "workspace-write", "-"],
     "claude": ["claude", "{options}", "-p", "--output-format", "stream-json", "--verbose", "--permission-mode", "acceptEdits",
-               "--allowedTools", "Bash({check} *)", "Bash({verify} *)"],
+               "--setting-sources", "project,local", "--strict-mcp-config", "--tools", "Bash,Read,Edit,Write,Glob,Grep", "--allowedTools", "Bash({check} *)", "Bash({verify} *)"],
 }
 VERIFY_ORDER = ["codex", "claude"]
 TEST_ORDER = VERIFY_ORDER  # Test writers must run the tests they write, which headless agy cannot.

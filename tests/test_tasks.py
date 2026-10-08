@@ -28,6 +28,25 @@ def git(repo: Path, *args: str) -> str:
     return subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, text=True).stdout
 
 
+class WorkerIsolationTests(unittest.TestCase):
+    """Headless workers load neither the person's own CLI config nor their account connectors (B3, 2026-10-08)."""
+
+    def test_claude_workers_get_only_the_named_tools_and_no_user_settings(self) -> None:
+        for name, table, tools in (("implement", tasks.PROVIDERS, "Bash,Read,Edit,Write,Glob,Grep"),
+                                   ("verify", tasks.VERIFIERS, "Bash,Read,Edit,Write,Glob,Grep"),
+                                   ("review", tasks.REVIEWERS, "Read,Grep,Glob")):
+            with self.subTest(role=name):
+                argv = table["claude"]
+                self.assertEqual(argv[argv.index("--setting-sources") + 1], "project,local")
+                self.assertIn("--strict-mcp-config", argv)
+                self.assertEqual(argv[argv.index("--tools") + 1], tools)
+
+    def test_codex_workers_ignore_the_user_config(self) -> None:
+        for name, table in (("implement", tasks.PROVIDERS), ("verify", tasks.VERIFIERS), ("review", tasks.REVIEWERS)):
+            with self.subTest(role=name):
+                self.assertIn("--ignore-user-config", table["codex"])
+
+
 class TaskTestCase(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary_directory = tempfile.TemporaryDirectory()
