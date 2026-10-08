@@ -45,9 +45,9 @@ REVIEWERS = {
     "codex": ["codex", "exec", "{options}", "--json", "--ignore-user-config", "--sandbox", "read-only", "-"],
     "antigravity": ["agy", "{options}", "--output-format", "stream-json", "--mode", "plan", "-p", "{prompt}"],
 }
-# Antigravity first spends the plan that is otherwise idle; it needs the read-only allow rules in the spec,
-# and an empty review falls back to the next reviewer from another model family.
-REVIEW_ORDER = ["antigravity", "claude", "codex"]
+# An empty review falls back to the next reviewer from another model family. Antigravity was dropped on 2026-10-08:
+# its workers' isolation from the person's own CLI config is unchecked, so it reviews only when named with --reviewer.
+REVIEW_ORDER = ["claude", "codex"]
 # Fallback models for the checking roles (test, verify, review), pinned so a default changed in a provider's app, which
 # shares the CLI's settings, cannot silently change what checks the work; ~/.hearth/models.json and --model override them.
 # agy also runs Claude and GPT-OSS models, so its pin names a Gemini model to stay in another family.

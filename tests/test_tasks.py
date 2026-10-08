@@ -404,11 +404,22 @@ class LoopTests(LoopTestCase):
         task = self.only_task()
         self.assertEqual((status, [run["role"] for run in task["runs"]]), (0, ["implement", "fix", "review"]))
 
-    def test_antigravity_reviews_first_and_an_empty_review_falls_back_to_the_next_reviewer(self) -> None:
+    def test_antigravity_is_never_picked_as_a_reviewer_unless_named(self) -> None:
         self.write_projects(check="test -f hello.txt", providers=("claude", "codex", "antigravity"))
         self.cli("task", "new", "demo", "Add hello.txt")
 
-        status = self.loop(self.only_task(), "garbage,approve")
+        status = self.loop(self.only_task(), "approve")
+
+        task = self.only_task()
+        self.assertEqual(status, 0)
+        self.assertEqual([(run["role"], run["provider"]) for run in task["runs"]], [("implement", "claude"), ("review", "codex")])
+
+    def test_an_empty_review_falls_back_to_the_next_reviewer(self) -> None:
+        self.write_projects(check="test -f hello.txt", providers=("claude", "codex", "antigravity"))
+        self.cli("task", "new", "demo", "Add hello.txt")
+
+        with mock.patch.object(tasks, "REVIEW_ORDER", ["antigravity", "codex"]):  # Two reviewers outside Claude's family.
+            status = self.loop(self.only_task(), "garbage,approve")
 
         task = self.only_task()
         self.assertEqual(status, 0)
@@ -1090,7 +1101,8 @@ class PullRequestTests(LoopTestCase):
         config.write_text(json.dumps(projects), encoding="utf-8")
         self.cli("task", "new", "demo", "Add hello.txt")
 
-        self.loop(self.only_task(), "garbage,approve")
+        with mock.patch.object(tasks, "REVIEW_ORDER", ["antigravity", "codex"]):
+            self.loop(self.only_task(), "garbage,approve")
 
         body = self.created()[self.created().index("--body") + 1]
         self.assertIn("implement claude, review codex.", body)
@@ -1463,7 +1475,8 @@ class KnowledgeBoardTests(RecallFixture):
         tasks._post(task_dir, {"id": "m9", "from": "knowledge", "to": "review", "kind": "answer", "body": "ANSWER-FOR-AGY-ONLY",
                                "refs": [], "reply_to": "m8", "provider": "antigravity"})
 
-        self.loop(task, "garbage,approve")
+        with mock.patch.object(tasks, "REVIEW_ORDER", ["antigravity", "codex"]):
+            self.loop(task, "garbage,approve")
 
         reviews = [run for run in self.only_task()["runs"] if run["role"] == "review"]
         prompts = {run["provider"]: (task_dir / "runs" / run["dir"] / "prompt.md").read_text(encoding="utf-8") for run in reviews}
@@ -1802,7 +1815,8 @@ class ReviewPermissionTests(RecallFixture):
         self.configure({"claude": [str(self.vault)]}, [str(self.vault)], members=("claude", "antigravity"))
         self.cli("task", "new", "demo", "Add hello.txt", "--recall", "keyword")
 
-        self.assertEqual(self.loop(self.only_task(), "approve"), 1)
+        with mock.patch.object(tasks, "REVIEW_ORDER", ["antigravity"]):
+            self.assertEqual(self.loop(self.only_task(), "approve"), 1)
 
         task = self.only_task()
         self.assertEqual((task["stop_reason"], [run["role"] for run in task["runs"]]), ("no_permitted_reviewer", ["implement"]))
