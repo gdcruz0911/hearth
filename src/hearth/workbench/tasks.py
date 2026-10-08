@@ -959,6 +959,23 @@ def _answer(task: dict, task_dir: Path, text: str) -> int:
     return 0
 
 
+RESUME = {"loop": ["loop"], "approve-tests": ["task", "approve-tests"]}
+
+
+def resume_detached(task_id: str, command: str) -> int | None:
+    """ADR-0038: continue a task as its own `hearth` process in its own process group, so quitting the dashboard does not end it.
+
+    `command` is "loop" (after an answer) or "approve-tests"; returns the process ID, or None where an agent is refused.
+    Cancelling needs no ID: the process is a normal task command, so it stops at the task's cancel marker.
+    """
+    if refused_inside_task():
+        return None
+    task_dir = _home() / "tasks" / task_id
+    with (task_dir / "resume.log").open("ab") as log:
+        return subprocess.Popen([sys.executable, "-m", "hearth.cli", *RESUME[command], task_id], stdin=subprocess.DEVNULL,
+                                stdout=log, stderr=log, start_new_session=True).pid
+
+
 def _retro(task: dict, task_dir: Path) -> int:
     """Ask a read-only agent from another model family for one permanent fix per escape; the person approves each."""
     escapes = task.get("escapes", [])

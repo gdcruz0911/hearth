@@ -2451,3 +2451,59 @@ class RetroRefusalTests(RecallFixture):
         self.assertEqual(status, 1)
         self.assertIn("refused: its recall scope does not cover excerpts delivered in this task (ADR-0029)", stderr.getvalue())
         self.assertNotIn("no readable proposal", stderr.getvalue())
+
+
+class DetachedResumeTests(VerifyTestCase):
+    """ADR-0038: work the dashboard sets going runs as its own hearth process, so quitting the app does not end it."""
+
+    def fake_clis_on_path(self) -> None:
+        # The child process cannot inherit this suite's patches, so it finds fakes where it would find the real CLIs: on PATH.
+        bin_dir = self.home / "bin"
+        bin_dir.mkdir()
+        fake = Path(__file__).with_name("fake_agent.py")
+        for name, extra in (("claude", ""), ("codex", " --as codex")):
+            shim = bin_dir / name
+            shim.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{fake}"{extra} "$@"\n', encoding="utf-8")
+            shim.chmod(0o755)
+        patch = mock.patch.dict(os.environ, {"PATH": f"{bin_dir}{os.pathsep}/usr/bin:/bin", "PYTHONPATH": str(Path(tasks.__file__).parents[2])})
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def answered_task(self) -> dict:
+        os.environ["FAKE_OUTBOX"] = '{"to": "person", "kind": "question", "body": "Which greeting?"}'
+        task = self.start()
+        os.environ.pop("FAKE_OUTBOX")
+        self.cli("task", "answer", task["id"], "Say hello to the person.")
+        return task
+
+    def test_the_whole_loop_finishes_after_the_process_that_launched_it_is_killed(self) -> None:
+        self.fake_clis_on_path()
+        task = self.answered_task()
+        os.environ["FAKE_REVIEWS"] = "approve"
+        launcher = subprocess.Popen(
+            [sys.executable, "-c", "import sys, time; from hearth.workbench import tasks\n"
+             "print(tasks.resume_detached(sys.argv[1], 'loop'), flush=True); time.sleep(60)", task["id"]],
+            stdout=subprocess.PIPE, text=True, start_new_session=True)  # Its own group, like the app's backend.
+        self.addCleanup(launcher.stdout.close)
+        self.addCleanup(launcher.wait)
+        self.assertTrue(launcher.stdout.readline().strip().isdigit())
+        os.killpg(launcher.pid, 9)  # The app quits.
+
+        for _ in range(400):
+            finished = self.only_task()
+            if "review" in finished or finished["status"] == "failed":  # The answered task already reads "done".
+                break
+            time.sleep(0.1)
+        self.assertEqual((finished["status"], finished["stop_reason"]), ("done", None))
+        self.assertEqual([run["role"] for run in finished["runs"]], ["implement", "verify", "review"])
+        run_dirs = self.home / ".hearth/tasks" / task["id"] / "runs"
+        self.assertTrue((run_dirs / "02-verify-codex/evidence/hello.txt").read_text(encoding="utf-8"))
+        self.assertEqual(finished["review"]["verdict"], "approve")
+        self.assertIn("approved", (self.home / ".hearth/tasks" / task["id"] / "resume.log").read_text(encoding="utf-8"))
+
+    def test_an_agent_cannot_resume_a_task(self) -> None:
+        task = self.answered_task()
+        os.environ["HEARTH_TASK"] = "20260927-000000"
+
+        self.assertIsNone(tasks.resume_detached(task["id"], "loop"))
+        self.assertFalse((self.home / ".hearth/tasks" / task["id"] / "resume.log").exists())
