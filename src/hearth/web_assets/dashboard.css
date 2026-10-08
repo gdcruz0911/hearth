@@ -133,6 +133,9 @@ a { color: var(--ember); }
 .task-goal { font-size: 18px; margin: 0; flex: 1; min-width: 0; }
 .needs-box { border: 1px solid var(--attention); border-radius: 10px; padding: 10px 14px; margin: 10px 0 16px; }
 .needs-box .group { color: var(--attention); margin-top: 0; }
+.cancel-box { margin: 10px 0 16px; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; }
+.cancel-box p { flex-basis: 100%; margin: 0; font-size: 13px; }
+.ask-button { background: var(--ember); color: var(--bg); border: 0; border-radius: 6px; padding: 6px 14px; font: inherit; font-size: 13px; font-weight: 600; cursor: pointer; }
 .question { border-top: 1px solid var(--line); margin-top: 8px; padding-top: 6px; }
 .question-body { margin: 2px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; }
 .timeline { list-style: none; margin: 6px 0 16px; padding: 0 0 0 4px; border-left: 1px solid var(--line); display: flex; flex-direction: column; gap: 2px; }

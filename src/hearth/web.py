@@ -115,7 +115,7 @@ class HearthWebApplication:
         workbench_transcript: Callable[[str, str, int], Mapping[str, Any] | None] | None = None,
         workbench_diff: Callable[[str], Mapping[str, Any] | None] | None = None,
         workbench_task_state: Callable[[str, str], str | None] | None = None,
-        workbench_task_action: Callable[[str, str, Mapping[str, str]], Mapping[str, Any]] | None = None,
+        workbench_task_action: Callable[[str, str, Mapping[str, str], str], Mapping[str, Any] | None] | None = None,
     ):
         self._service = service
         self._workbench_transcript = workbench_transcript
@@ -130,7 +130,8 @@ class HearthWebApplication:
         self._source_roots = source_roots
         self._pending_actions: dict[str, _PendingAction] = {}
         self._pending_source_imports: dict[str, _PendingSourceImport] = {}
-        # The task's state fingerprint for an action (None when the task or action is unavailable), and the action itself.
+        # The task's state fingerprint for an action (None when the task or action is unavailable), and the action itself,
+        # which rechecks that fingerprint where it applies and returns None if the task changed since.
         self._workbench_task_state = workbench_task_state
         self._workbench_task_action = workbench_task_action
         self._pending_task_actions: dict[str, _PendingTaskAction] = {}
@@ -341,7 +342,10 @@ class HearthWebApplication:
                 or not hmac.compare_digest(pending.session, session) or (pending.task_id, pending.action) != (task_id, action)
                 or self._workbench_task_state(task_id, action) != pending.fingerprint):
             return self._json_error(HTTPStatus.CONFLICT, "This preview no longer matches the task. Preview the action again.")
-        return self._json_response({"applied": self._workbench_task_action(task_id, action, pending.arguments)})
+        applied = self._workbench_task_action(task_id, action, pending.arguments, pending.fingerprint)
+        if applied is None:
+            return self._json_error(HTTPStatus.CONFLICT, "This preview no longer matches the task. Preview the action again.")
+        return self._json_response({"applied": applied})
 
     def _preview(self, document_id: int, action: str) -> _WebResponse:
         self._discard_expired_previews()
@@ -610,9 +614,12 @@ class HearthWebServer:
         workbench_tasks: Callable[[], Mapping[str, Any]] | None = None,
         workbench_transcript: Callable[[str, str, int], Mapping[str, Any] | None] | None = None,
         workbench_diff: Callable[[str], Mapping[str, Any] | None] | None = None,
+        workbench_task_state: Callable[[str, str], str | None] | None = None,
+        workbench_task_action: Callable[[str, str, Mapping[str, str], str], Mapping[str, Any] | None] | None = None,
     ):
         token = secrets.token_urlsafe(32)
-        self._application = HearthWebApplication(service, token, choose_file, source_roots, workbench_tasks, workbench_transcript, workbench_diff)
+        self._application = HearthWebApplication(service, token, choose_file, source_roots, workbench_tasks, workbench_transcript, workbench_diff,
+                                                 workbench_task_state, workbench_task_action)
         self._browser_opener = browser_opener
         self._http_server = _LoopbackHTTPServer(("127.0.0.1", port), _handler_type(self._application))
         self._http_server.timeout = 0.5

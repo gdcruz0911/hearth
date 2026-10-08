@@ -582,7 +582,7 @@ class TaskPreviewTests(unittest.TestCase):
         self.app = HearthWebApplication(
             self.service, "token",
             workbench_task_state=lambda task_id, action: self.state.get(task_id),
-            workbench_task_action=lambda task_id, action, arguments: self.applied.append((task_id, action, dict(arguments))) or {"done": True},
+            workbench_task_action=lambda task_id, action, arguments, fingerprint: self.applied.append((task_id, action, dict(arguments))) or {"done": True},
         )
         self.call = signed_in(self.app)
 

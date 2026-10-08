@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import fcntl
 import hashlib
 import json
 import os
@@ -282,6 +284,8 @@ def _command(args: argparse.Namespace) -> int:
         return 1
     if getattr(args, "task_command", None) == "promote" and refused_inside_task("promote reports into the person's notes"):
         return 1
+    if getattr(args, "task_command", None) == "cancel" and refused_inside_task("cancel tasks"):  # ADR-0033: the person's alone.
+        return 1
     if args.command == "loop":
         return _loop(args)
     if args.command == "open":
@@ -544,23 +548,27 @@ def _run(task: dict, task_dir: Path, role: str, provider: str, template: list[st
     model = model or _model(provider, role)
     if provider == "antigravity" and model and re.search(r"-(low|high)$", model):
         model = re.sub(r"-(low|high)$", "-low" if effort == "low" else "-high", model)  # agy names its thinking level in the model.
-    if (task_dir / "cancel").exists():
-        raise Cancelled(task["id"])
-    record = _record(task, task_dir, role, provider, model, effort, prompt)
-    run_dir = task_dir / "runs" / record["dir"]
-    if not recall.may_receive(_home(), _projects().get(task.get("project")) if (task_dir / "recall").is_dir() else None, task_dir, provider):
-        # ADR-0024: this prompt carries the task's agent output, which can quote excerpts this provider may not receive.
-        record.update(exit_code=None, finished=_now())
-        (run_dir / "report.md").write_text("Not sent: this provider's recall scope does not cover excerpts delivered in this task.\n", encoding="utf-8")
-        return {**parse_events(provider, ""), "stop": "recall_not_permitted"}
-    argv = _argv(template, provider, prompt, check, model, effort, verify)
-    with (run_dir / "events.jsonl").open("w", encoding="utf-8") as events, (run_dir / "stderr.txt").open("w", encoding="utf-8") as errors:
+    # Until the run is on disk, a dashboard cancel waits, so it either sees this run or stops it from starting.
+    with _task_lock(task_dir):
+        if (task_dir / "cancel").exists():
+            raise Cancelled(task["id"])
+        record = _record(task, task_dir, role, provider, model, effort, prompt)
+        run_dir = task_dir / "runs" / record["dir"]
+        if not recall.may_receive(_home(), _projects().get(task.get("project")) if (task_dir / "recall").is_dir() else None, task_dir, provider):
+            # ADR-0024: this prompt carries the task's agent output, which can quote excerpts this provider may not receive.
+            record.update(exit_code=None, finished=_now())
+            (run_dir / "report.md").write_text("Not sent: this provider's recall scope does not cover excerpts delivered in this task.\n", encoding="utf-8")
+            return {**parse_events(provider, ""), "stop": "recall_not_permitted"}
+        argv = _argv(template, provider, prompt, check, model, effort, verify)
+        events = (run_dir / "events.jsonl").open("w", encoding="utf-8")
+        errors = (run_dir / "stderr.txt").open("w", encoding="utf-8")
         process = subprocess.Popen(argv, cwd=task["worktree"], stdin=subprocess.PIPE, stdout=events, stderr=errors, text=True,
                                    start_new_session=True, env={**os.environ, "HEARTH_TASK": task["id"]})
         record["pid"] = process.pid
         record["pid_identity"] = _identity(process.pid)  # Lets a later cancel prove it signals this run, not a reused ID.
         task["status"] = "running"
         _write(task_dir, task)
+    with events, errors:
         timed_out = False
         try:
             process.communicate("" if "{prompt}" in template else prompt, timeout=timeout)
@@ -1604,12 +1612,46 @@ def _stop(process: subprocess.Popen) -> None:
             continue
 
 
-def _cancel(task: dict, task_dir: Path) -> int:
+TASK_ID = re.compile(r"^[0-9]{8}-[0-9]{6}(-[0-9]+)?$")
+FINISHED = ("done", "cancelled")  # Nothing left to cancel.
+
+
+def dashboard_task_state(task_id: str, action: str) -> str | None:
+    """ADR-0037: the state a dashboard preview is bound to, or None where the action is not available for the task."""
+    task_dir = _home() / "tasks" / task_id
+    if action != "cancel" or not TASK_ID.match(task_id) or not (task_dir / "task.json").exists():
+        return None
+    task = _read(task_dir)
+    return None if task["status"] in FINISHED else f"{task['status']}:{len(task['runs'])}"
+
+
+@contextlib.contextmanager
+def _task_lock(task_dir: Path):
+    """One task's state changes, across processes: a run starting, or a dashboard action applying."""
+    with (task_dir / "lock").open("a") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        yield
+
+
+def dashboard_action(task_id: str, action: str, arguments: dict, fingerprint: str) -> dict | None:
+    """ADR-0037: a previewed dashboard action, through the same function as its command; None if the task changed since."""
+    task_dir = _home() / "tasks" / task_id
+    with _task_lock(task_dir):
+        if dashboard_task_state(task_id, action) != fingerprint:
+            return None
+        _cancel(_read(task_dir), task_dir, source="dashboard")
+    task = _read(task_dir)
+    run = task["runs"][-1] if task["runs"] else None
+    # CODE-7: report what is true afterwards, including a process that could not be shown to be this run's.
+    return {"task": task_id, "status": task["status"], "process_stopped": not (run and _alive(run.get("pid")))}
+
+
+def _cancel(task: dict, task_dir: Path, source: str = "terminal") -> int:
     """Stop the active run's process group and mark the task so no further agent starts; nothing is deleted."""
-    if task["status"] in ("done", "cancelled"):
+    if task["status"] in FINISHED:
         print(f"{task['id']} is already {task['status']}; nothing to cancel.\nNext: hearth task show {task['id']}", file=sys.stderr)
         return 1
-    (task_dir / "cancel").write_text(_now() + "\n", encoding="utf-8")
+    (task_dir / "cancel").write_text(f"{_now()} {source}\n", encoding="utf-8")
     run = task["runs"][-1] if task["runs"] else None
     unproven = bool(run and _alive(run.get("pid")) and not _stop_pid(run["pid"], run.get("pid_identity")))
     _write(task_dir, task)
