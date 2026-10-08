@@ -38,6 +38,8 @@ from .service import HearthService
 _ASSET_DIRECTORY = Path(__file__).with_name("web_assets")
 _MAX_REQUEST_BODY_BYTES = 64 * 1024
 _PREVIEW_LIFETIME_SECONDS = 5 * 60
+_TASK_PREVIEW_LIFETIME_SECONDS = 2 * 60  # ADR-0037; the knowledge previews above keep their own until step C retires them.
+_TASK_ACTIONS = frozenset({"cancel", "answer", "approve-tests"})  # ADR-0037's first actions; publishing stays terminal-only.
 _CONNECTION_TIMEOUT_SECONDS = 5
 _MAP_RELATIONSHIP_LIMIT = 120
 
@@ -55,6 +57,16 @@ class _PendingAction:
     action: str
     document_id: int
     arguments: Mapping[str, str]
+    created_at: float
+
+
+@dataclass(frozen=True)
+class _PendingTaskAction:
+    session: str
+    task_id: str
+    action: str
+    arguments: Mapping[str, str]
+    fingerprint: str
     created_at: float
 
 
@@ -102,6 +114,8 @@ class HearthWebApplication:
         workbench_tasks: Callable[[], Mapping[str, Any]] | None = None,
         workbench_transcript: Callable[[str, str, int], Mapping[str, Any] | None] | None = None,
         workbench_diff: Callable[[str], Mapping[str, Any] | None] | None = None,
+        workbench_task_state: Callable[[str, str], str | None] | None = None,
+        workbench_task_action: Callable[[str, str, Mapping[str, str]], Mapping[str, Any]] | None = None,
     ):
         self._service = service
         self._workbench_transcript = workbench_transcript
@@ -116,6 +130,11 @@ class HearthWebApplication:
         self._source_roots = source_roots
         self._pending_actions: dict[str, _PendingAction] = {}
         self._pending_source_imports: dict[str, _PendingSourceImport] = {}
+        # The task's state fingerprint for an action (None when the task or action is unavailable), and the action itself.
+        self._workbench_task_state = workbench_task_state
+        self._workbench_task_action = workbench_task_action
+        self._pending_task_actions: dict[str, _PendingTaskAction] = {}
+        self._pending_task_actions_lock = threading.Lock()
         self._semantic_index_job: _SemanticIndexJob | None = None
         self._semantic_index_job_lock = threading.Lock()
 
@@ -141,6 +160,8 @@ class HearthWebApplication:
         try:
             if method == "GET":
                 return self._get(relative_path)
+            if method == "POST" and relative_path.startswith("api/tasks/"):
+                return self._task_action(relative_path, body, headers.get("X-Hearth-Session", ""))
             if method == "POST":
                 return self._post(relative_path, body)
             return self._json_error(HTTPStatus.METHOD_NOT_ALLOWED, "This local endpoint does not allow that method.")
@@ -290,6 +311,37 @@ class HearthWebApplication:
                 return self._not_found()
             return self._apply(preview_id)
         return self._not_found()
+
+    def _task_action(self, relative_path: str, body: bytes, session: str) -> _WebResponse:
+        parts = relative_path.split("/")
+        if (len(parts) != 6 or parts[3] != "actions" or parts[4] not in _TASK_ACTIONS or parts[5] not in ("preview", "apply")
+                or self._workbench_task_state is None or self._workbench_task_action is None):
+            return self._not_found()
+        task_id, action, payload = parts[2], parts[4], _json_body(body)
+        if parts[5] == "preview":
+            arguments = payload.get("arguments", {})
+            if not isinstance(arguments, dict) or not all(isinstance(value, str) for value in arguments.values()):
+                raise WebRequestError("Action input must be text.")
+            fingerprint = self._workbench_task_state(task_id, action)
+            if fingerprint is None:
+                return self._json_error(HTTPStatus.CONFLICT, "This action is not available for this task.")
+            preview_id = secrets.token_urlsafe(18)
+            with self._pending_task_actions_lock:
+                cutoff = time.monotonic() - _TASK_PREVIEW_LIFETIME_SECONDS
+                for key, pending in tuple(self._pending_task_actions.items()):
+                    if pending.created_at < cutoff:
+                        del self._pending_task_actions[key]
+                self._pending_task_actions[preview_id] = _PendingTaskAction(session, task_id, action, dict(arguments), fingerprint, time.monotonic())
+            return self._json_response({"preview": {"id": preview_id, "task": task_id, "action": action, "arguments": arguments,
+                                                    "expires_in_seconds": _TASK_PREVIEW_LIFETIME_SECONDS}})
+        # Taken out before any check, so a refused or concurrent apply uses the preview up too.
+        with self._pending_task_actions_lock:
+            pending = self._pending_task_actions.pop(str(payload.get("preview")), None)
+        if (pending is None or time.monotonic() - pending.created_at > _TASK_PREVIEW_LIFETIME_SECONDS
+                or not hmac.compare_digest(pending.session, session) or (pending.task_id, pending.action) != (task_id, action)
+                or self._workbench_task_state(task_id, action) != pending.fingerprint):
+            return self._json_error(HTTPStatus.CONFLICT, "This preview no longer matches the task. Preview the action again.")
+        return self._json_response({"applied": self._workbench_task_action(task_id, action, pending.arguments)})
 
     def _preview(self, document_id: int, action: str) -> _WebResponse:
         self._discard_expired_previews()
