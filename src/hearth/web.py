@@ -83,6 +83,11 @@ class _WebResponse:
     status: HTTPStatus
     content_type: str
     body: bytes
+    headers: tuple[tuple[str, str], ...] = ()
+
+
+_RELAUNCH_PAGE = (b"<!doctype html><meta charset=utf-8><title>Hearth</title>"
+                  b"<p>This dashboard needs a fresh launch. Run <code>hearth web</code> in your terminal.</p>")
 
 
 class HearthWebApplication:
@@ -101,7 +106,10 @@ class HearthWebApplication:
         self._service = service
         self._workbench_transcript = workbench_transcript
         self._workbench_diff = workbench_diff
-        self._capability_token = capability_token
+        # ADR-0037: the launch token works once; a cookie and a header token, both held only in memory, replace it.
+        self._launch_token = capability_token
+        self._session_lock = threading.Lock()
+        self._session: tuple[str, str, str] | None = None  # Cookie name, cookie value, header token.
         # Passed in by the CLI, the composition root, so this module never imports the workbench (CODE-1).
         self._workbench_tasks = workbench_tasks
         self._choose_file = choose_file or choose_local_file
@@ -112,14 +120,24 @@ class HearthWebApplication:
         self._semantic_index_job_lock = threading.Lock()
 
     @property
-    def base_path(self) -> str:
-        return f"/{self._capability_token}/"
+    def launch_path(self) -> str:
+        return f"/launch/{self._launch_token}"
 
-    def respond(self, method: str, raw_path: str, body: bytes) -> _WebResponse:
+    def respond(self, method: str, raw_path: str, body: bytes, headers: Mapping[str, str] | None = None) -> _WebResponse:
+        headers = headers or {}
         path = urlsplit(raw_path).path
-        if not path.startswith(self.base_path):
-            return self._not_found()
-        relative_path = path[len(self.base_path) :]
+        if path.startswith("/launch/"):
+            return self._launch(path.removeprefix("/launch/"), headers.get("Host", ""))
+        relative_path = path.removeprefix("/")
+        if not self._has_cookie(headers.get("Cookie", "")):
+            if relative_path.startswith("api/"):
+                return self._json_error(HTTPStatus.UNAUTHORIZED, "This dashboard session is not valid. Run hearth web again.")
+            return _WebResponse(HTTPStatus.UNAUTHORIZED, "text/html; charset=utf-8", _RELAUNCH_PAGE)
+        if relative_path.startswith("api/") and not self._has_token(headers.get("X-Hearth-Session", "")):
+            return self._json_error(HTTPStatus.UNAUTHORIZED, "This dashboard session is not valid. Run hearth web again.")
+        if method == "POST" and headers.get("Origin") != f"http://{headers.get('Host', '')}":
+            # A missing or null Origin is refused too, so another site cannot make the person's browser post here.
+            return self._json_error(HTTPStatus.FORBIDDEN, "Hearth accepts changes only from its own page.")
         try:
             if method == "GET":
                 return self._get(relative_path)
@@ -134,6 +152,30 @@ class HearthWebApplication:
             return self._json_error(HTTPStatus.BAD_REQUEST, "The requested local action could not be completed.")
         except Exception:
             return self._json_error(HTTPStatus.INTERNAL_SERVER_ERROR, "Hearth could not complete that local action.")
+
+    def _launch(self, token: str, host: str) -> _WebResponse:
+        """Redeem the one-time launch link: exactly one request wins, even when several arrive together."""
+        if not hmac.compare_digest(token, self._launch_token):
+            return self._not_found()
+        with self._session_lock:
+            if self._session is not None:
+                return _WebResponse(HTTPStatus.GONE, "text/html; charset=utf-8", _RELAUNCH_PAGE)
+            # Cookies are not isolated by port, so the name carries it; two servers never overwrite each other's.
+            name = f"hearth_{host.rsplit(':', 1)[-1] if ':' in host else 'web'}"
+            self._session = (name, secrets.token_urlsafe(32), secrets.token_urlsafe(32))
+        cookie = f"{name}={self._session[1]}; HttpOnly; SameSite=Strict; Path=/"
+        return _WebResponse(HTTPStatus.SEE_OTHER, "text/plain; charset=utf-8", b"",
+                            (("Set-Cookie", cookie), ("Location", f"/#session={self._session[2]}")))
+
+    def _has_cookie(self, header: str) -> bool:
+        if self._session is None:
+            return False
+        name, value, _ = self._session
+        sent = [part.strip().split("=", 1) for part in header.split(";") if "=" in part]
+        return any(key == name and hmac.compare_digest(found, value) for key, found in sent)
+
+    def _has_token(self, token: str) -> bool:
+        return self._session is not None and hmac.compare_digest(token, self._session[2])
 
     def _get(self, relative_path: str) -> _WebResponse:
         if relative_path == "":
@@ -526,7 +568,7 @@ class HearthWebServer:
 
     @property
     def url(self) -> str:
-        return f"http://127.0.0.1:{self._http_server.server_port}{self._application.base_path}"
+        return f"http://127.0.0.1:{self._http_server.server_port}{self._application.launch_path}"
 
     def open_browser(self) -> bool:
         return self._browser_opener(self.url)
@@ -607,10 +649,12 @@ def _handler_type(application: HearthWebApplication) -> type[BaseHTTPRequestHand
             else:
                 application_method = "GET" if method == "HEAD" else method
                 response = application.respond(
-                    application_method, self.path, self._request_body() if method == "POST" else b""
+                    application_method, self.path, self._request_body() if method == "POST" else b"", self.headers
                 )
             self.send_response(response.status)
             self.send_header("Content-Type", response.content_type)
+            for name, value in response.headers:
+                self.send_header(name, value)
             self.send_header("Content-Length", str(len(response.body)))
             self.send_header("Cache-Control", "no-store")
             self.send_header("Content-Security-Policy", "default-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; object-src 'none'")

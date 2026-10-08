@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import http.client
 import json
+import shutil
+import subprocess
 import tempfile
 import threading
 import time
@@ -13,6 +15,17 @@ from hearth.domain import DocumentRelationship
 from hearth.embedding import IndexBuildCancelled, IndexBuildStopped
 from hearth.service import HearthService
 from hearth.web import HearthWebApplication, HearthWebServer
+
+
+HOST = "127.0.0.1:8765"
+
+
+def signed_in(app: HearthWebApplication):
+    """Redeem the app's launch link as the person's browser would, and return a respond() that sends the session."""
+    launch = dict(app.respond("GET", app.launch_path, b"", {"Host": HOST}).headers)
+    headers = {"Host": HOST, "Origin": f"http://{HOST}", "Cookie": launch["Set-Cookie"].split(";")[0],
+               "X-Hearth-Session": launch["Location"].split("#session=")[1]}
+    return lambda method, path, body=b"": app.respond(method, path, body, headers)
 
 
 class FakeRelationshipIndex:
@@ -83,6 +96,7 @@ class HearthWebServerTests(unittest.TestCase):
         )
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
+        self._sign_in()
         self._json_request("GET", "api/health")
 
     def tearDown(self) -> None:
@@ -95,26 +109,27 @@ class HearthWebServerTests(unittest.TestCase):
         # The dashboard polls every few seconds; on a kept-alive connection it used to block every other request.
         parsed = urlsplit(self.server.url)
         holder = http.client.HTTPConnection(parsed.hostname, parsed.port, timeout=3)
-        holder.request("GET", self._path("api/health"))
+        holder.request("GET", self._path("api/health"), headers=self._session)
         held = holder.getresponse()
         held.read()
         self.addCleanup(holder.close)
         other = http.client.HTTPConnection(parsed.hostname, parsed.port, timeout=2)
         self.addCleanup(other.close)
 
-        other.request("GET", self._path("api/documents"))
+        other.request("GET", self._path("api/documents"), headers=self._session)
         answered = other.getresponse()
 
         self.assertEqual((held.getheader("Connection"), answered.status), ("close", 200))
 
     def test_serves_a_capability_scoped_loopback_interface_without_cors(self) -> None:
         root_response, root_body = self._request("GET", self._path())
-        missing_token_response, _ = self._request("GET", "/")
+        self._session = {}
+        missing_token_response, _ = self._request("GET", "/api/health")
         bad_host_response, _ = self._request("GET", self._path(), host="example.test")
 
         self.assertEqual(root_response.status, 200)
         self.assertIn(b"Hearth", root_body)
-        self.assertEqual(missing_token_response.status, 404)
+        self.assertEqual(missing_token_response.status, 401)
         self.assertEqual(bad_host_response.status, 400)
         self.assertEqual(root_response.getheader("Cache-Control"), "no-store")
         self.assertIn("default-src 'self'", root_response.getheader("Content-Security-Policy"))
@@ -150,6 +165,7 @@ class HearthWebServerTests(unittest.TestCase):
         )
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
+        self._sign_in()
         self._json_request("GET", "api/health")
         self._json_request("POST", "api/import")
         second_note = self.root / "handoff.md"
@@ -181,6 +197,7 @@ class HearthWebServerTests(unittest.TestCase):
         )
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
+        self._sign_in()
         self._json_request("GET", "api/health")
         self._json_request("POST", "api/import")
         before_preview = index.rebuild_count
@@ -216,6 +233,7 @@ class HearthWebServerTests(unittest.TestCase):
         )
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
+        self._sign_in()
         self._json_request("GET", "api/health")
         self._json_request("POST", "api/import")
         index.block_rebuild = True
@@ -241,6 +259,7 @@ class HearthWebServerTests(unittest.TestCase):
         self.server = HearthWebServer(self.service, port=0, choose_file=lambda: self.selected_file, browser_opener=self.opened_urls.append)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
+        self._sign_in()
         self._json_request("POST", "api/import")
         index.block_rebuild = True
         preview = self._json_request("POST", "api/semantic-index/preview")["preview"]
@@ -259,6 +278,7 @@ class HearthWebServerTests(unittest.TestCase):
         self.server = HearthWebServer(self.service, port=0, choose_file=lambda: self.selected_file, browser_opener=self.opened_urls.append)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
+        self._sign_in()
         self._json_request("POST", "api/import")
         preview = self._json_request("POST", "api/semantic-index/preview")["preview"]
         index.block_rebuild = True
@@ -310,6 +330,7 @@ class HearthWebServerTests(unittest.TestCase):
         )
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
+        self._sign_in()
         self._json_request("GET", "api/health")
 
         roots = self._json_request("GET", "api/sources")
@@ -352,12 +373,19 @@ class HearthWebServerTests(unittest.TestCase):
         self.assertTrue(self.note.is_file())
         self.assertEqual(documents["documents"], [])
 
-    def test_open_browser_uses_the_capability_url(self) -> None:
+    def test_open_browser_uses_the_launch_link(self) -> None:
         self.assertIsNone(self.server.open_browser())
         self.assertEqual(self.opened_urls, [self.server.url])
 
+    def _sign_in(self) -> None:
+        """Redeem the server's launch link, as the browser does when hearth web opens it."""
+        self._session: dict[str, str] = {}
+        launched, _ = self._request("GET", urlsplit(self.server.url).path)
+        self._session = {"Cookie": launched.getheader("Set-Cookie").split(";")[0],
+                         "X-Hearth-Session": launched.getheader("Location").split("#session=")[1]}
+
     def _path(self, suffix: str = "") -> str:
-        return f"{urlsplit(self.server.url).path}{suffix}"
+        return f"/{suffix}"
 
     def _request(
         self, method: str, path: str, payload: dict[str, object] | None = None, host: str | None = None
@@ -365,14 +393,16 @@ class HearthWebServerTests(unittest.TestCase):
         parsed = urlsplit(self.server.url)
         connection = http.client.HTTPConnection(parsed.hostname, parsed.port, timeout=3)
         encoded_payload = json.dumps(payload).encode("utf-8") if payload is not None else None
-        headers = {"Content-Type": "application/json"} if encoded_payload is not None else {}
+        headers = {**self._session, "Origin": f"http://{parsed.hostname}:{parsed.port}"}
+        headers |= {"Content-Type": "application/json"} if encoded_payload is not None else {}
         if host is None:
             connection.request(method, path, body=encoded_payload, headers=headers)
         else:
             connection.putrequest(method, path, skip_host=True)
             connection.putheader("Host", host)
+            for name, value in headers.items():
+                connection.putheader(name, value)
             if encoded_payload is not None:
-                connection.putheader("Content-Type", "application/json")
                 connection.putheader("Content-Length", str(len(encoded_payload)))
             connection.endheaders(encoded_payload)
         response = connection.getresponse()
@@ -412,14 +442,14 @@ class WorkbenchTasksEndpointTests(unittest.TestCase):
         payload = {"tasks": [{"id": "20260930-000000", "status": "running"}], "slots": {"implement": {"limit": 2, "busy": 1}}}
         app = HearthWebApplication(self.service, "token", workbench_tasks=lambda: payload)
 
-        response = app.respond("GET", "/token/api/workbench/tasks", b"")
-        outside = app.respond("GET", "/api/workbench/tasks", b"")
+        response = signed_in(app)("GET", "/api/workbench/tasks")
+        outside = app.respond("GET", "/api/workbench/tasks", b"", {"Host": HOST})
 
         self.assertEqual((response.status, json.loads(response.body)), (200, payload))
-        self.assertEqual(outside.status, 404)
+        self.assertEqual(outside.status, 401)
 
     def test_without_the_workbench_the_endpoint_says_so(self) -> None:
-        response = HearthWebApplication(self.service, "token").respond("GET", "/token/api/workbench/tasks", b"")
+        response = signed_in(HearthWebApplication(self.service, "token"))("GET", "/api/workbench/tasks")
 
         self.assertEqual(response.status, 404)
         self.assertIn("not connected", json.loads(response.body)["error"])
@@ -428,10 +458,11 @@ class WorkbenchTasksEndpointTests(unittest.TestCase):
         calls = []
         app = HearthWebApplication(self.service, "token", workbench_transcript=lambda *args: calls.append(args) or {"items": []})
 
-        ok = app.respond("GET", "/token/api/workbench/transcript/20260930-120000/01-implement-claude/42", b"")
-        bad = app.respond("GET", "/token/api/workbench/transcript/20260930-120000/01-implement-claude/x", b"")
-        unknown = HearthWebApplication(self.service, "token", workbench_transcript=lambda *args: None).respond(
-            "GET", "/token/api/workbench/transcript/20260930-120000/01-implement-claude/0", b"")
+        ask = signed_in(app)
+        ok = ask("GET", "/api/workbench/transcript/20260930-120000/01-implement-claude/42")
+        bad = ask("GET", "/api/workbench/transcript/20260930-120000/01-implement-claude/x")
+        unknown = signed_in(HearthWebApplication(self.service, "token", workbench_transcript=lambda *args: None))(
+            "GET", "/api/workbench/transcript/20260930-120000/01-implement-claude/0")
 
         self.assertEqual((ok.status, calls), (200, [("20260930-120000", "01-implement-claude", 42)]))
         self.assertEqual((bad.status, unknown.status), (400, 404))
@@ -441,13 +472,96 @@ class WorkbenchTasksEndpointTests(unittest.TestCase):
         calls = []
         app = HearthWebApplication(self.service, "token", workbench_diff=lambda task: calls.append(task) or {"diff": None})
 
-        ok = app.respond("GET", "/token/api/workbench/diff/20260930-120000", b"")
-        bad = app.respond("GET", "/token/api/workbench/diff/20260930-120000/extra", b"")
-        unknown = HearthWebApplication(self.service, "token", workbench_diff=lambda task: None).respond(
-            "GET", "/token/api/workbench/diff/20260930-120000", b"")
+        ask = signed_in(app)
+        ok = ask("GET", "/api/workbench/diff/20260930-120000")
+        bad = ask("GET", "/api/workbench/diff/20260930-120000/extra")
+        unknown = signed_in(HearthWebApplication(self.service, "token", workbench_diff=lambda task: None))(
+            "GET", "/api/workbench/diff/20260930-120000")
 
         self.assertEqual((ok.status, calls), (200, ["20260930-120000"]))
         self.assertEqual((bad.status, unknown.status), (400, 404))
+
+
+class SessionTests(unittest.TestCase):
+    """ADR-0037: a launch link that works once, a cookie for the page, and cookie plus header token for every API route."""
+
+    def setUp(self) -> None:
+        self.temporary_directory = tempfile.TemporaryDirectory()
+        self.service = HearthService(Path(self.temporary_directory.name) / "hearth.sqlite")
+        self.addCleanup(self.temporary_directory.cleanup)
+        self.addCleanup(self.service.close)
+        self.app = HearthWebApplication(self.service, "launch-secret", workbench_tasks=lambda: {"tasks": []})
+
+    def launch(self):
+        return self.app.respond("GET", self.app.launch_path, b"", {"Host": HOST})
+
+    def credentials(self) -> tuple[str, str]:
+        launched = dict(self.launch().headers)
+        return launched["Set-Cookie"].split(";")[0], launched["Location"].split("#session=")[1]
+
+    def test_the_launch_link_works_once_and_sets_a_strict_http_only_cookie(self) -> None:
+        first, second = self.launch(), self.launch()
+        wrong = self.app.respond("GET", "/launch/guess", b"", {"Host": HOST})
+
+        headers = dict(first.headers)
+        self.assertEqual(first.status, 303)
+        self.assertTrue(headers["Location"].startswith("/#session="))
+        self.assertRegex(headers["Set-Cookie"], r"^hearth_8765=[^;]+; HttpOnly; SameSite=Strict; Path=/$")
+        self.assertEqual((second.status, wrong.status), (410, 404))
+        self.assertNotIn("Set-Cookie", dict(second.headers))
+        self.assertEqual(self.app.respond("GET", "/launch-secret/", b"", {"Host": HOST}).status, 401)  # The old capability path.
+
+    def test_only_one_of_simultaneous_redemptions_wins(self) -> None:
+        results: list[int] = []
+        barrier = threading.Barrier(8)
+
+        def redeem() -> None:
+            barrier.wait()
+            results.append(self.launch().status)
+
+        threads = [threading.Thread(target=redeem) for _ in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        self.assertEqual(sorted(results), [303] + [410] * 7)
+
+    def test_the_page_and_its_files_need_the_cookie(self) -> None:
+        cookie, _ = self.credentials()
+        for path in ("/", "/knowledge", "/assets/dashboard.js", "/assets/app.js"):
+            with self.subTest(path=path):
+                refused = self.app.respond("GET", path, b"", {"Host": HOST})
+                allowed = self.app.respond("GET", path, b"", {"Host": HOST, "Cookie": cookie})
+                self.assertEqual((refused.status, allowed.status), (401, 200))
+        self.assertIn(b"hearth web", self.app.respond("GET", "/", b"", {"Host": HOST}).body)
+
+    def test_api_routes_need_both_the_cookie_and_the_header_token(self) -> None:
+        cookie, token = self.credentials()
+        other = HearthWebApplication(self.service, "other-secret")
+        other_cookie = dict(other.respond("GET", other.launch_path, b"", {"Host": HOST}).headers)["Set-Cookie"].split(";")[0]
+        cases = {
+            "neither": {},
+            "cookie only": {"Cookie": cookie},
+            "token only": {"X-Hearth-Session": token},
+            "wrong token": {"Cookie": cookie, "X-Hearth-Session": token[:-1] + ("x" if token[-1] != "x" else "y")},
+            "another server's cookie": {"Cookie": other_cookie, "X-Hearth-Session": token},
+        }
+        for name, headers in cases.items():
+            with self.subTest(case=name):
+                self.assertEqual(self.app.respond("GET", "/api/workbench/tasks", b"", {"Host": HOST, **headers}).status, 401)
+        both = self.app.respond("GET", "/api/workbench/tasks", b"", {"Host": HOST, "Cookie": f"theme=dark; {cookie}", "X-Hearth-Session": token})
+        self.assertEqual(both.status, 200)
+
+    def test_a_post_needs_the_servers_own_origin(self) -> None:
+        cookie, token = self.credentials()
+        session = {"Host": HOST, "Cookie": cookie, "X-Hearth-Session": token}
+        body = json.dumps({"question": "deployment owner"}).encode()
+        for origin in (None, "null", "http://127.0.0.1:3000", "http://evil.test"):
+            with self.subTest(origin=origin):
+                headers = session | ({"Origin": origin} if origin is not None else {})
+                self.assertEqual(self.app.respond("POST", "/api/search/report", body, headers).status, 403)
+        self.assertEqual(self.app.respond("POST", "/api/search/report", body, session | {"Origin": f"http://{HOST}"}).status, 200)
 
 
 class DashboardPageTests(unittest.TestCase):
@@ -459,17 +573,18 @@ class DashboardPageTests(unittest.TestCase):
         self.addCleanup(self.temporary_directory.cleanup)
         self.addCleanup(self.service.close)
         self.app = HearthWebApplication(self.service, "token")
+        self.call = signed_in(self.app)
 
     def test_the_home_page_is_the_dashboard_and_the_knowledge_page_moved(self) -> None:
-        home = self.app.respond("GET", "/token/", b"")
-        knowledge = self.app.respond("GET", "/token/knowledge", b"")
+        home = self.call("GET", "/")
+        knowledge = self.call("GET", "/knowledge")
 
         self.assertIn(b"Needs you", home.body)
         self.assertIn(b'href="knowledge"', home.body)
         self.assertIn(b"map-surface", knowledge.body)
 
     def test_the_shell_has_hub_tasks_and_knowledge_views_and_a_default_view_setting(self) -> None:
-        home = self.app.respond("GET", "/token/", b"").body.decode()
+        home = self.call("GET", "/").body.decode()
 
         for view in ("hub", "tasks", "knowledge"):
             with self.subTest(view=view):
@@ -482,13 +597,23 @@ class DashboardPageTests(unittest.TestCase):
         for name, kind in (("assets/dashboard.css", "text/css"), ("assets/dashboard.js", "application/javascript"),
                            ("assets/hub.js", "application/javascript")):
             with self.subTest(asset=name):
-                response = self.app.respond("GET", f"/token/{name}", b"")
+                response = self.call("GET", f"/{name}")
                 self.assertEqual((response.status, response.content_type.split(";")[0]), (200, kind))
                 # The SVG namespace is an identifier, not a request; nothing else may name another host.
                 body = response.body.decode().replace('"http://www.w3.org/2000/svg"', "")
                 self.assertNotRegex(body, r"https?://|@import|url\(")
                 self.assertNotIn("innerHTML", body)
                 self.assertNotIn("insertAdjacentHTML", body)
+
+
+@unittest.skipUnless(shutil.which("node"), "Node.js checks the dashboard's scripts when it is installed (TEST-4).")
+class DashboardScriptSyntaxTests(unittest.TestCase):
+    def test_every_dashboard_script_parses(self) -> None:
+        # On 2026-10-07 a constant named like an existing function stopped dashboard.js from loading at all.
+        for script in sorted((Path(__file__).parents[1] / "src/hearth/web_assets").glob("*.js")):
+            with self.subTest(script=script.name):
+                checked = subprocess.run(["node", "--check", str(script)], capture_output=True, text=True)
+                self.assertEqual(checked.returncode, 0, checked.stderr)
 
 
 class SearchReportEndpointTests(unittest.TestCase):
@@ -504,9 +629,10 @@ class SearchReportEndpointTests(unittest.TestCase):
         self.addCleanup(self.temporary_directory.cleanup)
         self.addCleanup(self.service.close)
         self.app = HearthWebApplication(self.service, "token")
+        self.call = signed_in(self.app)
 
     def ask(self, payload: dict) -> tuple[int, dict]:
-        response = self.app.respond("POST", "/token/api/search/report", json.dumps(payload).encode())
+        response = self.call("POST", "/api/search/report", json.dumps(payload).encode())
         return response.status, json.loads(response.body)
 
     def test_an_answer_carries_accepted_evidence_with_freshness_and_the_gates_limit(self) -> None:
