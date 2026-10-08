@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import re
 import shutil
 import subprocess
 import tempfile
@@ -133,6 +134,7 @@ class HearthWebServerTests(unittest.TestCase):
         self.assertEqual(bad_host_response.status, 400)
         self.assertEqual(root_response.getheader("Cache-Control"), "no-store")
         self.assertIn("default-src 'self'", root_response.getheader("Content-Security-Policy"))
+        self.assertNotRegex(root_response.getheader("Content-Security-Policy"), r"unsafe-inline|unsafe-eval")
         self.assertEqual(root_response.getheader("Referrer-Policy"), "no-referrer")
         self.assertIsNone(root_response.getheader("Access-Control-Allow-Origin"))
 
@@ -604,6 +606,47 @@ class DashboardPageTests(unittest.TestCase):
                 self.assertNotRegex(body, r"https?://|@import|url\(")
                 self.assertNotIn("innerHTML", body)
                 self.assertNotIn("insertAdjacentHTML", body)
+
+
+ASSETS = Path(__file__).parents[1] / "src/hearth/web_assets"
+HOSTILE_URLS = ["javascript:alert(1)", "JaVaScRiPt:alert(1)", " javascript:alert(1)", "data:text/html,<script>alert(1)</script>",
+                "http://example.test/pr/1", "//example.test/pr/1", "/local", "not a url", "", None]
+
+
+class HostileContentTests(unittest.TestCase):
+    """ADR-0037: agent-written text can never run in the dashboard, which would let it act with the person's session."""
+
+    def scripts(self) -> list[Path]:
+        return sorted(ASSETS.glob("*.js"))
+
+    def test_no_script_turns_text_into_markup_or_code(self) -> None:
+        sinks = r"innerHTML|outerHTML|insertAdjacentHTML|document\.write|\beval\(|new Function|srcdoc|javascript:|setTimeout\(\s*[\"'`]"
+        for script in self.scripts():
+            with self.subTest(script=script.name):
+                self.assertNotRegex(script.read_text(encoding="utf-8"), sinks)
+
+    def test_every_link_is_an_internal_route_or_passes_the_https_check(self) -> None:
+        for script in self.scripts():
+            for target in re.findall(r"\.href\s*=\s*([^;]+);", script.read_text(encoding="utf-8")):
+                with self.subTest(script=script.name, target=target):
+                    self.assertRegex(target.strip(), r"^(`#/|`knowledge#|safeLink\()")
+
+    def test_the_pages_have_no_inline_scripts_or_event_handlers(self) -> None:
+        for page in sorted(ASSETS.glob("*.html")):
+            with self.subTest(page=page.name):
+                html = page.read_text(encoding="utf-8")
+                self.assertNotRegex(html, r"<script(?![^>]*\bsrc=)[^>]*>")
+                self.assertNotRegex(html, r"\son[a-z]+\s*=")
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js runs the link check when it is installed (TEST-4).")
+    def test_safe_link_allows_only_https_urls(self) -> None:
+        source = re.search(r"^function safeLink\(.*?^}", (ASSETS / "dashboard.js").read_text(encoding="utf-8"), re.M | re.S)
+        self.assertIsNotNone(source, "dashboard.js defines safeLink")
+        cases = HOSTILE_URLS + ["https://github.com/gdcruz0911/hearth/pull/68"]
+        program = f"{source.group(0)}\nconsole.log(JSON.stringify({json.dumps(cases)}.map(safeLink)));"
+        result = subprocess.run(["node", "-e", program], capture_output=True, text=True, check=True)
+
+        self.assertEqual(json.loads(result.stdout), [None] * len(HOSTILE_URLS) + ["https://github.com/gdcruz0911/hearth/pull/68"])
 
 
 @unittest.skipUnless(shutil.which("node"), "Node.js checks the dashboard's scripts when it is installed (TEST-4).")

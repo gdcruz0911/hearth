@@ -23,6 +23,16 @@ function shown(value) {
   return value === null || value === undefined || value === "" ? "not reported" : String(value); // UI-8
 }
 
+function safeLink(url) {
+  // Only an absolute https URL may become a link, so script, data, and relative URLs never navigate or run.
+  if (typeof url !== "string") return null;
+  try {
+    return new URL(url).protocol === "https:" ? url : null;
+  } catch {
+    return null;
+  }
+}
+
 function badge(status) {
   const known = KNOWN.has(status);
   return el("span", `badge ${known ? status : "other"}`, known ? status : `${shown(status)} (unrecognized)`);
@@ -176,9 +186,10 @@ function detail(task) {
   title.append(el("h2", "task-goal", shown(task.goal)), badge(task.status));
   const where = el("p", "meta");
   where.append(`${shown(task.project)} · `, el("span", "id", task.id), " · ", el("span", "id", shown(task.branch)));
-  if (task.pr && task.pr.url) {
-    const link = el("a", "", `pull request #${task.pr.number}`);
-    link.href = task.pr.url;
+  if (task.pr) {
+    // A record's URL becomes a link only when it is https; anything else shows as plain text (ADR-0037).
+    const link = el("a", "", `pull request #${shown(task.pr.number)}`);
+    if (safeLink(task.pr.url)) link.href = safeLink(task.pr.url);
     link.rel = "noreferrer";
     where.append(" · ", link);
   }
