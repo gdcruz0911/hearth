@@ -8,6 +8,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -25,7 +26,9 @@ def signed_in(app: HearthWebApplication):
     launch = dict(app.respond("GET", app.launch_path, b"", {"Host": HOST}).headers)
     headers = {"Host": HOST, "Origin": f"http://{HOST}", "Cookie": launch["Set-Cookie"].split(";")[0],
                "X-Hearth-Session": launch["Location"].split("#session=")[1]}
-    return lambda method, path, body=b"": app.respond(method, path, body, headers)
+    call = lambda method, path, body=b"": app.respond(method, path, body, headers)
+    call.headers = headers
+    return call
 
 
 class FakeRelationshipIndex:
@@ -562,6 +565,95 @@ class SessionTests(unittest.TestCase):
                 headers = session | ({"Origin": origin} if origin is not None else {})
                 self.assertEqual(self.app.respond("POST", "/api/search/report", body, headers).status, 403)
         self.assertEqual(self.app.respond("POST", "/api/search/report", body, session | {"Origin": f"http://{HOST}"}).status, 200)
+
+
+class TaskPreviewTests(unittest.TestCase):
+    """ADR-0037 previews: single-use, two minutes, bound to session, task, action, input, and the state they were shown against."""
+
+    def setUp(self) -> None:
+        self.temporary_directory = tempfile.TemporaryDirectory()
+        self.service = HearthService(Path(self.temporary_directory.name) / "hearth.sqlite")
+        self.addCleanup(self.temporary_directory.cleanup)
+        self.addCleanup(self.service.close)
+        self.state = {"t1": "waiting:1:m3", "t2": "waiting:1:m3"}  # Equal, so only the task binding can refuse t2.
+        self.applied: list[tuple[str, str, dict]] = []
+        self.app = HearthWebApplication(
+            self.service, "token",
+            workbench_task_state=lambda task_id, action: self.state.get(task_id),
+            workbench_task_action=lambda task_id, action, arguments: self.applied.append((task_id, action, dict(arguments))) or {"done": True},
+        )
+        self.call = signed_in(self.app)
+
+    def preview(self, task_id: str = "t1", action: str = "answer", arguments: dict | None = None) -> str:
+        body = json.dumps({"arguments": arguments if arguments is not None else {"text": "Use the staging bucket."}}).encode()
+        response = self.call("POST", f"/api/tasks/{task_id}/actions/{action}/preview", body)
+        self.assertEqual(response.status, 200, response.body)
+        return json.loads(response.body)["preview"]["id"]
+
+    def apply(self, preview_id: str, task_id: str = "t1", action: str = "answer", call=None):
+        return (call or self.call)("POST", f"/api/tasks/{task_id}/actions/{action}/apply", json.dumps({"preview": preview_id}).encode())
+
+    def test_an_applied_preview_runs_the_previewed_action_once(self) -> None:
+        preview_id = self.preview()
+
+        self.assertEqual(self.applied, [])
+        self.assertEqual(self.apply(preview_id).status, 200)
+        self.assertEqual(self.applied, [("t1", "answer", {"text": "Use the staging bucket."})])
+        self.assertEqual(self.apply(preview_id).status, 409)
+        self.assertEqual(len(self.applied), 1)
+
+    def test_an_expired_preview_is_refused(self) -> None:
+        with mock.patch("hearth.web.time.monotonic", return_value=1000.0):
+            preview_id = self.preview()
+        with mock.patch("hearth.web.time.monotonic", return_value=1000.0 + 121):
+            self.assertEqual(self.apply(preview_id).status, 409)
+        self.assertEqual(self.applied, [])
+
+    def test_a_preview_applied_to_another_task_or_action_is_refused_and_used_up(self) -> None:
+        for task_id, action in (("t2", "answer"), ("t1", "cancel")):
+            with self.subTest(task=task_id, action=action):
+                preview_id = self.preview()
+                self.assertEqual(self.apply(preview_id, task_id, action).status, 409)
+                self.assertEqual(self.apply(preview_id).status, 409)
+        self.assertEqual(self.applied, [])
+
+    def test_a_preview_from_another_session_is_refused(self) -> None:
+        preview_id = self.preview()
+        # ADR-0038 may issue a new session to the app; simulate one so the preview's session no longer matches.
+        self.app._session = None
+        self.app._launch_token = "second"
+        other = signed_in(self.app)
+
+        self.assertEqual(self.apply(preview_id, call=other).status, 409)
+        self.assertEqual(self.applied, [])
+
+    def test_a_change_in_the_task_after_the_preview_is_refused(self) -> None:
+        preview_id = self.preview()
+        self.state["t1"] = "waiting:2:m4"
+
+        self.assertEqual(self.apply(preview_id).status, 409)
+        self.assertEqual(self.applied, [])
+
+    def test_previews_are_refused_for_a_get_an_unknown_action_a_missing_task_or_bad_input(self) -> None:
+        preview_id = self.preview()
+        self.assertNotEqual(self.call("GET", f"/api/tasks/t1/actions/answer/apply?preview={preview_id}").status, 200)
+        for path, body in (("/api/tasks/t1/actions/publish/preview", b"{}"),
+                           ("/api/tasks/nope/actions/answer/preview", b"{}"),
+                           ("/api/tasks/t1/actions/answer/preview", json.dumps({"arguments": {"text": 3}}).encode())):
+            with self.subTest(path=path, body=body):
+                self.assertNotEqual(self.call("POST", path, body).status, 200)
+        self.assertEqual(self.applied, [])
+
+    def test_an_apply_from_a_foreign_origin_is_refused(self) -> None:
+        preview_id = self.preview()
+        foreign = {**self.call.headers, "Origin": "http://127.0.0.1:3000"}
+        self.assertEqual(self.apply(preview_id, call=lambda method, path, body: self.app.respond(method, path, body, foreign)).status, 403)
+        self.assertEqual(self.applied, [])
+
+    def test_task_actions_do_not_exist_until_the_cli_passes_them(self) -> None:
+        call = signed_in(HearthWebApplication(self.service, "plain"))
+
+        self.assertEqual(call("POST", "/api/tasks/t1/actions/cancel/preview", b"{}").status, 404)
 
 
 class DashboardPageTests(unittest.TestCase):
