@@ -49,6 +49,12 @@ class WorkerIsolationTests(unittest.TestCase):
 
 class TaskTestCase(unittest.TestCase):
     def setUp(self) -> None:
+        # Git's automatic maintenance can run detached after a commit and still be writing .git/objects when tearDown
+        # removes the directory, which failed CI once with "Directory not empty" (2026-10-08).
+        patch = mock.patch.dict(os.environ, {"GIT_CONFIG_COUNT": "2", "GIT_CONFIG_KEY_0": "gc.auto", "GIT_CONFIG_VALUE_0": "0",
+                                             "GIT_CONFIG_KEY_1": "maintenance.auto", "GIT_CONFIG_VALUE_1": "false"})
+        patch.start()
+        self.addCleanup(patch.stop)
         self.temporary_directory = tempfile.TemporaryDirectory()
         self.home = Path(self.temporary_directory.name)
         self.repo = self.home / "project"
