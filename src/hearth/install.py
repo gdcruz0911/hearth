@@ -18,6 +18,7 @@ import json
 import os
 import secrets
 import shutil
+import socket
 import subprocess
 import sys
 import tarfile
@@ -27,6 +28,7 @@ from pathlib import Path
 ROOT = Path.home() / "Library/Application Support/Hearth/runtime"
 LOCK = "runtime.lock"
 FORMAT = "hearth-runtime-v1"
+READY_SECONDS = 30  # The app's own wait for a backend's handshake.
 # Variables that would quietly load other code into the released runtime, such as the working checkout.
 SCRUBBED = ("PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP", "PYTHONUSERBASE", "VIRTUAL_ENV", "__PYVENV_LAUNCHER__")
 
@@ -122,16 +124,20 @@ def _export(repo: Path, commit: str, destination: Path) -> None:
 def _check_backend(python: str) -> None:
     """Start the installed backend as the app would, and require the handshake, the challenge, and the dashboard's script."""
     with tempfile.TemporaryDirectory() as scratch:
-        read, write = os.pipe()
+        ours, theirs = socket.socketpair()  # What the app's Node hands the backend, so the check passes only if the app's would.
         backend = subprocess.Popen([python, "-m", "hearth.cli", "--database", f"{scratch}/check.sqlite", "web", "--desktop",
-                                    "--handshake-fd", str(write)], pass_fds=(write,), stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-                                   env=clean_environment(HEARTH_HOME=f"{scratch}/hearth"), cwd=scratch)
-        os.close(write)
+                                    "--handshake-fd", str(theirs.fileno())], pass_fds=(theirs.fileno(),), stdout=subprocess.DEVNULL,
+                                   stderr=subprocess.DEVNULL, env=clean_environment(HEARTH_HOME=f"{scratch}/hearth"), cwd=scratch)
+        theirs.close()
         try:
-            with os.fdopen(read, encoding="utf-8") as pipe:
-                line = pipe.readline()
+            ours.settimeout(READY_SECONDS)  # As long as the app waits; a backend that stalls fails here instead of hanging.
+            try:
+                with ours.makefile(encoding="utf-8") as pipe:
+                    line = pipe.readline()
+            except TimeoutError:
+                raise InstallError(f"The installed backend did not start within {READY_SECONDS} seconds.") from None
             if not line:
-                raise InstallError(f"The installed backend did not start: {backend.communicate(timeout=30)[1].strip()[-500:]}")
+                raise InstallError(f"The installed backend stopped before its handshake (exit code {backend.wait(timeout=30)}).")
             handshake = json.loads(line)
             challenge = secrets.token_hex(32)
             answer = json.loads(_get(handshake["port"], f"/desktop/challenge?c={challenge}", {})[1])["answer"]
@@ -142,10 +148,9 @@ def _check_backend(python: str) -> None:
             if status != 200 or not body:
                 raise InstallError(f"The installed backend did not serve the dashboard's script (HTTP {status}), so its web assets are missing.")
         finally:
+            ours.close()
             backend.terminate()
             backend.wait(timeout=30)
-            if backend.stderr:
-                backend.stderr.close()
 
 
 def _get(port: int, path: str, headers: dict[str, str]) -> tuple[int, bytes]:

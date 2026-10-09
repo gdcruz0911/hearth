@@ -154,6 +154,14 @@ class RuntimeInstallTests(unittest.TestCase):
         self.assertEqual((self.runtimes / "current").resolve(), first.resolve())
         self.assertEqual(sorted(path.name for path in self.runtimes.iterdir()), sorted(["current", first.name]))
 
+    def test_a_backend_that_never_hands_over_its_session_fails_the_install_within_the_apps_wait(self) -> None:
+        (self.repo / "hearth/cli.py").write_text("import time\ntime.sleep(60)\n", encoding="utf-8")  # Stalls, as a reverse DNS lookup did.
+        self.commit()
+
+        with unittest.mock.patch.object(install, "READY_SECONDS", 2), self.assertRaisesRegex(install.InstallError, "within 2 seconds"):
+            self.install()
+        self.assertEqual([path.name for path in self.runtimes.iterdir()], [])
+
     def test_a_ref_without_a_lock_is_refused(self) -> None:
         git(self.repo, "rm", "-q", install.LOCK)
         self.commit()
