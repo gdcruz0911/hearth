@@ -2488,12 +2488,15 @@ class DetachedResumeTests(VerifyTestCase):
     def finished(self, pid: int) -> None:
         """Let a resumed child end before its task folder is removed, and stop it if it does not."""
         for _ in range(200):
+            with contextlib.suppress(ChildProcessError):  # Already reaped by resume_detached's own reaper.
+                if os.waitpid(pid, os.WNOHANG)[0]:
+                    return  # Ended, and reaped here, as when its reaper could not start.
             try:
                 os.kill(pid, 0)
             except ProcessLookupError:
                 return
             time.sleep(0.05)
-        with contextlib.suppress(ProcessLookupError):
+        with contextlib.suppress(ProcessLookupError, PermissionError):
             os.killpg(pid, signal.SIGKILL)
 
     def answered_task(self) -> dict:
@@ -2645,6 +2648,22 @@ class DetachedResumeTests(VerifyTestCase):
         started["status"] = "running"  # The approved implementer has started; its stop reason still reads tests_to_approve.
         record.write_text(json.dumps(started), encoding="utf-8")
         self.assertIsNone(tasks.dashboard_task_state(task["id"], "approve-tests"))
+
+    def test_a_resumed_child_is_recorded_even_if_its_reaper_cannot_start(self) -> None:
+        task = self.waiting_for_test_approval()
+        start = threading.Thread.start
+
+        def no_reaper(thread) -> None:
+            if getattr(thread._target, "__name__", "") == "wait":  # Only the reaper; the fake agents still run.
+                raise RuntimeError("can't start new thread")
+            start(thread)
+
+        with mock.patch.object(threading.Thread, "start", no_reaper):
+            pid = tasks.resume_detached(task["id"], "approve-tests")
+
+        self.assertIsInstance(pid, int)
+        self.assertEqual(json.loads((self.home / ".hearth/tasks" / task["id"] / "resume.json").read_text(encoding="utf-8"))["pid"], pid)
+        self.assertIsNone(tasks.dashboard_task_state(task["id"], "approve-tests"))  # Still blocks a second resume.
 
     def test_resuming_refuses_a_malformed_task_id(self) -> None:
         self.assertIsNone(tasks.resume_detached("../elsewhere", "loop"))

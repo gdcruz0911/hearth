@@ -1031,10 +1031,12 @@ def resume_detached(task_id: str, command: str) -> int | None:
     with (task_dir / "resume.log").open("ab") as log:
         process = subprocess.Popen([sys.executable, "-m", "hearth.cli", *RESUME[command], task_id], stdin=subprocess.DEVNULL,
                                    stdout=log, stderr=log, start_new_session=True)
-    threading.Thread(target=process.wait, daemon=True).start()  # Reaped when it ends, so a long-lived backend gathers no zombies.
     pid = process.pid
     # Until it ends, no second resume starts: a resumed approval keeps its state while it waits for a slot.
     (task_dir / "resume.json").write_text(json.dumps({"pid": pid, "identity": _identity(pid), "command": command}), encoding="utf-8")
+    # Recorded first, so a reaper that cannot start leaves no untracked child; Python then reaps it on its next subprocess.
+    with contextlib.suppress(RuntimeError):
+        threading.Thread(target=process.wait, daemon=True).start()  # Reaped when it ends, so a long-lived backend gathers no zombies.
     return pid
 
 
