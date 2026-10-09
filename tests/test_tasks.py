@@ -2742,12 +2742,12 @@ class DetachedResumeTests(VerifyTestCase):
 
         result = tasks.dashboard_action(task["id"], "approve-tests", {}, tasks.dashboard_task_state(task["id"], "approve-tests"))
         self.assertIsInstance(result["loop"], int)
-        failed = self.wait_until(lambda task: "approval_failed" in task)
+        # The child records the failure under the lock and then exits; until it has, a second resume is still blocked.
+        failed = self.wait_until(lambda task: "approval_failed" in task and tasks.dashboard_task_state(task["id"], "approve-tests"))
 
         self.assertEqual((failed["status"], failed["stop_reason"], [run["role"] for run in failed["runs"]]), ("waiting", "tests_to_approve", ["test"]))
         self.assertNotIn("tests_approved", failed)
         self.assertIn("could not start", failed["approval_failed"]["error"])
-        self.assertIsNotNone(tasks.dashboard_task_state(task["id"], "approve-tests"))
         self.assertEqual(self.cli("task", "approve-tests", task["id"])[0], 0)  # The retry, in-process with the fake implementer.
         retried = self.only_task()
         self.assertEqual((retried["status"], [run["role"] for run in retried["runs"]]), ("done", ["test", "implement"]))
