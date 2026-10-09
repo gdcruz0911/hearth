@@ -39,7 +39,7 @@ function waitingTask(home: Scratch, env: Record<string, string>): string {
 }
 
 test("a task answered in the app finishes verification and review after the app quits, and shows as done on reopening", async (t) => {
-  const home = scratch(t);
+  const home = scratch();
   const env = fakeAgents(home);
   const id = waitingTask(home, env);
   const record = () => JSON.parse(readFileSync(join(home.dir, "hearth/tasks", id, "task.json"), "utf8"));
