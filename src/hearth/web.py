@@ -698,19 +698,10 @@ class HearthWebServer:
         service: HearthService,
         *,
         port: int,
-        choose_file: Callable[[], Path] = None,
-        source_roots: tuple[Path, ...] = (),
         browser_opener: Callable[[str], bool] = webbrowser.open,
-        workbench_tasks: Callable[[], Mapping[str, Any]] | None = None,
-        workbench_transcript: Callable[[str, str, int], Mapping[str, Any] | None] | None = None,
-        workbench_diff: Callable[[str], Mapping[str, Any] | None] | None = None,
-        workbench_task_state: Callable[[str, str], str | None] | None = None,
-        workbench_task_action: Callable[[str, str, Mapping[str, str], str], Mapping[str, Any] | None] | None = None,
-        rebuild_state: Path | None = None,
+        **application: Any,  # HearthWebApplication's options, such as choose_file and the workbench callables.
     ):
-        token = secrets.token_urlsafe(32)
-        self._application = HearthWebApplication(service, token, choose_file, source_roots, workbench_tasks, workbench_transcript, workbench_diff,
-                                                 workbench_task_state, workbench_task_action, rebuild_state)
+        self._application = HearthWebApplication(service, secrets.token_urlsafe(32), **application)
         self._browser_opener = browser_opener
         self._http_server = _LoopbackHTTPServer(("127.0.0.1", port), _handler_type(self._application))
         self._http_server.timeout = 0.5
