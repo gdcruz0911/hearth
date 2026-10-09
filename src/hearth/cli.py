@@ -12,7 +12,7 @@ import threading
 import time
 from pathlib import Path
 
-from . import maintenance
+from . import maintenance, tools
 from .domain import (
     CollectionHealth,
     DocumentInspection,
@@ -130,6 +130,8 @@ def main(argv: list[str] | None = None) -> int:
     inspector.add_argument("--json", action="store_true", help="Print the document's provenance metadata as one JSON value.")
     sources = subcommands.add_parser("sources", help="Preview or import supported files from connected local folders.")
     sources.add_argument("action", choices=("preview", "import"))
+    tools_report = subcommands.add_parser("tools", help="Report which tools Hearth can find, and whether local inference can run.")
+    tools_report.add_argument("--json", action="store_true", help="Print one JSON object.")
     web = subcommands.add_parser("web", help="Run the local Hearth web interface on this Mac only.")
     web.add_argument("--port", type=_port, help="Loopback port to use (default: 8765).")
     web.add_argument("--no-open", action="store_true", help="Do not open the local interface in the default browser.")
@@ -242,6 +244,8 @@ def _run(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     args.embedding_model = args.embedding_model or profile.embedding_model
     args.index_directory = args.index_directory or profile.index_directory
     args.reranker_model = args.reranker_model or profile.reranker_model
+    if args.command == "tools":
+        return _print_tools(tools.report(args.embedding_model, args.reranker_model), args.json)
     args.ocr_output_directory = args.ocr_output_directory or profile.ocr_output_directory
     args.retain_ocr_output = args.retain_ocr_output or profile.retain_ocr_output
     args.relationship_minimum_score = (
@@ -333,6 +337,10 @@ def _run(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
             # A desktop shell stops its backend with SIGTERM: finish the current request, then shut down as Ctrl+C does.
             signal.signal(signal.SIGTERM, lambda signum, frame: server.request_stop())
             if args.desktop:
+                # The app was opened from Finder with a bare PATH; every task, resumed loop, and tmux session it starts
+                # inherits this one, so they find the tools a terminal would (ADR-0038). Only here: a terminal's PATH,
+                # and a test suite run with the agents off it, stay as they are.
+                os.environ["PATH"] = tools.with_tool_dirs(os.environ.get("PATH", ""))
                 # ADR-0038: the secrets go only to the app's pipe, never to output, logs, or disk.
                 with os.fdopen(args.handshake_fd, "w", encoding="utf-8") as pipe:
                     pipe.write(json.dumps(server.start_desktop_session()) + "\n")
@@ -456,6 +464,27 @@ def _print_source_import_result(result: SourceImportResult) -> None:
         if len(result.failures) > 20:
             print(f"- {len(result.failures) - 20} additional files")
     print("Next: run health, open web, or preview sources again.")
+
+
+def _print_tools(found: dict, as_json: bool) -> int:
+    """Exit 1 when tasks cannot run: git is missing, or neither agent that implements is."""
+    if as_json:
+        print(json.dumps(found))
+    else:
+        width = max(len(tool["name"]) for tool in found["tools"])
+        for tool in found["tools"]:
+            where = f"{tool['path']}  {tool['version'] or 'version unknown'}" if tool["path"] else "missing"
+            print(f"{tool['name']:<{width}}  {tool['purpose']}: {where}")
+        inference = found["inference"]
+        print(f"{'mlx':<{width}}  local embeddings and reranking: {'imports' if inference['mlx'] else 'cannot import: ' + inference['error']}")
+        for role, model in inference["models"].items():
+            state = "not set in the profile" if model is None else f"{model['path']} {'on disk' if model['on_disk'] else 'missing'}"
+            print(f"{'':<{width}}  {role} model: {state}")
+    missing = [tool["name"] for tool in found["tools"] if not tool["path"]]
+    if missing:
+        print(f"Missing: {', '.join(missing)}. Hearth looked in PATH and {', '.join(tools.TOOL_DIRS)}.\n"
+              "Next: install what you need, or link it into one of those folders, then run hearth tools again", file=sys.stderr)
+    return 0 if found["ready"] else 1
 
 
 def _print_collection_health(health: CollectionHealth) -> None:

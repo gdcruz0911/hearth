@@ -6,7 +6,7 @@ Hearth keeps its records and settings in `~/.hearth`; set `HEARTH_HOME` to an ab
 Which provider, model, and effort fill each role (implement, test, verify, review, retro, and the supervisor) is set in `roles.md` in Hearth's home, and per project in `roles/<project>.md` (ADR-0039): one `## <role>` heading per role with a table of `order | provider | model | effort` rows, tried in order. Any model may check any other. Without a roles file, `~/.hearth/models.json` sets one model per provider, the checking roles try providers other than the implementer's first, and `--model` overrides both for one task. Each task keeps the roles it started with. Every worker, whatever its provider, receives the project's `AGENTS.md` and the files it imports with a standalone `@path` line, as they were when the task started; a later edit does not reach the task, and a `CLAUDE.md` beside it is not read. `hearth ask` is not a role: once `roles.md` exists it uses Hearth's built-in model pin unless you pass `--model`.
 A test fails when a command is missing from this table, so it grows with every pull request that adds one.
 While a Hearth update holds the maintenance lock (`~/.hearth/maintenance.lock`), every command that changes Hearth's data refuses and names the command to run again afterwards.
-That includes the knowledge commands and `hearth web`, which open the database; `task list`, `task show`, `stats`, and `usage` still work.
+That includes the knowledge commands and `hearth web`, which open the database; `task list`, `task show`, `stats`, `tools`, and `usage` still work.
 A running `hearth web` holds an update off until it stops.
 
 | Command | What it does |
@@ -50,6 +50,7 @@ A running `hearth web` holds an update off until it stops.
 | `hearth task open <id>` | Open a task's worktree in VS Code. |
 | `hearth loop <id>` | Review a finished task with the review role and fix it, up to `--rounds` times, until approved. |
 | `hearth verify-eval <cases> --verifier NAME` | Score a verifier on seeded changes whose stated behavior does or does not hold, and append the results to `~/.hearth/evals/verifies.jsonl`. |
+| `hearth tools` | Show where Hearth finds `git`, `claude`, `codex`, `agy`, `tmux`, `gh`, and the PDF and OCR tools, with each version; whether MLX imports; and whether the profile's embedding and reranker model folders are on disk. Nothing is downloaded or loaded. It looks where the app's backend does: `hearth web --desktop` adds `~/.local/bin`, `/opt/homebrew/bin`, `/opt/homebrew/sbin`, and `/usr/local/bin` ahead of `PATH` where they exist and are missing, so the app opened from Finder, and every task it starts, finds what a terminal would. Exits 1 when `git` or both `claude` and `codex` are missing; `--json` prints one object. |
 | `hearth stats` | Show runs, usable replies, pass rates, time, models, and effort per provider and role, with escapes and plan use; `--json` for the command center. |
 | `hearth review-eval <cases> --reviewer NAME` | Score a reviewer on seeded changes, some with planted bugs, and append the results to `~/.hearth/evals/reviews.jsonl`. |
 | `hearth open <project>` | Open or attach to the project's tmux session: an editor, a live task list, and interactive tasks. |
