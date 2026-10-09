@@ -135,6 +135,7 @@ class UsageTests(unittest.TestCase):
             mock.patch("sys.stdin", io.StringIO(json.dumps(_claude_status(12, 18)))),
             contextlib.redirect_stdout(output),
         ):
+            os.environ.pop("HEARTH_HOME", None)  # Restored by the patch; a set HEARTH_HOME would move the samples.
             status = main(["usage", "statusline"])
 
         self.assertEqual(status, 0)
@@ -175,6 +176,7 @@ class StatsTests(unittest.TestCase):
         patch = mock.patch.dict(os.environ, {"HOME": str(self.home)})
         patch.start()
         self.addCleanup(patch.stop)
+        os.environ.pop("HEARTH_HOME", None)  # Restored by the patch; a set HEARTH_HOME would move these records.
         self.addCleanup(self.temporary_directory.cleanup)
 
     def task(self, task_id: str, status: str, runs: list[dict], escapes: int = 0) -> None:

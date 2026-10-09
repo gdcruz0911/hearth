@@ -25,6 +25,7 @@ from urllib.parse import urlsplit
 from hearth.domain import DocumentRelationship
 from hearth.embedding import IndexBuildCancelled, IndexBuildStopped, IndexBusy
 from hearth.service import HearthService
+from hearth.store import SQLiteStore
 from hearth import web
 from hearth.web import HearthWebApplication, HearthWebServer
 
@@ -780,10 +781,15 @@ class DesktopModeTests(unittest.TestCase):
         self.temporary_directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary_directory.cleanup)
         self.root = Path(self.temporary_directory.name)
+        # The app's backend reads its data only from <HEARTH_HOME>/profile.json; HOME is this folder, so that is ~/.hearth here.
+        SQLiteStore(self.root / "web.sqlite").close()
+        (self.root / ".hearth").mkdir()
+        (self.root / ".hearth/profile.json").write_text(json.dumps({"format": "hearth-runtime-profile-v1", "database": str(self.root / "web.sqlite")}),
+                                                        encoding="utf-8")
 
     def backend(self) -> tuple[subprocess.Popen, dict]:
         read, write = os.pipe()
-        process = subprocess.Popen([sys.executable, "-m", "hearth.cli", "--database", str(self.root / "web.sqlite"), "web", "--desktop",
+        process = subprocess.Popen([sys.executable, "-m", "hearth.cli", "web", "--desktop",
                                     "--handshake-fd", str(write)], env=self.env(), pass_fds=(write,), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                    text=True)
         os.close(write)
@@ -887,7 +893,7 @@ class DesktopModeTests(unittest.TestCase):
                 self.assertIn(named, result.stderr)
 
     def test_the_handshake_goes_only_to_a_writable_pipe(self) -> None:
-        command = [sys.executable, "-m", "hearth.cli", "--database", str(self.root / "web.sqlite"), "web", "--desktop", "--handshake-fd"]
+        command = [sys.executable, "-m", "hearth.cli", "web", "--desktop", "--handshake-fd"]
         stdout = subprocess.run([*command, "1"], env=self.env(), capture_output=True, text=True, timeout=30)
         saved = self.root / "handshake.txt"
         with saved.open("w") as file:
@@ -907,7 +913,7 @@ class DesktopModeTests(unittest.TestCase):
 
     def test_the_handshake_may_go_to_an_unnamed_socket_pair_but_not_a_named_socket(self) -> None:
         # Electron's Node gives a child an unnamed socket pair for an extra stdio pipe, which a FIFO-only check refused (2026-10-09).
-        command = [sys.executable, "-m", "hearth.cli", "--database", str(self.root / "web.sqlite"), "web", "--desktop", "--handshake-fd"]
+        command = [sys.executable, "-m", "hearth.cli", "web", "--desktop", "--handshake-fd"]
         ours, theirs = socket.socketpair()
         process = subprocess.Popen([*command, str(theirs.fileno())], env=self.env(), pass_fds=(theirs.fileno(),),
                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -929,7 +935,7 @@ class DesktopModeTests(unittest.TestCase):
         read, write = os.pipe()  # This test keeps the read end, so the handshake still has somewhere to go.
         launcher = subprocess.run([sys.executable, "-c", """
 import subprocess, sys
-backend = subprocess.Popen([sys.executable, "-m", "hearth.cli", "--database", sys.argv[1], "web", "--desktop", "--handshake-fd", sys.argv[2]],
+backend = subprocess.Popen([sys.executable, "-m", "hearth.cli", "web", "--desktop", "--handshake-fd", sys.argv[2]],
                            pass_fds=(int(sys.argv[2]),), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 print(backend.pid)  # Then the app exits at once, before the backend has finished starting.
 """, str(self.root / "web.sqlite"), str(write)], env=self.env(), pass_fds=(write,), capture_output=True, text=True, timeout=30)
@@ -956,7 +962,7 @@ print(backend.pid)  # Then the app exits at once, before the backend has finishe
         read, write = os.pipe()
         launcher = subprocess.Popen([sys.executable, "-c", """
 import subprocess, sys, time
-backend = subprocess.Popen([sys.executable, "-m", "hearth.cli", "--database", sys.argv[1], "web", "--desktop", "--handshake-fd", sys.argv[2]],
+backend = subprocess.Popen([sys.executable, "-m", "hearth.cli", "web", "--desktop", "--handshake-fd", sys.argv[2]],
                            pass_fds=(int(sys.argv[2]),), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 print(backend.pid, flush=True)
 time.sleep(60)
@@ -991,7 +997,7 @@ time.sleep(60)
         for flags in ([], ["--desktop"]):
             with self.subTest(flags=flags):
                 read, write = os.pipe()
-                result = subprocess.run([sys.executable, "-m", "hearth.cli", "--database", str(self.root / "web.sqlite"), "web", "--no-open",
+                result = subprocess.run([sys.executable, "-m", "hearth.cli", "web", "--no-open",
                                          *(flags + ["--handshake-fd", str(write)] if flags else [])], env=self.env(HEARTH_TASK="20260927-000000"),
                                         pass_fds=(write,), capture_output=True, text=True, timeout=30)
                 os.close(write)
@@ -1004,7 +1010,7 @@ time.sleep(60)
         launcher = subprocess.Popen([sys.executable, "-c", """
 import json, os, subprocess, sys, time
 read, write = os.pipe()
-backend = subprocess.Popen([sys.executable, "-m", "hearth.cli", "--database", sys.argv[1], "web", "--desktop", "--handshake-fd", str(write)],
+backend = subprocess.Popen([sys.executable, "-m", "hearth.cli", "web", "--desktop", "--handshake-fd", str(write)],
                            pass_fds=(write,), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 os.close(write)
 print(backend.pid, json.loads(os.fdopen(read).readline())["port"], flush=True)
