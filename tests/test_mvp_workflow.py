@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import contextlib
 import io
+import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from hearth.cli import main
 
@@ -13,6 +15,9 @@ class MvpWorkflowTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary_directory = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary_directory.name)
+        home = mock.patch.dict(os.environ, {"HOME": str(self.root)})  # Writers take the maintenance lock under ~/.hearth.
+        home.start()
+        self.addCleanup(home.stop)
         self.database = self.root / "hearth.sqlite"
         fixture = Path(__file__).parent / "fixtures" / "public" / "evaluation-note.md"
         self.note = self.root / fixture.name
