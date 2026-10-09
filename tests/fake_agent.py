@@ -9,12 +9,14 @@ A prompt that starts with "# Ask" is answered with FAKE_ASK, by default a reply 
 A prompt that starts with "# Retro" is answered with the next reply in FAKE_RETRO: proposal, guard, or garbage.
 An editing or idle run also writes FAKE_OUTBOX, if set, to .hearth/outbox.jsonl as board messages,
 and an editing run appends FAKE_EXTRA, if set, to hello.txt, and ends with a PR title line unless FAKE_TITLE is none.
+An editing run first runs FAKE_RUN, if set, as a shell command in the worktree.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -122,6 +124,8 @@ def main() -> int:
     if scenario == "idle":
         finish("")
         return 0
+    if os.environ.get("FAKE_RUN"):
+        subprocess.run(os.environ["FAKE_RUN"], shell=True, check=True)  # The worker runs the project's code, as real agents do.
     if scenario == "rewrite":
         Path("hello.txt").write_text("rewritten\n", encoding="utf-8")
     with Path("hello.txt").open("a", encoding="utf-8") as file:
