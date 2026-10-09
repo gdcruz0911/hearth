@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import shlex
 import sys
 from pathlib import Path
 
+from . import maintenance
 from .domain import (
     CollectionHealth,
     DocumentInspection,
@@ -151,6 +153,18 @@ def main(argv: list[str] | None = None) -> int:
         help="Connected local folder. Defaults to Desktop, Documents, and Downloads when omitted.",
     )
     args = parser.parse_args(argv)
+    command = " ".join(filter(None, (args.command, getattr(args, f"{args.command}_command", None))))
+    if not maintenance.writes(command):
+        return _run(parser, args)
+    try:
+        with maintenance.writing(Path.home() / ".hearth"):  # ADR-0038: held for the whole command, so no update starts under it.
+            return _run(parser, args)
+    except maintenance.Held as exc:
+        print(f"{exc}\nNext: once the update finishes, hearth {shlex.join(sys.argv[1:] if argv is None else argv)}", file=sys.stderr)
+        return 1
+
+
+def _run(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     if args.command == "usage":
         return usage.run(args)
     if args.command in ("task", "open", "loop"):

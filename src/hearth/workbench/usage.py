@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import sys
 import time
 from datetime import datetime
 from pathlib import Path
+
+from .. import maintenance
 
 DAY = 86_400
 
@@ -24,7 +27,8 @@ def run(args: argparse.Namespace) -> int:
     samples = home / ".hearth/usage/claude-limits.jsonl"
     if args.usage_command == "statusline":
         status = json.load(sys.stdin)
-        record_statusline(status, samples)
+        with contextlib.suppress(maintenance.Held), maintenance.writing(home / ".hearth"):
+            record_statusline(status, samples)  # Skipped during an update; the statusline itself must never fail.
         print(_statusline(status.get("rate_limits") or {}))
         return 0
     rows = report(codex_limits(home / ".codex/sessions"), claude_limits(samples))
