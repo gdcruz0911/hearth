@@ -1,10 +1,13 @@
 // The Hearth app (ADR-0038): one window on the backend it started, credentials held here and never given to the page.
 
 import { app, BrowserWindow, dialog, Menu, session, shell, type Session } from "electron";
+import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { get, launch, type Backend } from "./backend.js";
 import { isExternalLink, isOwned, withSessionHeader } from "./guard.js";
+import { backendCommand, hearthHome, profilePath, profilePresent, type BackendCommand } from "./runtime.js";
 
 interface Running extends Backend {
   session: Session;
@@ -14,15 +17,6 @@ let running: Running | null = null;
 let window: BrowserWindow | null = null;
 let quitting = false;
 let stoppedReason = "";
-
-// Development only: the backend command as a JSON list. D3 replaces it with the managed runtime under Application Support.
-function backendCommand(): string[] {
-  const command = JSON.parse(process.env.HEARTH_BACKEND ?? "null") as unknown;
-  if (!Array.isArray(command) || command.length === 0 || !command.every((part) => typeof part === "string")) {
-    throw new Error("Set HEARTH_BACKEND to the backend command, such as [\"/path/to/python\", \"-m\", \"hearth.cli\", \"web\", \"--desktop\", \"--handshake-fd\", \"3\"].");
-  }
-  return command;
-}
 
 // One start at a time: a backend is not in `running` until its handshake succeeds, so `starting` covers the wait.
 let starting: Promise<void> | null = null;
@@ -34,13 +28,21 @@ function start(): Promise<void> {
 
 async function launchBackend(): Promise<void> {
   stoppedReason = "";
+  const command = backendCommand();
+  if ("problem" in command) return void showStopped(command.problem);
+  // The same profile wherever the app was opened from; without one, nothing starts until the person sets it up.
+  const profile = profilePath();
+  if (!profilePresent(profile) && !await setUp(command, profile, showStopped(`Hearth is not set up yet: there is no profile at ${profile}.`))) {
+    return void showStopped(`Hearth needs a profile at ${profile} that names your knowledge base. Choose Hearth > Restart Backend to set one up.`);
+  }
   let backend: Backend;
   console.log("Hearth: starting the backend.");  // Lifecycle lines only; the handshake's secrets are never logged.
   try {
-    backend = await launch(backendCommand(), process.env);
+    // Started in the home folder, so nothing it does can land in whatever folder the app was opened from.
+    backend = await launch([...command.prefix, "--profile", profile, "web", "--desktop", "--handshake-fd", "3"], command.env, homedir());
   } catch (error) {
     console.log(`Hearth: the backend did not start: ${(error as Error).message}`);
-    return showStopped(`Hearth could not start its backend. ${(error as Error).message}`);
+    return void showStopped(`Hearth could not start its backend. ${(error as Error).message}`);
   }
   console.log(`Hearth: the backend is ready at ${backend.origin}.`);
   // A fresh in-memory partition per backend: nothing from an earlier backend's session can reach this one.
@@ -69,6 +71,36 @@ async function launchBackend(): Promise<void> {
   openWindow();
 }
 
+// Setup, when there is no profile: point it at an existing knowledge base, or create a new one. The CLI writes the profile and
+// checks the data, so these rules live in one place; it never overwrites a profile or changes a chosen database.
+// The dialogs are sheets on the app's window: one with no window would be app-modal, and the app could not quit while it is open.
+async function setUp(command: BackendCommand, profile: string, parent: BrowserWindow): Promise<boolean> {
+  for (;;) {
+    if (parent.isDestroyed()) return false;
+    const { response } = await dialog.showMessageBox(parent, {
+      type: "info", buttons: ["Choose Existing Database…", "Create New Knowledge Base…", "Quit"], defaultId: 0, cancelId: 2,
+      message: "Set up Hearth's knowledge base",
+      detail: `Hearth keeps its settings in ${profile}, which does not exist yet. Choose the Hearth database you already use, `
+              + "or create a new, empty knowledge base. Nothing is moved or changed.",
+    });
+    if (response === 2) return false;
+    const chosen = response === 0
+      ? (await dialog.showOpenDialog(parent, { title: "Choose your Hearth database", properties: ["openFile"],
+                                       filters: [{ name: "Hearth database", extensions: ["sqlite", "db"] }] })).filePaths[0]
+      : (await dialog.showSaveDialog(parent, { title: "Create a new knowledge base", defaultPath: join(hearthHome(), "hearth.sqlite") })).filePath;
+    if (!chosen) continue;
+    const created = await profileCreate(command, [profile, "--database", chosen, ...(response === 1 ? ["--create-database"] : [])]);
+    if (created === null) return true;
+    await dialog.showMessageBox(parent, { type: "warning", message: "Hearth did not use that file.", detail: created });
+  }
+}
+
+function profileCreate(command: BackendCommand, args: string[]): Promise<string | null> {
+  return new Promise((done) => execFile(command.prefix[0], [...command.prefix.slice(1), "profile", "create", ...args],
+                                        { env: command.env, cwd: homedir(), timeout: 60_000 },
+                                        (error, _stdout, stderr) => done(error ? stderr.trim() || error.message : null)));
+}
+
 // Order matters: block every request first, then drop the header hook, the secrets, and the stored session.
 function stopped(backend: Running, how: string): void {
   if (running !== backend) return;
@@ -82,11 +114,12 @@ function stopped(backend: Running, how: string): void {
   showStopped(`Hearth's backend stopped (${how}). Tasks keep running in their own processes. Choose Hearth > Restart Backend to start it again.`);
 }
 
-function showStopped(reason: string): void {
+function showStopped(reason: string): BrowserWindow {
   stoppedReason = reason;
   window?.destroy();
   window = null;
   openWindow();
+  return window!;
 }
 
 function openWindow(): void {
@@ -109,7 +142,7 @@ function stoppedPage(reason: string): string {
     + "<style>:root{--bg:#17191d;--text:#ebecef;--muted:#969da9;--ember:#f2a26e;color-scheme:dark}"
     + "@media (prefers-color-scheme:light){:root{--bg:#f7f8fa;--text:#222b3c;--muted:#677184;--ember:#a8481c;color-scheme:light}}"
     + "body{margin:0;padding:3rem;background:var(--bg);color:var(--text);font:15px -apple-system,BlinkMacSystemFont,sans-serif}"
-    + "h1{color:var(--ember);font-size:20px;margin:0 0 12px}p{max-width:40rem;line-height:1.5}</style>"
+    + "h1{color:var(--ember);font-size:20px;margin:0 0 12px}p{max-width:46rem;line-height:1.5;white-space:pre-wrap}</style>"
     + `<title>Hearth</title><h1>Hearth</h1><p>${escaped}</p>`;
   return `data:text/html;charset=utf-8,${encodeURIComponent(html)}`;
 }

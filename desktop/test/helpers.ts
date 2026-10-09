@@ -38,7 +38,14 @@ export function realBackend(dir: string): string[] {
     execFileSync(python, ["-m", "hearth.cli", "profile", "create", join(dir, "hearth/profile.json"), "--database", join(dir, "web.sqlite"), "--create-database"],
                  { env: { PATH: "/usr/bin:/bin", HOME: join(dir, "home"), HEARTH_HOME: join(dir, "hearth"), PYTHONPATH: join(repo, "src") } });
   }
-  return [python, "-m", "hearth.cli", "web", "--desktop", "--handshake-fd", "3"];
+  return [python, "-m", "hearth.cli"];  // The app adds --profile and the desktop arguments.
+}
+
+export interface Launch {
+  env?: Record<string, string>;
+  cwd?: string;  // The folder the app is opened from.
+  answers?: unknown[];  // Dialog answers, in order, for test/dialogs.cjs; the app's dialogs are replaced only when given.
+  profile?: boolean;  // false leaves the scratch home without a profile, so the app starts setup.
 }
 
 export interface App {
@@ -46,13 +53,23 @@ export interface App {
   output: () => string;
 }
 
-export async function openApp(t: TestContext, home: Scratch, backend: string[], env: Record<string, string> = {}): Promise<App> {
+// A null backend leaves HEARTH_BACKEND unset, so the app starts the installed runtime (HEARTH_RUNTIME in tests).
+export async function openApp(t: TestContext, home: Scratch, backend: string[] | null, options: Launch = {}): Promise<App> {
+  const profile = join(home.dir, "hearth/profile.json");
+  if (options.profile !== false && !existsSync(profile)) {
+    // The fake backend reads no data; the app only needs a profile to be there before it starts one.
+    mkdirSync(join(home.dir, "hearth"), { recursive: true });
+    writeFileSync(profile, JSON.stringify({ format: "hearth-runtime-profile-v1" }));
+  }
+  const env = { ...options.env, ...(options.answers ? { FAKE_DIALOGS: JSON.stringify(options.answers) } : {}) };
   const app = await _electron.launch({
     executablePath: electronPath as unknown as string,
-    args: [desktop],
+    // Loaded before the app's own code, as Playwright loads its own, so even dialogs shown at startup are the stub's.
+    args: options.answers ? ["-r", join(desktop, "test/dialogs.cjs"), desktop] : [desktop],
+    cwd: options.cwd,
     env: {
       PATH: "/usr/bin:/bin", HOME: join(home.dir, "home"), HEARTH_HOME: join(home.dir, "hearth"), PYTHONPATH: join(repo, "src"),
-      PYTHONDONTWRITEBYTECODE: "1", ...(process.env.CI ? { ELECTRON_ENABLE_LOGGING: "1" } : {}), HEARTH_BACKEND: JSON.stringify(backend), FAKE_BACKEND_LOG: home.log, ...env,
+      PYTHONDONTWRITEBYTECODE: "1", ...(process.env.CI ? { ELECTRON_ENABLE_LOGGING: "1" } : {}), ...(backend ? { HEARTH_BACKEND: JSON.stringify(backend) } : {}), FAKE_BACKEND_LOG: home.log, ...env,
     },
   });
   const child = app.process();  // Kept: Playwright refuses process() once the app has closed.
@@ -105,7 +122,7 @@ export interface Logged {
   headers: Record<string, string>;
 }
 
-export function backendLog(home: Scratch): { secrets: { pid: number; port: number; cookie: string; token: string }[]; requests: Logged[] } {
+export function backendLog(home: Scratch): { secrets: { pid: number; port: number; cookie: string; token: string; argv: string[]; cwd: string }[]; requests: Logged[] } {
   const lines = readFileSync(home.log, "utf8").trim().split("\n").map((line) => JSON.parse(line));
   return { secrets: lines.filter((line) => "pid" in line), requests: lines.filter((line) => "path" in line) };
 }

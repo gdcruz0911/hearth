@@ -7,16 +7,19 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { openApp, pause, python, realBackend, repo, scratch, windowShowing, type Scratch } from "./helpers.ts";
 
-// Every agent CLI a task can reach is the test suite's fake, so nothing here spends the person's quota.
+// Every agent CLI a task can reach is the test suite's fake, so nothing here spends the person's quota. They sit only in the
+// scratch home's ~/.local/bin, and the app gets a bare PATH, as when it is opened from Finder: the backend must find them.
+const agentBin = (home: Scratch) => join(home.dir, "home/.local/bin");
+
 function fakeAgents(home: Scratch): Record<string, string> {
-  const bin = join(home.dir, "bin");
-  mkdirSync(bin);
+  const bin = agentBin(home);
+  mkdirSync(bin, { recursive: true });
   for (const [name, as] of [["claude", ""], ["codex", "--as codex"], ["agy", "--as antigravity"]]) {
     writeFileSync(join(bin, name), `#!/bin/sh\nexec "${python}" "${join(repo, "tests/fake_agent.py")}" ${as} "$@"\n`);
     chmodSync(join(bin, name), 0o755);
   }
   writeFileSync(join(home.dir, "home/.gitconfig"), "[user]\n\tname = Person\n\temail = person@example.com\n");
-  return { PATH: `${bin}:/usr/bin:/bin`, FAKE_REVIEWS: "approve", FAKE_DELAY: "2", GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "maintenance.auto", GIT_CONFIG_VALUE_0: "false" };
+  return { PATH: "/usr/bin:/bin", FAKE_REVIEWS: "approve", FAKE_DELAY: "2", GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "maintenance.auto", GIT_CONFIG_VALUE_0: "false" };
 }
 
 function waitingTask(home: Scratch, env: Record<string, string>): string {
@@ -31,7 +34,7 @@ function waitingTask(home: Scratch, env: Record<string, string>): string {
   mkdirSync(join(home.dir, "hearth"), { recursive: true });
   writeFileSync(join(home.dir, "hearth/projects.json"), JSON.stringify({ demo: { path: project, check: "test -f hello.txt", providers: ["claude", "codex"] } }));
   spawnSync(python, ["-m", "hearth.cli", "task", "new", "demo", "Add hello.txt"], {  // Exits 1: the task waits on its question.
-    env: { ...env, HOME: join(home.dir, "home"), HEARTH_HOME: join(home.dir, "hearth"), PYTHONPATH: join(repo, "src"),
+    env: { ...env, PATH: `${agentBin(home)}:/usr/bin:/bin`, HOME: join(home.dir, "home"), HEARTH_HOME: join(home.dir, "hearth"), PYTHONPATH: join(repo, "src"),
            FAKE_OUTBOX: '{"to": "person", "kind": "question", "body": "Which greeting?"}' },
   });
   const [id] = readdirSync(join(home.dir, "hearth/tasks"));
@@ -45,7 +48,7 @@ test("a task answered in the app finishes verification and review after the app 
   const record = () => JSON.parse(readFileSync(join(home.dir, "hearth/tasks", id, "task.json"), "utf8"));
   assert.equal(record().status, "waiting");
 
-  const first = await openApp(t, home, realBackend(home.dir), env);
+  const first = await openApp(t, home, realBackend(home.dir), { env });
   const page = await windowShowing(first.app, "Hub");
   await page.evaluate((task) => void (window.location.hash = `#/tasks/${task}`), id);
   await windowShowing(first.app, "Which greeting?");
@@ -69,7 +72,7 @@ test("a task answered in the app finishes verification and review after the app 
   assert.ok(seconds(verify.finished) >= quitAt && seconds(review.started) >= quitAt, "verification ended and review began after the app quit");
   assert.match(readFileSync(join(home.dir, "hearth/tasks", id, "resume.log"), "utf8"), /approved/);
 
-  const second = await openApp(t, home, realBackend(home.dir), env);
+  const second = await openApp(t, home, realBackend(home.dir), { env });
   const reopened = await windowShowing(second.app, "Hub");
   await reopened.evaluate((task) => void (window.location.hash = `#/tasks/${task}`), id);
   await windowShowing(second.app, "approve");
