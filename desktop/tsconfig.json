@@ -1,0 +1,11 @@
+{
+  "compilerOptions": {
+    "target": "es2023",
+    "module": "nodenext",
+    "rootDir": "src",
+    "outDir": "out",
+    "strict": true,
+    "types": ["node"]
+  },
+  "include": ["src"]
+}

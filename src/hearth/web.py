@@ -101,7 +101,7 @@ class _WebResponse:
 
 
 _RELAUNCH_PAGE = (b"<!doctype html><meta charset=utf-8><title>Hearth</title>"
-                  b"<p>This dashboard needs a fresh launch. Run <code>hearth web</code> in your terminal.</p>")
+                  b"<p>This dashboard needs a fresh launch. Quit and reopen the Hearth app, or run <code>hearth web</code> in your terminal.</p>")
 
 
 class HearthWebApplication:
@@ -163,10 +163,10 @@ class HearthWebApplication:
         relative_path = path.removeprefix("/")
         if not self._has_cookie(headers.get("Cookie", "")):
             if relative_path.startswith("api/"):
-                return self._json_error(HTTPStatus.UNAUTHORIZED, "This dashboard session is not valid. Run hearth web again.")
+                return self._json_error(HTTPStatus.UNAUTHORIZED, "This dashboard session is not valid. Reopen the Hearth app, or run hearth web again.")
             return _WebResponse(HTTPStatus.UNAUTHORIZED, "text/html; charset=utf-8", _RELAUNCH_PAGE)
         if relative_path.startswith("api/") and not self._has_token(headers.get("X-Hearth-Session", "")):
-            return self._json_error(HTTPStatus.UNAUTHORIZED, "This dashboard session is not valid. Run hearth web again.")
+            return self._json_error(HTTPStatus.UNAUTHORIZED, "This dashboard session is not valid. Reopen the Hearth app, or run hearth web again.")
         if method == "POST" and headers.get("Origin") != f"http://{headers.get('Host', '')}":
             # A missing or null Origin is refused too, so another site cannot make the person's browser post here.
             return self._json_error(HTTPStatus.FORBIDDEN, "Hearth accepts changes only from its own page.")

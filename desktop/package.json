@@ -1,0 +1,18 @@
+{
+  "name": "hearth-desktop",
+  "private": true,
+  "description": "The Hearth app: an Electron shell around the dashboard and the Python backend (ADR-0038).",
+  "type": "module",
+  "main": "out/main.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "tsc && electron .",
+    "test": "tsc && node --test --test-concurrency=1 \"test/*.test.ts\""
+  },
+  "devDependencies": {
+    "@types/node": "24.13.6",
+    "electron": "44.4.5",
+    "playwright": "1.63.0",
+    "typescript": "7.0.2"
+  }
+}

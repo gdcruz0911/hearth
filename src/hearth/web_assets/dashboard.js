@@ -6,7 +6,7 @@ const root = new URL(".", window.location.href).pathname;
 // page's memory; every API call sends it in a header beside the cookie. A reload or another page needs it passed again.
 const sessionToken = window.location.hash.startsWith("#session=") ? window.location.hash.slice("#session=".length) : "";
 if (sessionToken) history.replaceState(null, "", window.location.pathname);
-const SESSION_LOST = "This dashboard session ended. Run hearth web in your terminal to open a fresh one.";
+const SESSION_LOST = "This dashboard session ended. Quit and reopen the Hearth app, or run hearth web in your terminal.";
 const KNOWN = new Set(["running", "queued", "waiting", "done", "failed", "cancelled", "interrupted"]);
 const VIEWS = ["hub", "tasks", "knowledge"];
 const DOTS = 8; // Run dots on a task card.

@@ -10,6 +10,7 @@ A prompt that starts with "# Retro" is answered with the next reply in FAKE_RETR
 An editing or idle run also writes FAKE_OUTBOX, if set, to .hearth/outbox.jsonl as board messages,
 and an editing run appends FAKE_EXTRA, if set, to hello.txt, and ends with a PR title line unless FAKE_TITLE is none.
 An editing run first runs FAKE_RUN, if set, as a shell command in the worktree.
+Every run first waits FAKE_DELAY seconds, if set.
 """
 
 from __future__ import annotations
@@ -76,6 +77,7 @@ def verify() -> None:
 def main() -> int:
     prompt = sys.stdin.read()
     scenario = os.environ.get("FAKE_AGENT_SCENARIO", "edit")
+    time.sleep(float(os.environ.get("FAKE_DELAY", "0")))  # Seconds every run takes, for tests that act while work is still going.
     if FORMAT == "antigravity":
         emit({"event": "init", "conversation_id": SESSION, "init": {"argv": sys.argv[1:]}})
     elif FORMAT == "codex":
