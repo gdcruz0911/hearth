@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
+import os
 import shlex
 import signal
+import stat
 import sys
+import threading
+import time
 from pathlib import Path
 
 from . import maintenance
@@ -125,8 +130,11 @@ def main(argv: list[str] | None = None) -> int:
     sources = subcommands.add_parser("sources", help="Preview or import supported files from connected local folders.")
     sources.add_argument("action", choices=("preview", "import"))
     web = subcommands.add_parser("web", help="Run the local Hearth web interface on this Mac only.")
-    web.add_argument("--port", type=_port, default=8765, help="Loopback port to use (default: 8765).")
+    web.add_argument("--port", type=_port, help="Loopback port to use (default: 8765).")
     web.add_argument("--no-open", action="store_true", help="Do not open the local interface in the default browser.")
+    web.add_argument("--desktop", action="store_true",
+                     help="For the Hearth app: bind a free port and hand the session to --handshake-fd instead of printing a link.")
+    web.add_argument("--handshake-fd", type=int, help="With --desktop, the inherited file descriptor the app reads the session from.")
     evaluator = subcommands.add_parser("evaluate", help="Run a local synthetic or public evaluation corpus.")
     evaluator.add_argument("corpus", type=Path)
     recorder = subcommands.add_parser(
@@ -154,6 +162,7 @@ def main(argv: list[str] | None = None) -> int:
         help="Connected local folder. Defaults to Desktop, Documents, and Downloads when omitted.",
     )
     args = parser.parse_args(argv)
+    args.launcher = os.getppid()  # Taken first, so an app that dies during startup is still noticed.
     command = " ".join(filter(None, (args.command, getattr(args, f"{args.command}_command", None))))
     if not maintenance.writes(command):
         return _run(parser, args)
@@ -163,6 +172,20 @@ def main(argv: list[str] | None = None) -> int:
     except maintenance.Held as exc:
         print(f"{exc}\nNext: once the update finishes, hearth {shlex.join(sys.argv[1:] if argv is None else argv)}", file=sys.stderr)
         return 1
+
+
+def _writable_pipe(fd: int) -> bool:
+    """The app's pipe, never a standard stream or a file, where the secrets would be shown or saved (ADR-0038)."""
+    try:
+        return fd > 2 and stat.S_ISFIFO(os.fstat(fd).st_mode) and fcntl.fcntl(fd, fcntl.F_GETFL) & os.O_ACCMODE in (os.O_WRONLY, os.O_RDWR)
+    except OSError:
+        return False
+
+
+def _stop_when_orphaned(server: HearthWebServer, parent: int) -> None:
+    while os.getppid() == parent:  # ponytail: polls once a second; a pipe from the app would be instant.
+        time.sleep(1)
+    server.request_stop()
 
 
 def _run(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
@@ -227,6 +250,14 @@ def _run(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
         parser.error("--embedding-model and --index-directory must be provided together.")
     if args.retain_ocr_output and args.ocr_output_directory is None:
         parser.error("--retain-ocr-output requires --ocr-output-directory.")
+    if args.command == "web" and args.desktop and args.handshake_fd is None:
+        parser.error("--desktop requires --handshake-fd, the pipe the Hearth app reads the session from.")
+    if args.command == "web" and args.handshake_fd is not None and not args.desktop:
+        parser.error("--handshake-fd is only for --desktop.")
+    if args.command == "web" and args.desktop and args.port is not None:
+        parser.error("--port does not apply with --desktop, which binds a free port.")
+    if args.command == "web" and args.desktop and not _writable_pipe(args.handshake_fd):
+        parser.error("--handshake-fd must be a writable pipe from the Hearth app, not a standard stream or a file.")
     service: HearthService | None = None
     try:
         semantic_index = (
@@ -286,16 +317,30 @@ def _run(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
             else:
                 _print_source_import_result(service.import_source_plan(plan))
         elif args.command == "web":
-            server = HearthWebServer(service, port=args.port, source_roots=args.source_roots, workbench_tasks=tasks.dashboard_tasks,
+            if tasks.refused_inside_task("run Hearth's dashboard, which can act for the person"):
+                return 1
+            if args.desktop and args.launcher == 1:  # Reparented to launchd: the app that started it is already gone.
+                print("The Hearth app that started this backend has already quit.\nNext: open the Hearth app again", file=sys.stderr)
+                return 1
+            server = HearthWebServer(service, port=0 if args.desktop else args.port or 8765, source_roots=args.source_roots,
+                                     workbench_tasks=tasks.dashboard_tasks,
                                      workbench_transcript=transcript.read, workbench_diff=transcript.diff,
                                      workbench_task_state=tasks.dashboard_task_state, workbench_task_action=tasks.dashboard_action,
                                      rebuild_state=Path.home() / ".hearth/rebuild.json")
             # A desktop shell stops its backend with SIGTERM: finish the current request, then shut down as Ctrl+C does.
             signal.signal(signal.SIGTERM, lambda signum, frame: server.request_stop())
-            print(f"Hearth is running locally at {server.url}", flush=True)
-            print("It is bound to 127.0.0.1 only. Press Ctrl+C to stop it.", flush=True)
-            if not args.no_open:
-                server.open_browser()
+            if args.desktop:
+                # ADR-0038: the secrets go only to the app's pipe, never to output, logs, or disk.
+                with os.fdopen(args.handshake_fd, "w", encoding="utf-8") as pipe:
+                    pipe.write(json.dumps(server.start_desktop_session()) + "\n")
+                # A backend whose app crashed would hold the maintenance lock with no owner; it stops once it is orphaned.
+                threading.Thread(target=_stop_when_orphaned, args=(server, args.launcher), daemon=True).start()
+                print("Hearth's desktop backend is running on 127.0.0.1 only.", flush=True)
+            else:
+                print(f"Hearth is running locally at {server.url}", flush=True)
+                print("It is bound to 127.0.0.1 only. Press Ctrl+C to stop it.", flush=True)
+                if not args.no_open:
+                    server.open_browser()
             try:
                 server.serve_forever()
             except KeyboardInterrupt:

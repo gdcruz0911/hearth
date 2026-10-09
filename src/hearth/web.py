@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import hmac
 import json
+import re
 import resource
 import secrets
 import subprocess
@@ -16,7 +18,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 from .embedding import IndexBuildCancelled, IndexBusy, IndexBuildStopped
 from .domain import (
@@ -129,6 +131,7 @@ class HearthWebApplication:
         self._launch_token = capability_token
         self._session_lock = threading.Lock()
         self._session: tuple[str, str, str] | None = None  # Cookie name, cookie value, header token.
+        self._desktop = False  # Set by start_desktop_session: no launch link, and the challenge route answers.
         # Passed in by the CLI, the composition root, so this module never imports the workbench (CODE-1).
         self._workbench_tasks = workbench_tasks
         self._choose_file = choose_file or choose_local_file
@@ -151,6 +154,10 @@ class HearthWebApplication:
     def respond(self, method: str, raw_path: str, body: bytes, headers: Mapping[str, str] | None = None) -> _WebResponse:
         headers = headers or {}
         path = urlsplit(raw_path).path
+        if self._desktop and path == "/desktop/challenge":
+            return self._challenge(raw_path)
+        if self._desktop and path.startswith("/launch/"):
+            return self._not_found()  # The desktop app has no launch link (ADR-0038).
         if path.startswith("/launch/"):
             return self._launch(path.removeprefix("/launch/"), headers.get("Host", ""))
         relative_path = path.removeprefix("/")
@@ -179,6 +186,22 @@ class HearthWebApplication:
             return self._json_error(HTTPStatus.BAD_REQUEST, "The requested local action could not be completed.")
         except Exception:
             return self._json_error(HTTPStatus.INTERNAL_SERVER_ERROR, "Hearth could not complete that local action.")
+
+    def start_desktop_session(self, port: int) -> dict[str, str]:
+        """ADR-0038: instead of a launch link, the app receives the session over its private pipe and sets the cookie itself."""
+        with self._session_lock:
+            self._desktop = True
+            self._session = (f"hearth_{port}", secrets.token_urlsafe(32), secrets.token_urlsafe(32))
+        name, cookie, token = self._session
+        return {"cookie_name": name, "cookie": cookie, "token": token}
+
+    def _challenge(self, raw_path: str) -> _WebResponse:
+        """Prove to the app, before it sends any credential, that this server holds this launch's secret (ADR-0038)."""
+        challenge = parse_qs(urlsplit(raw_path).query).get("c", [""])[0]
+        if not re.fullmatch(r"[0-9a-f]{32,128}", challenge):
+            return self._json_error(HTTPStatus.BAD_REQUEST, "The challenge must be 32 to 128 lowercase hex characters.")
+        answer = hmac.new(self._session[2].encode(), b"hearth-desktop-challenge\0" + challenge.encode(), hashlib.sha256).hexdigest()
+        return self._json_response({"answer": answer})
 
     def _launch(self, token: str, host: str) -> _WebResponse:
         """Redeem the one-time launch link: exactly one request wins, even when several arrive together."""
@@ -692,6 +715,11 @@ class HearthWebServer:
         self._http_server = _LoopbackHTTPServer(("127.0.0.1", port), _handler_type(self._application))
         self._http_server.timeout = 0.5
         self._serving = threading.Event()
+
+    def start_desktop_session(self) -> dict[str, Any]:
+        """The handshake the desktop app reads from its pipe: the port actually bound, and the session's secrets."""
+        port = self._http_server.server_port
+        return {"port": port, **self._application.start_desktop_session(port)}
 
     def request_stop(self) -> None:
         """Make serve_forever return between requests; safe from a signal handler, unlike shutdown() on its own thread."""
