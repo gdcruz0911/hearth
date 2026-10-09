@@ -7,6 +7,7 @@ import json
 import re
 import resource
 import secrets
+import socketserver
 import subprocess
 import sys
 import threading
@@ -838,6 +839,12 @@ def _handler_type(application: HearthWebApplication) -> type[BaseHTTPRequestHand
 
 class _LoopbackHTTPServer(HTTPServer):
     """Avoid letting an incomplete loopback connection block the local UI indefinitely."""
+
+    def server_bind(self) -> None:
+        # HTTPServer names itself with socket.getfqdn, a reverse DNS lookup that stalled a CI Mac's startup for over
+        # ten seconds (2026-10-09); a loopback server needs no name, so bind without it.
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = "127.0.0.1", self.server_address[1]
 
     def get_request(self) -> tuple[Any, Any]:
         request, client_address = super().get_request()

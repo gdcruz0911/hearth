@@ -18,6 +18,7 @@ import json
 import os
 import secrets
 import signal
+import socketserver
 import sys
 import threading
 import time
@@ -70,7 +71,14 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
 
-server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+class Server(ThreadingHTTPServer):
+    def server_bind(self) -> None:
+        # As in the real backend: HTTPServer's reverse DNS lookup of 127.0.0.1 stalled startup on a CI Mac.
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = "127.0.0.1", self.server_address[1]
+
+
+server = Server(("127.0.0.1", 0), Handler)
 PORT = server.server_port
 COOKIE, TOKEN = secrets.token_urlsafe(32), secrets.token_urlsafe(32)
 log({"pid": os.getpid(), "port": PORT, "cookie": COOKIE, "token": TOKEN})

@@ -765,6 +765,14 @@ class RebuildLifecycleTests(unittest.TestCase):
         process.stdout.close()
 
 
+class LoopbackBindTests(unittest.TestCase):
+    def test_binding_never_looks_up_a_host_name(self) -> None:
+        # HTTPServer's reverse DNS lookup stalled a CI Mac's backend startup past the app's wait (2026-10-09).
+        with tempfile.TemporaryDirectory() as directory, mock.patch("socket.getfqdn", side_effect=AssertionError("looked up a name")):
+            server = HearthWebServer(HearthService(Path(directory) / "web.sqlite"), port=0)
+            server.close()
+
+
 class DesktopModeTests(unittest.TestCase):
     """ADR-0038: the desktop backend binds port 0, hands its secrets only to the shell's pipe, and proves it holds them."""
 
