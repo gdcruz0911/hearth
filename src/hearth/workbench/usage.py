@@ -24,7 +24,6 @@ def add_parser(subcommands: argparse._SubParsersAction) -> None:
 
 
 def run(args: argparse.Namespace) -> int:
-    home = Path.home()
     samples = hearth_home() / "usage/claude-limits.jsonl"
     if args.usage_command == "statusline":
         status = json.load(sys.stdin)
@@ -32,7 +31,7 @@ def run(args: argparse.Namespace) -> int:
             record_statusline(status, samples)  # Skipped during an update; the statusline itself must never fail.
         print(_statusline(status.get("rate_limits") or {}))
         return 0
-    rows = report(codex_limits(home / ".codex/sessions"), claude_limits(samples))
+    rows = report(codex_limits(*codex_sessions()), claude_limits(samples))
     if args.json:
         print(json.dumps(rows))
     else:
@@ -40,9 +39,14 @@ def run(args: argparse.Namespace) -> int:
     return 0
 
 
-def codex_limits(sessions: Path) -> dict | None:
-    """Return `rate_limits` from the newest Codex `token_count` event that has them."""
-    for path in sorted(sessions.rglob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True):
+def codex_sessions() -> list[Path]:
+    """The person's own Codex sessions, and those of Hearth's Codex workers, which each task keeps in its own CODEX_HOME."""
+    return [Path.home() / ".codex/sessions", *sorted(hearth_home().glob("tasks/*/codex-home/sessions"))]
+
+
+def codex_limits(*sessions: Path) -> dict | None:
+    """Return `rate_limits` from the newest Codex `token_count` event that has them, across the given session folders."""
+    for path in sorted((path for folder in sessions for path in folder.rglob("*.jsonl")), key=lambda p: p.stat().st_mtime, reverse=True):
         for line in reversed(path.read_text(encoding="utf-8").splitlines()):
             if '"token_count"' not in line:
                 continue
