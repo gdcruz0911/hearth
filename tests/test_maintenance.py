@@ -49,6 +49,7 @@ class MaintenanceLockTests(unittest.TestCase):
         patch.start()
         self.addCleanup(patch.stop)
         os.environ.pop("HEARTH_TASK", None)
+        os.environ.pop("HEARTH_HOME", None)  # Restored by the patch; a set HEARTH_HOME would move these records.
 
     def updating(self) -> None:
         path = self.home / ".hearth/maintenance.lock"

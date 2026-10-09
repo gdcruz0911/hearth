@@ -18,6 +18,7 @@ import threading
 import time
 from pathlib import Path
 
+from ..runtime import hearth_home
 from . import usage
 from . import recall
 from . import vault_notes
@@ -1980,7 +1981,7 @@ def _git(repo: Path, *args: str) -> str:
 
 
 def _home() -> Path:
-    return Path.home() / ".hearth"
+    return hearth_home()
 
 
 def _now() -> str:

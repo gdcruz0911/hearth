@@ -8,6 +8,7 @@ from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 
+from ..runtime import hearth_home
 from . import usage
 
 JUDGES = {"review": "approve", "verify": "verified"}  # Roles whose result is a verdict, and the verdict that passes.
@@ -19,7 +20,7 @@ def add_parser(subcommands: argparse._SubParsersAction) -> None:
 
 
 def run(args: argparse.Namespace) -> int:
-    tasks = [json.loads(path.read_text(encoding="utf-8")) for path in sorted((Path.home() / ".hearth/tasks").glob("*/task.json"))]
+    tasks = [json.loads(path.read_text(encoding="utf-8")) for path in sorted((hearth_home() / "tasks").glob("*/task.json"))]
     report = {"rows": rows(tasks), "summary": summary(tasks), "usage": _usage()}
     if args.json:
         print(json.dumps(report))
@@ -93,7 +94,7 @@ def _minutes(run: dict) -> float | None:
 
 def _usage() -> list[dict]:
     home = Path.home()
-    return usage.report(usage.codex_limits(home / ".codex/sessions"), usage.claude_limits(home / ".hearth/usage/claude-limits.jsonl"))
+    return usage.report(usage.codex_limits(home / ".codex/sessions"), usage.claude_limits(hearth_home() / "usage/claude-limits.jsonl"))
 
 
 def _percent(value: float | None) -> str:

@@ -7,6 +7,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from .runtime import hearth_home
 from .service import HearthService
 
 
@@ -85,7 +86,7 @@ def append_outcomes(service: HearthService, corpus_path: Path, outcomes: tuple[E
     run = {"at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "code": _code_revision(),
            "corpus": {"path": str(corpus_path), "sha256": hashlib.sha256(corpus_path.read_bytes()).hexdigest()},
            **service.run_description()}
-    log = Path.home() / ".hearth/evals" / f"{corpus_path.stem}.jsonl"
+    log = hearth_home() / "evals" / f"{corpus_path.stem}.jsonl"
     log.parent.mkdir(parents=True, exist_ok=True)
     with log.open("a", encoding="utf-8") as file:
         file.writelines(json.dumps({**run, "case": outcome.case_id, "passed": outcome.passed, "errors": list(outcome.errors)}) + "\n"
