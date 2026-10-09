@@ -82,6 +82,7 @@ class TaskTestCase(unittest.TestCase):
             patch.start()
             self.addCleanup(patch.stop)
         os.environ.pop("HEARTH_TASK", None)  # Restored by the patch; set when an agent runs this suite inside a task.
+        os.environ.pop("HEARTH_HOME", None)  # Restored by the patch; a set HEARTH_HOME would move these records.
 
     def tearDown(self) -> None:
         self.temporary_directory.cleanup()
@@ -129,6 +130,35 @@ class TaskTests(TaskTestCase):
         self.assertEqual(git(worktree, "log", "-1", "--format=%s"), "hearth: run 01 implement claude\n")
         self.assertEqual(git(worktree, "show", "--name-only", "--format=", "HEAD"), "hello.txt\n")
         self.assertEqual((worktree / "AGENTS.md").read_text(encoding="utf-8"), "Run the check.\n")
+
+    def test_hearth_home_keeps_every_record_out_of_the_home_folder(self) -> None:
+        elsewhere = self.home / "smoke"
+        (elsewhere).mkdir()
+        (self.home / ".hearth/projects.json").rename(elsewhere / "projects.json")
+        os.environ["HEARTH_HOME"] = str(elsewhere)
+
+        status, _ = self.cli("task", "new", "demo", "Add hello.txt")
+        _, listed = self.cli("task", "list")
+        printed = io.StringIO()
+        with contextlib.redirect_stdout(printed):
+            stats_status = main(["stats", "--json"])
+
+        task_id = next((elsewhere / "tasks").iterdir()).name
+        self.assertEqual((status, stats_status), (0, 0))
+        self.assertIn(task_id, listed)
+        self.assertTrue((elsewhere / "maintenance.lock").exists())
+        self.assertEqual(json.loads(printed.getvalue())["summary"]["tasks"], 1)
+        self.assertEqual(sorted(path.name for path in (self.home / ".hearth").iterdir()), [])  # Only HOME's own folder, now empty.
+        self.assertEqual(os.environ["HOME"], str(self.home))  # Agents keep the real HOME and its sign-ins.
+
+    def test_a_relative_hearth_home_is_refused(self) -> None:
+        os.environ["HEARTH_HOME"] = "smoke"  # Each process would resolve it against its own folder, so they would not agree.
+
+        with contextlib.redirect_stderr(io.StringIO()) as error, self.assertRaises(SystemExit) as refused:
+            main(["task", "list"])
+
+        self.assertEqual(refused.exception.code, 2)
+        self.assertIn("HEARTH_HOME", error.getvalue())
 
     def test_an_agent_cannot_start_a_task(self) -> None:
         os.environ["HEARTH_TASK"] = "20260927-000000"

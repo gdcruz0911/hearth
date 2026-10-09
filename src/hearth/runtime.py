@@ -2,11 +2,20 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import os
 from pathlib import Path
 
 
 class RuntimeProfileError(ValueError):
     """Raised when a private Hearth runtime profile is malformed or unsafe to create."""
+
+
+def hearth_home() -> Path:
+    """Where Hearth keeps its records and settings: HEARTH_HOME, else ~/.hearth.
+
+    HOME stays the person's, so agents keep their own sign-ins while a run's records go elsewhere.
+    """
+    return Path(os.environ["HEARTH_HOME"]).expanduser() if os.environ.get("HEARTH_HOME") else Path.home() / ".hearth"
 
 
 def default_source_roots() -> tuple[Path, ...]:

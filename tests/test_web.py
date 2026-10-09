@@ -735,8 +735,10 @@ class RebuildLifecycleTests(unittest.TestCase):
         self.assertTrue(self.index.cleaned.is_set())
 
     def test_hearth_web_reports_an_interrupted_rebuild_and_stops_through_its_normal_shutdown_on_sigterm(self) -> None:
-        self.record()  # Its ~/.hearth/rebuild.json, left by a backend that crashed.
-        env = {"HOME": str(self.root), "PATH": "/usr/bin:/bin", "PYTHONPATH": str(Path(__file__).parents[1] / "src")}
+        self.state = self.root / "elsewhere/rebuild.json"  # Under HEARTH_HOME, which the started process takes from its environment.
+        self.record()  # Left by a backend that crashed.
+        env = {"HOME": str(self.root), "HEARTH_HOME": str(self.root / "elsewhere"), "PATH": "/usr/bin:/bin",
+               "PYTHONPATH": str(Path(__file__).parents[1] / "src")}
         with socket.socket() as probe:
             probe.bind(("127.0.0.1", 0))
             port = probe.getsockname()[1]

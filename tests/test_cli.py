@@ -51,6 +51,7 @@ class CollectionInspectionCliTests(unittest.TestCase):
         home = mock.patch.dict(os.environ, {"HOME": str(self.root)})  # Writers take the maintenance lock under ~/.hearth.
         home.start()
         self.addCleanup(home.stop)
+        os.environ.pop("HEARTH_HOME", None)
         self.database = self.root / "hearth.sqlite"
         self.note = self.root / "operations.md"
         self.note.write_text("# Operations\n\nThe deployment owner is Ada.\n", encoding="utf-8")

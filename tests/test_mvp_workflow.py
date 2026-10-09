@@ -18,6 +18,7 @@ class MvpWorkflowTests(unittest.TestCase):
         home = mock.patch.dict(os.environ, {"HOME": str(self.root)})  # Writers take the maintenance lock under ~/.hearth.
         home.start()
         self.addCleanup(home.stop)
+        os.environ.pop("HEARTH_HOME", None)
         self.database = self.root / "hearth.sqlite"
         fixture = Path(__file__).parent / "fixtures" / "public" / "evaluation-note.md"
         self.note = self.root / fixture.name

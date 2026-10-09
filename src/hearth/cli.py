@@ -37,6 +37,7 @@ from .runtime import (
     RuntimeProfile,
     RuntimeProfileError,
     default_source_roots,
+    hearth_home,
     load_runtime_profile,
     write_runtime_profile,
 )
@@ -162,12 +163,14 @@ def main(argv: list[str] | None = None) -> int:
         help="Connected local folder. Defaults to Desktop, Documents, and Downloads when omitted.",
     )
     args = parser.parse_args(argv)
+    if os.environ.get("HEARTH_HOME") and not Path(os.environ["HEARTH_HOME"]).expanduser().is_absolute():
+        parser.error("HEARTH_HOME must be an absolute path, so every Hearth process and agent uses the same folder.")
     args.launcher = os.getppid()  # Taken first, so an app that dies during startup is still noticed.
     command = " ".join(filter(None, (args.command, getattr(args, f"{args.command}_command", None))))
     if not maintenance.writes(command):
         return _run(parser, args)
     try:
-        with maintenance.writing(Path.home() / ".hearth"):  # ADR-0038: held for the whole command, so no update starts under it.
+        with maintenance.writing(hearth_home()):  # ADR-0038: held for the whole command, so no update starts under it.
             return _run(parser, args)
     except maintenance.Held as exc:
         print(f"{exc}\nNext: once the update finishes, hearth {shlex.join(sys.argv[1:] if argv is None else argv)}", file=sys.stderr)
@@ -326,7 +329,7 @@ def _run(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
                                      workbench_tasks=tasks.dashboard_tasks,
                                      workbench_transcript=transcript.read, workbench_diff=transcript.diff,
                                      workbench_task_state=tasks.dashboard_task_state, workbench_task_action=tasks.dashboard_action,
-                                     rebuild_state=Path.home() / ".hearth/rebuild.json")
+                                     rebuild_state=hearth_home() / "rebuild.json")
             # A desktop shell stops its backend with SIGTERM: finish the current request, then shut down as Ctrl+C does.
             signal.signal(signal.SIGTERM, lambda signum, frame: server.request_stop())
             if args.desktop:

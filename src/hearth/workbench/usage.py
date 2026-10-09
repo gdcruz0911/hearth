@@ -11,6 +11,7 @@ from datetime import datetime
 from pathlib import Path
 
 from .. import maintenance
+from ..runtime import hearth_home
 
 DAY = 86_400
 
@@ -24,10 +25,10 @@ def add_parser(subcommands: argparse._SubParsersAction) -> None:
 
 def run(args: argparse.Namespace) -> int:
     home = Path.home()
-    samples = home / ".hearth/usage/claude-limits.jsonl"
+    samples = hearth_home() / "usage/claude-limits.jsonl"
     if args.usage_command == "statusline":
         status = json.load(sys.stdin)
-        with contextlib.suppress(maintenance.Held), maintenance.writing(home / ".hearth"):
+        with contextlib.suppress(maintenance.Held), maintenance.writing(hearth_home()):
             record_statusline(status, samples)  # Skipped during an update; the statusline itself must never fail.
         print(_statusline(status.get("rate_limits") or {}))
         return 0
