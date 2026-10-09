@@ -19,6 +19,7 @@ import time
 from pathlib import Path
 
 from ..runtime import hearth_home
+from . import instructions
 from . import roles
 from . import usage
 from . import recall
@@ -32,8 +33,8 @@ from . import vault_notes
 # and "{prompt}" is for a CLI that cannot read the prompt on standard input.
 PROVIDERS = {
     "claude": ["claude", "{options}", "-p", "--output-format", "stream-json", "--verbose", "--permission-mode", "acceptEdits",
-               "--setting-sources", "project,local", "--strict-mcp-config", "--tools", "Bash,Read,Edit,Write,Glob,Grep", "--allowedTools", "Bash({check} *)"],
-    "codex": ["codex", "exec", "{options}", "--json", "--ignore-user-config", "--sandbox", "workspace-write", "-"],
+               "--setting-sources", "", "--settings", "{settings}", "--strict-mcp-config", "--tools", "Bash,Read,Edit,Write,Glob,Grep", "--allowedTools", "Bash({check} *)"],
+    "codex": ["codex", "exec", "{options}", "--json", "--ignore-user-config", "-c", "project_doc_max_bytes=0", "-c", "memories.generate_memories=false", "-c", "memories.use_memories=false", "--sandbox", "workspace-write", "-"],
     "antigravity": ["agy", "{options}", "--output-format", "stream-json", "--mode", "accept-edits", "-p", "{prompt}"],
 }
 # The same CLIs opened for the person in a tmux window, with the prompt as the first message.
@@ -45,9 +46,9 @@ INTERACTIVE = {
 # Ignored files a worktree lacks but an agent needs; tracked files are already in every worktree.
 # Read-only invocations for review runs; each is confirmed against the installed version before first use (TEST-6).
 REVIEWERS = {
-    "claude": ["claude", "{options}", "-p", "--output-format", "stream-json", "--verbose", "--setting-sources", "project,local", "--strict-mcp-config",
+    "claude": ["claude", "{options}", "-p", "--output-format", "stream-json", "--verbose", "--setting-sources", "", "--settings", "{settings}", "--strict-mcp-config",
                "--tools", "Read,Grep,Glob", "--allowedTools", "Read", "Grep", "Glob"],
-    "codex": ["codex", "exec", "{options}", "--json", "--ignore-user-config", "--sandbox", "read-only", "-"],
+    "codex": ["codex", "exec", "{options}", "--json", "--ignore-user-config", "-c", "project_doc_max_bytes=0", "-c", "memories.generate_memories=false", "-c", "memories.use_memories=false", "--sandbox", "read-only", "-"],
     "antigravity": ["agy", "{options}", "--output-format", "stream-json", "--mode", "plan", "-p", "{prompt}"],
 }
 # An empty review falls back to the next reviewer in the review role's order. Antigravity was dropped on 2026-10-08:
@@ -66,9 +67,9 @@ RETRO_KINDS = ("guard", "test", "verify", "standard", "eval")  # In order of pre
 # Verifiers run the real program, so they need commands: Codex in its workspace sandbox, and Claude limited to the
 # project's check and its "verify" command prefix. Headless agy refuses unlisted commands, so it cannot verify.
 VERIFIERS = {
-    "codex": ["codex", "exec", "{options}", "--json", "--ignore-user-config", "--sandbox", "workspace-write", "-"],
+    "codex": ["codex", "exec", "{options}", "--json", "--ignore-user-config", "-c", "project_doc_max_bytes=0", "-c", "memories.generate_memories=false", "-c", "memories.use_memories=false", "--sandbox", "workspace-write", "-"],
     "claude": ["claude", "{options}", "-p", "--output-format", "stream-json", "--verbose", "--permission-mode", "acceptEdits",
-               "--setting-sources", "project,local", "--strict-mcp-config", "--tools", "Bash,Read,Edit,Write,Glob,Grep", "--allowedTools", "Bash({check} *)", "Bash({verify} *)"],
+               "--setting-sources", "", "--settings", "{settings}", "--strict-mcp-config", "--tools", "Bash,Read,Edit,Write,Glob,Grep", "--allowedTools", "Bash({check} *)", "Bash({verify} *)"],
 }
 VERIFY_ORDER = ["codex", "claude"]
 TEST_ORDER = VERIFY_ORDER  # Test writers must run the tests they write, which headless agy cannot.
@@ -464,7 +465,7 @@ def _new(args: argparse.Namespace) -> int:
         reason = "cannot be interactive" if args.interactive else "needs a test writer"
         print(f"--tests-first {reason}.\nNext: add a provider to {args.project}'s providers, or drop --tests-first", file=sys.stderr)
         return 1
-    spent = [row for row in usage.report(usage.codex_limits(Path.home() / ".codex/sessions"), usage.claude_limits(_home() / "usage/claude-limits.jsonl"))
+    spent = [row for row in usage.report(usage.codex_limits(*usage.codex_sessions()), usage.claude_limits(_home() / "usage/claude-limits.jsonl"))
              if row["provider"] == provider and max(row["five_hour"] or 0, row["week"] or 0) >= HEADROOM_LIMIT]
     if spent and not args.force:
         print(f"{provider} is at {HEADROOM_LIMIT}% or more of a plan limit.\nNext: hearth usage, then pick another --agent or add --force", file=sys.stderr)
@@ -483,6 +484,12 @@ def _new(args: argparse.Namespace) -> int:
         except recall.RecallError as exc:
             print(str(exc), file=sys.stderr)
             return 1
+    base = _git(repo, "rev-parse", "HEAD").strip()
+    try:  # Checked before anything is created too: tracked files from this base commit, untracked ones from local guidance.
+        instruction_text, instruction_files = instructions.capture(repo, base, GUIDANCE)
+    except instructions.InstructionsError as exc:
+        print(exc, file=sys.stderr)
+        return 1
     task_id = stamp = time.strftime("%Y%m%d-%H%M%S")
     for suffix in range(2, 100):  # Two tasks started in the same second, such as an approved retro, need distinct IDs.
         if not (_home() / "tasks" / task_id).exists():
@@ -491,7 +498,6 @@ def _new(args: argparse.Namespace) -> int:
     task_dir = _home() / "tasks" / task_id
     worktree = _home() / "worktrees" / args.project / task_id
     task_dir.mkdir(parents=True)
-    base = _git(repo, "rev-parse", "HEAD").strip()
     _git(repo, "worktree", "add", "-q", "-b", f"hearth/{task_id}", str(worktree), base)
     copied = []  # Untracked files the agent needs; kept out of checkpoint commits.
     for name in GUIDANCE + [".venv"]:
@@ -515,6 +521,8 @@ def _new(args: argparse.Namespace) -> int:
     (task_dir / "brief.md").write_text(f"# {goal}\n{context}", encoding="utf-8")
     for record in recalled.values():
         recall.save(task_dir, record)
+    (task_dir / "instructions.md").write_text(instruction_text, encoding="utf-8")
+    delivered = {"files": instruction_files, "sha256": hashlib.sha256(instruction_text.encode("utf-8")).hexdigest()}
 
     task = {
         "id": task_id, "project": args.project, "goal": goal, "base": base, "branch": f"hearth/{task_id}",
@@ -523,6 +531,7 @@ def _new(args: argparse.Namespace) -> int:
         "recall": {"mode": args.recall} if args.recall else None,
         "implementer": {"provider": provider, "model": model, "effort": args.effort, "timeout": args.timeout},
         "roles": resolved,  # ADR-0039: fixed when the task starts, so a later edit to the roles file applies to new tasks only.
+        "instructions": delivered,
     }
     prompt = PROMPT.format(id=task_id, goal=goal, check=project["check"]) + context + recall.for_provider(_home(), task, task_dir, project, provider)
     if args.tests_first:
@@ -587,6 +596,79 @@ def _write_tests(project: dict, task: dict, task_dir: Path, writer: str, approve
     return _implement(project, task, task_dir)
 
 
+# Settings files a Claude worker could write to widen a later run; Claude workers no longer load them, and their appearance
+# is detected before every launch (detection, not the protection, which is running with no setting sources).
+AGENT_SETTINGS = (".claude/settings.json", ".claude/settings.local.json")
+TAMPERED = ("agent_settings_changed", "instructions_changed", "instructions_unavailable", "codex_sign_in_unlinked")  # Stop the task at once: no fallback agent runs either.
+
+
+def _codex_home(task_dir: Path) -> Path:
+    """A task's own CODEX_HOME for its Codex workers: at first only a link to the person's sign-in, so no personal AGENTS.md,
+    memories, or config load, and nothing Codex keeps there reaches another task or recall scope.
+
+    The link, not a copy: Codex rewrites auth.json in place when it refreshes tokens, so worker and person share one sign-in.
+    """
+    home = task_dir / "codex-home"
+    home.mkdir(parents=True, exist_ok=True)
+    link, real = home / "auth.json", Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex") / "auth.json"
+    if not link.is_symlink() and not link.exists():
+        link.symlink_to(real)  # A file standing in its place is reported before launch, never replaced (see _tampered).
+    return home
+
+
+def _claude_settings(cwd: Path) -> str:
+    """Hearth's own settings for a Claude worker: no auto memory, and no instruction file above its folder or in the person's home."""
+    names = ("CLAUDE.md", ".claude/CLAUDE.md", "CLAUDE.local.md", "AGENTS.md")
+    excludes = [str(folder / name) for folder in cwd.parents for name in names]
+    excludes += [str(Path.home() / ".claude/CLAUDE.md"), str(Path.home() / ".claude/rules/**")]
+    return json.dumps({"autoMemoryEnabled": False, "claudeMdExcludes": excludes})
+
+
+def _tampered(task: dict, task_dir: Path) -> tuple[str, str] | None:
+    """A stop reason and why, when a launch would follow agent-written settings or changed instructions."""
+    worktree = Path(task["worktree"])
+    if worktree != _repo(task):  # A retro after discarding runs read-only in the person's own checkout.
+        for path in AGENT_SETTINGS:
+            at_base = subprocess.run(["git", "-C", str(worktree), "show", f"{task['base']}:{path}"], capture_output=True).stdout \
+                if subprocess.run(["git", "-C", str(worktree), "cat-file", "-e", f"{task['base']}:{path}"], capture_output=True).returncode == 0 else None
+            now = (worktree / path).read_bytes() if (worktree / path).is_file() else None
+            if now != at_base:
+                return "agent_settings_changed", f"{path} in the worktree differs from the task's base commit, so a worker may have changed agent settings."
+    sign_in = task_dir / "codex-home/auth.json"
+    if sign_in.exists() and not sign_in.is_symlink():
+        return "codex_sign_in_unlinked", ("the task's Codex sign-in is a file, not the link to the person's, so a token refresh "
+                                          "may have gone only to this task. Run codex login status, and codex login if it fails.")
+    if "instructions" in task:
+        text = (task_dir / "instructions.md").read_bytes() if (task_dir / "instructions.md").exists() else b""
+        if hashlib.sha256(text).hexdigest() != task["instructions"]["sha256"]:
+            return "instructions_changed", "the task's project instructions changed after it started."
+    return None
+
+
+def _snapshot_instructions(task: dict, task_dir: Path) -> tuple[str, str] | None:
+    """Capture the instructions once for a task started before Hearth delivered them; a refusal is returned as a stop."""
+    try:
+        text, files = instructions.capture(_repo(task), task["base"], GUIDANCE)
+    except instructions.InstructionsError as exc:
+        return "instructions_unavailable", str(exc).splitlines()[0]
+    (task_dir / "instructions.md").write_text(text, encoding="utf-8")
+    task["instructions"] = {"files": files, "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest()}
+    return None
+
+
+def _instruction_block(task: dict, task_dir: Path) -> str:
+    """The project's instructions as captured when the task started, and the local guidance a worker may read in its folder."""
+    text = (task_dir / "instructions.md").read_text(encoding="utf-8") if "instructions" in task else ""
+    worktree = Path(task["worktree"])
+    local = sorted(str(path.relative_to(worktree)) for name in task.get("copied", []) if name != ".venv"
+                   for path in ([worktree / name] if (worktree / name).is_file() else sorted((worktree / name).rglob("*.md"))))
+    block = "\n\n# Project instructions\n\nHearth delivers these as they were when the task started; follow them over any copy in this folder.\n\n"
+    block += text or "This project has no CLAUDE.md or AGENTS.md.\n"
+    if local:
+        block += "\nLocal guidance in this folder; read the files your change touches:\n" + "".join(f"- {path}\n" for path in local)
+    return block
+
+
 def _resolve_roles(chosen: dict, project: dict, implementer: str) -> dict:
     """The checking roles a new task runs with: the roles file's rows, else the default order (ADR-0039)."""
     resolved = {}
@@ -637,19 +719,29 @@ def _run(task: dict, task_dir: Path, role: str, provider: str, template: list[st
             raise Cancelled(task["id"])
         if role == "implement" and task.get("tests_approved") and _tests_digest(task, task_dir) != task["tests_approved"]["digest"]:
             raise TestsChanged(task["id"])  # Checked here, after any wait for a slot, so the implementer starts on the approved tests.
+        tampered = _tampered(task, task_dir) if "project" in task else None  # An evaluation's seeded task has no project.
+        if "project" in task and not tampered:  # Every provider gets the same captured AGENTS.md, not its own discovery.
+            tampered = _snapshot_instructions(task, task_dir) if "instructions" not in task else None
+            if not tampered:
+                prompt += _instruction_block(task, task_dir)
         record = _record(task, task_dir, role, provider, model, effort, prompt)
         run_dir = task_dir / "runs" / record["dir"]
+        if tampered:
+            record.update(exit_code=None, finished=_now())
+            (run_dir / "report.md").write_text(f"Not sent: {tampered[1]}\n", encoding="utf-8")
+            return {**parse_events(provider, ""), "stop": tampered[0]}
         if not recall.may_receive(_home(), _projects().get(task.get("project")) if (task_dir / "recall").is_dir() else None, task_dir, provider):
             # ADR-0024: this prompt carries the task's agent output, which can quote excerpts this provider may not receive.
             record.update(exit_code=None, finished=_now())
             (run_dir / "report.md").write_text("Not sent: this provider's recall scope does not cover excerpts delivered in this task.\n", encoding="utf-8")
             return {**parse_events(provider, ""), "stop": "recall_not_permitted"}
-        argv = _argv(template, provider, prompt, check, model, effort, verify)
+        argv = _argv(template, provider, prompt, check, model, effort, verify, _claude_settings(Path(task["worktree"])))
         events = (run_dir / "events.jsonl").open("w", encoding="utf-8")
         errors = (run_dir / "stderr.txt").open("w", encoding="utf-8")
         try:
             process = subprocess.Popen(argv, cwd=task["worktree"], stdin=subprocess.PIPE, stdout=events, stderr=errors, text=True,
-                                       start_new_session=True, env={**os.environ, "HEARTH_TASK": task["id"]})
+                                       start_new_session=True, env={**os.environ, "HEARTH_TASK": task["id"], "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
+                                                                    **({"CODEX_HOME": str(_codex_home(task_dir))} if provider == "codex" else {})})
         except OSError as exc:
             events.close()
             errors.close()
@@ -754,8 +846,8 @@ def _loop(args: argparse.Namespace) -> int:
                 task["runs"][-1]["verdict"] = verdict and verdict["verdict"]
                 task["runs"][-1]["risk"] = verdict.get("risk") if verdict and isinstance(verdict.get("risk"), str) else None
                 task["runs"][-1]["findings"] = verdict and verdict["findings"]  # A review after a fix checks each one.
-                if verdict or result["stop"] == "timeout":
-                    break  # An empty or failed review falls back to the next reviewer; a slow one does not.
+                if verdict or result["stop"] in ("timeout", *TAMPERED):
+                    break  # An empty or failed review falls back to the next reviewer; a slow or tampered one does not.
             if not result["stop"] and _hold_for_person(task, task_dir, "done", None):
                 return 1
             if verdict is None:
@@ -866,6 +958,8 @@ def _verify(task: dict, task_dir: Path, project: dict, timeout: int) -> dict:
         if _uncommitted(task):
             (run_dir / "verify.txt").write_text("The verifier changed files outside .hearth/evidence/; see git status in the worktree.\n", encoding="utf-8")
             return {"stop": "verifier_edited", "feedback": None, "summary": ""}
+        if result["stop"] in TAMPERED:
+            return {"stop": result["stop"], "feedback": None, "summary": ""}
         if not result["stop"] and _hold_for_person(task, task_dir, "done", None):
             return {"stop": "question", "feedback": None, "summary": ""}
         verdict = None if result["stop"] else _verdict(result["final"], ("verified", "failed"), "claims")
@@ -1119,7 +1213,7 @@ def _retro(task: dict, task_dir: Path) -> int:
         if result["stop"] == "recall_not_permitted":
             refused.append(agent)
         proposals = None if result["stop"] else _proposals(result["final"], len(escapes))
-        if proposals or result["stop"] == "timeout":
+        if proposals or result["stop"] in ("timeout", *TAMPERED):
             break  # An empty or unreadable retro falls back to the next agent, as a review does.
     task.update(saved)
     if not proposals:
@@ -1720,7 +1814,8 @@ def _projects() -> dict:
     return json.loads((_home() / "projects.json").read_text(encoding="utf-8"))
 
 
-def _argv(template: list[str], provider: str, prompt: str, check: str, model: str | None, effort: str | None, verify: str = "") -> list[str]:
+def _argv(template: list[str], provider: str, prompt: str, check: str, model: str | None, effort: str | None, verify: str = "",
+          settings: str = "") -> list[str]:
     options = []
     if model:
         options += ["-m" if provider == "codex" else "--model", model]
@@ -1728,7 +1823,8 @@ def _argv(template: list[str], provider: str, prompt: str, check: str, model: st
         options += ["-c", f"model_reasoning_effort={effort}"] if provider == "codex" else ["--effort", effort]
     argv = []
     for part in template:
-        argv += options if part == "{options}" else [prompt if part == "{prompt}" else part.replace("{check}", check).replace("{verify}", verify or check)]
+        argv += options if part == "{options}" else [prompt if part == "{prompt}" else settings if part == "{settings}"
+                                                      else part.replace("{check}", check).replace("{verify}", verify or check)]
     return argv
 
 

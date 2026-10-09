@@ -17,7 +17,7 @@ from pathlib import Path
 from unittest import mock
 
 from hearth.cli import main
-from hearth.workbench import ask, tasks, vault_notes
+from hearth.workbench import ask, tasks, usage, vault_notes
 
 REAL_ASK = {name: list(argv) for name, argv in ask.ASK.items()}  # Before any test patches it.
 FAKE_AGENT = [sys.executable, str(Path(__file__).with_name("fake_agent.py")), "{options}", "--allowedTools", "Bash({check} *)"]
@@ -38,10 +38,51 @@ class WorkerIsolationTests(unittest.TestCase):
                                    ("verify", tasks.VERIFIERS, "Bash,Read,Edit,Write,Glob,Grep"),
                                    ("review", tasks.REVIEWERS, "Read,Grep,Glob")):
             with self.subTest(role=name):
-                argv = table["claude"]
-                self.assertEqual(argv[argv.index("--setting-sources") + 1], "project,local")
+                argv = tasks._argv(table["claude"], "claude", "prompt", "check", None, None, settings='{"x": 1}')
+                self.assertEqual(argv[argv.index("--setting-sources") + 1], "")  # No user, project, or local settings files.
+                self.assertEqual(argv[argv.index("--settings") + 1], '{"x": 1}')  # Only Hearth's own settings.
                 self.assertIn("--strict-mcp-config", argv)
                 self.assertEqual(argv[argv.index("--tools") + 1], tools)
+
+    def test_claude_workers_skip_personal_and_ancestor_instructions_and_auto_memory(self) -> None:
+        worktree = Path.home() / ".hearth/worktrees/demo/20261009-000000"
+
+        settings = json.loads(tasks._claude_settings(worktree))
+
+        self.assertFalse(settings["autoMemoryEnabled"])
+        for path in (Path.home() / "CLAUDE.md", Path.home() / ".claude/CLAUDE.md", Path.home() / ".hearth/AGENTS.md", Path("/CLAUDE.md")):
+            self.assertIn(str(path), settings["claudeMdExcludes"])
+
+    def test_each_task_gives_codex_a_home_holding_only_a_link_to_the_sign_in(self) -> None:
+        with tempfile.TemporaryDirectory() as folder, mock.patch.dict(os.environ, {"HOME": folder}):
+            (Path(folder) / ".codex").mkdir()
+            (Path(folder) / ".codex/AGENTS.md").write_text("Personal Codex instructions.\n", encoding="utf-8")
+            first, second = Path(folder) / "tasks/one", Path(folder) / "tasks/two"
+
+            home = tasks._codex_home(first)
+
+            self.assertEqual(home, tasks._codex_home(first))
+            self.assertNotEqual(home, tasks._codex_home(second))  # Nothing Codex keeps in its home reaches another task.
+            self.assertEqual(sorted(path.name for path in home.iterdir()), ["auth.json"])  # No AGENTS.md, memories, or config.
+            self.assertEqual(os.readlink(home / "auth.json"), str(Path(folder) / ".codex/auth.json"))  # One sign-in, refreshed in place.
+
+    def test_codex_workers_load_no_agents_md_of_their_own_and_keep_no_memories(self) -> None:
+        for name, table in (("implement", tasks.PROVIDERS), ("verify", tasks.VERIFIERS), ("review", tasks.REVIEWERS)):
+            with self.subTest(role=name):
+                argv = table["codex"]
+                settings = [argv[index + 1] for index, part in enumerate(argv) if part == "-c"]
+                self.assertIn("project_doc_max_bytes=0", settings)  # Hearth delivers the task's captured AGENTS.md instead.
+                self.assertIn("memories.generate_memories=false", settings)
+                self.assertIn("memories.use_memories=false", settings)
+
+    def test_usage_headroom_counts_codex_worker_runs(self) -> None:
+        with tempfile.TemporaryDirectory() as folder, mock.patch.dict(os.environ, {"HOME": folder, "HEARTH_HOME": f"{folder}/hh"}):
+            sessions = Path(folder) / "hh/tasks/one/codex-home/sessions"
+            sessions.mkdir(parents=True)
+            event = {"payload": {"type": "token_count", "rate_limits": {"primary": {"used_percent": 95}}}}
+            (sessions / "rollout.jsonl").write_text(json.dumps(event) + "\n", encoding="utf-8")
+
+            self.assertEqual(usage.codex_limits(*usage.codex_sessions()), event["payload"]["rate_limits"])
 
     def test_codex_workers_ignore_the_user_config(self) -> None:
         for name, table in (("implement", tasks.PROVIDERS), ("verify", tasks.VERIFIERS), ("review", tasks.REVIEWERS)):
@@ -949,6 +990,127 @@ class TestsFirstTests(LoopTestCase):
 
         task = self.only_task()
         self.assertEqual((status, [(run["role"], run["provider"]) for run in task["runs"]]), (0, [("test", "claude"), ("implement", "claude")]))
+
+
+class InstructionDeliveryTests(VerifyTestCase):
+    """Every worker gets the project's AGENTS.md from Hearth, fixed when the task starts, and nothing a worker wrote."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        (self.repo / ".gitignore").write_text("AGENTS.md\n.venv/\ndocs/standards/\n.claude/settings.local.json\n", encoding="utf-8")
+        git(self.repo, "add", ".gitignore")
+        git(self.repo, "commit", "-q", "-m", "ignore local guidance")
+        (self.repo / "docs/standards").mkdir(parents=True)
+        (self.repo / "docs/standards/design.md").write_text("Design standard.\n", encoding="utf-8")
+
+    def prompts(self, task: dict) -> dict[str, str]:
+        task_dir = self.home / ".hearth/tasks" / task["id"]
+        return {run["dir"]: (task_dir / "runs" / run["dir"] / "prompt.md").read_text(encoding="utf-8") for run in task["runs"]}
+
+    def test_every_claude_role_receives_the_project_instructions_and_its_local_standards(self) -> None:
+        self.write_projects(check="test -f hello.txt", providers=("claude",))
+        os.environ.update(FAKE_VERIFY="verified", FAKE_RETRO="proposal")
+        self.cli("task", "new", "demo", "Add hello.txt", "--tests-first")
+        self.loop(self.only_task(), "changes,approve")
+        task_id = self.only_task()["id"]
+        self.cli("task", "escape", task_id, "hello.txt never says the person's name.")
+        self.cli("task", "retro", task_id)
+
+        task = self.only_task()
+        self.assertEqual({run["role"] for run in task["runs"]}, {"test", "implement", "verify", "review", "fix", "retro"})
+        for name, prompt in self.prompts(task).items():
+            with self.subTest(run=name):
+                self.assertIn("# Project instructions", prompt)
+                self.assertIn("Run the check.", prompt)
+                self.assertIn("docs/standards/design.md", prompt)
+
+    def test_a_task_keeps_the_instructions_it_started_with_for_every_provider(self) -> None:
+        task = self.start()
+        (self.repo / "AGENTS.md").write_text("Changed in the repository.\n", encoding="utf-8")
+        (Path(task["worktree"]) / "AGENTS.md").write_text("Changed by a worker.\n", encoding="utf-8")
+
+        self.loop(task, "approve")
+
+        task = self.only_task()
+        self.assertEqual([run["provider"] for run in task["runs"]], ["claude", "codex", "codex"])  # Implement, verify, review.
+        for name, prompt in self.prompts(task).items():
+            with self.subTest(run=name):
+                self.assertIn("Run the check.", prompt)
+                self.assertNotIn("Changed", prompt)
+        self.assertEqual([(item["path"], item["origin"]) for item in task["instructions"]["files"]], [("AGENTS.md", "local")])
+
+    def test_an_import_that_cannot_be_delivered_refuses_the_task(self) -> None:
+        (self.repo / "AGENTS.md").write_text("@../outside.md\n", encoding="utf-8")
+        self.write_projects(check="test -f hello.txt", providers=("claude", "codex"))
+
+        stderr = io.StringIO()
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(stderr):
+            status = main(["task", "new", "demo", "Add hello.txt"])
+
+        self.assertEqual(status, 1)
+        self.assertIn("outside the project", stderr.getvalue())
+        self.assertFalse((self.home / ".hearth/tasks").exists())
+
+    def test_an_import_symlinked_to_a_personal_file_refuses_the_task_and_sends_nothing(self) -> None:
+        personal = self.home / "personal-notes.md"
+        personal.write_text("PERSONAL-MARKER\n", encoding="utf-8")
+        (self.repo / "docs/standards/linked.md").symlink_to(personal)
+        (self.repo / "AGENTS.md").write_text("@docs/standards/linked.md\n", encoding="utf-8")
+        self.write_projects(check="test -f hello.txt", providers=("claude", "codex"))
+
+        stderr = io.StringIO()
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(stderr):
+            status = main(["task", "new", "demo", "Add hello.txt"])
+
+        self.assertEqual(status, 1)
+        self.assertIn("outside the project", stderr.getvalue())
+        self.assertFalse((self.home / ".hearth/tasks").exists())
+
+    def test_settings_a_worker_left_in_the_worktree_stop_the_task_before_the_next_worker_launches(self) -> None:
+        task = self.start()
+        planted = Path(task["worktree"]) / ".claude/settings.local.json"
+        planted.parent.mkdir()
+        planted.write_text('{"permissions": {"allow": ["Edit(//anywhere)"]}}', encoding="utf-8")
+        self.assertEqual(git(Path(task["worktree"]), "status", "--porcelain", "--", ".claude"), "")  # Ignored: an ordinary diff shows nothing.
+
+        self.assertEqual(self.loop(task, "approve"), 1)
+
+        task = self.only_task()
+        self.assertEqual(task["stop_reason"], "agent_settings_changed")
+        self.assertIn(".claude/settings.local.json", (self.home / ".hearth/tasks" / task["id"] / "runs" / task["runs"][-1]["dir"] / "report.md").read_text(encoding="utf-8"))
+        self.assertFalse((self.home / ".hearth/tasks" / task["id"] / "runs" / task["runs"][-1]["dir"] / "events.jsonl").exists())
+
+    def test_a_task_started_before_delivery_gets_its_instructions_captured_once(self) -> None:
+        self.write_roles(review="claude")
+        task = self.start()
+        record = self.home / ".hearth/tasks" / task["id"] / "task.json"
+        older = json.loads(record.read_text(encoding="utf-8"))
+        del older["instructions"]
+        record.write_text(json.dumps(older), encoding="utf-8")
+
+        self.loop(task, "approve")
+
+        task = self.only_task()
+        self.assertIn("Run the check.", self.prompts(task)[task["runs"][-1]["dir"]])
+        self.assertEqual([item["path"] for item in task["instructions"]["files"]], ["AGENTS.md"])
+
+    def test_a_codex_sign_in_link_replaced_by_a_file_stops_the_task(self) -> None:
+        task = self.start()
+        home = tasks._codex_home(self.home / ".hearth/tasks" / task["id"])
+        (home / "auth.json").unlink()
+        (home / "auth.json").write_text("{}", encoding="utf-8")  # As if Codex had rewritten it instead of following the link.
+
+        self.assertEqual(self.loop(task, "approve"), 1)
+
+        self.assertEqual(self.only_task()["stop_reason"], "codex_sign_in_unlinked")
+
+    def test_instructions_changed_after_the_task_started_stop_it(self) -> None:
+        task = self.start()
+        (self.home / ".hearth/tasks" / task["id"] / "instructions.md").write_text("Edited after the task started.\n", encoding="utf-8")
+
+        self.assertEqual(self.loop(task, "approve"), 1)
+
+        self.assertEqual(self.only_task()["stop_reason"], "instructions_changed")
 
 
 class RolesTests(LoopTestCase):

@@ -6,7 +6,6 @@ import argparse
 import json
 from collections import defaultdict
 from datetime import datetime
-from pathlib import Path
 
 from ..runtime import hearth_home
 from . import usage
@@ -93,8 +92,7 @@ def _minutes(run: dict) -> float | None:
 
 
 def _usage() -> list[dict]:
-    home = Path.home()
-    return usage.report(usage.codex_limits(home / ".codex/sessions"), usage.claude_limits(hearth_home() / "usage/claude-limits.jsonl"))
+    return usage.report(usage.codex_limits(*usage.codex_sessions()), usage.claude_limits(hearth_home() / "usage/claude-limits.jsonl"))
 
 
 def _percent(value: float | None) -> str:
