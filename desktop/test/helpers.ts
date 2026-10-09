@@ -1,7 +1,7 @@
 // Launches the built app in a scratch home, so no test touches the person's Hearth, app data, or browser.
 
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { createServer, type IncomingHttpHeaders, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -18,10 +18,15 @@ export interface Scratch {
   log: string;
 }
 
-export function scratch(t: TestContext): Scratch {
+// Removed when the test process exits: hooks run in the order they were added, so an after hook here would delete a
+// folder before the app it holds had quit.
+const scratches: string[] = [];
+process.once("exit", () => scratches.forEach((dir) => rmSync(dir, { recursive: true, force: true })));
+
+export function scratch(): Scratch {
   const dir = mkdtempSync(join(tmpdir(), "hearth-desktop-"));
   mkdirSync(join(dir, "home"));
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  scratches.push(dir);
   return { dir, log: join(dir, "backend.jsonl") };
 }
 
@@ -39,24 +44,32 @@ export async function openApp(t: TestContext, home: Scratch, backend: string[], 
     args: [desktop],
     env: {
       PATH: "/usr/bin:/bin", HOME: join(home.dir, "home"), HEARTH_HOME: join(home.dir, "hearth"), PYTHONPATH: join(repo, "src"),
-      PYTHONDONTWRITEBYTECODE: "1", HEARTH_BACKEND: JSON.stringify(backend), FAKE_BACKEND_LOG: home.log, ...env,
+      PYTHONDONTWRITEBYTECODE: "1", ...(process.env.CI ? { ELECTRON_ENABLE_LOGGING: "1" } : {}), HEARTH_BACKEND: JSON.stringify(backend), FAKE_BACKEND_LOG: home.log, ...env,
     },
   });
   const child = app.process();  // Kept: Playwright refuses process() once the app has closed.
   let output = "";
   child.stdout?.on("data", (chunk: Buffer) => (output += chunk.toString()));
   child.stderr?.on("data", (chunk: Buffer) => (output += chunk.toString()));
-  if (process.env.CI) t.after(() => void process.stderr.write(`--- app output for "${t.name}" ---\n${output}\n`));  // CI only shows what is printed.
   // Links the app would hand to the person's browser are recorded instead.
   await app.evaluate(({ shell }) => {
     (globalThis as { opened?: string[] }).opened = [];
     shell.openExternal = async (url: string) => void (globalThis as unknown as { opened: string[] }).opened.push(url);
   });
   // Quit as the person would, so the app stops its own backend; a hung quit is killed and fails the test instead.
+  let state = "";
+  t.after(async () => {
+    state = await app.evaluate(({ app, BrowserWindow }) => JSON.stringify({ ready: app.isReady(), windows: BrowserWindow.getAllWindows().map((w) => w.webContents.getURL().slice(0, 60)),
+                                                                             userData: app.getPath("userData") })).catch((error) => String(error));
+  });
   t.after(async () => {
     if (child.exitCode !== null || child.signalCode !== null) return;  // The test quit it already.
     const closed = await Promise.race([app.close().then(() => true), pause(15_000).then(() => false)]);
     if (!closed) child.kill("SIGKILL");
+    if (process.env.CI) {  // CI only shows what is printed.
+      const log = existsSync(home.log) ? readFileSync(home.log, "utf8") : "(no backend log)";
+      process.stderr.write(`--- app output for "${t.name}" ---\n${output}\n--- main process ---\n${state}\n--- backend log ---\n${log.slice(0, 2000)}\n`);
+    }
     assert.equal(closed, true, "the app did not quit within 15 seconds");
   });
   return { app, output: () => output };
