@@ -126,11 +126,27 @@ class RuntimeInstallTests(unittest.TestCase):
         record = json.loads((runtime / "runtime.json").read_text(encoding="utf-8"))
         self.assertEqual(record["base"], {"path": BASE, "version": ".".join(map(str, sys.version_info[:3]))})
         self.assertEqual(record["commit"], git(self.repo, "rev-parse", "HEAD").strip())
+        self.assertEqual(record["source"], str(self.repo.resolve()))  # Where the app tells the person to rebuild it.
+        self.assertTrue(runtime.name.endswith(f"-py{record['base']['version']}"), runtime.name)
         self.assertEqual((self.runtimes / "current").resolve(), runtime.resolve())
         shown = subprocess.run([str(runtime / "bin/python"), "-c", "import hearth; print(hearth.RELEASE, hearth.__file__)"],
                                capture_output=True, text=True, check=True, env=install.clean_environment()).stdout
         self.assertTrue(shown.startswith("committed "), shown)
         self.assertTrue(Path(shown.split()[1]).resolve().is_relative_to(runtime.resolve()), shown)  # Installed, not a link to the checkout.
+
+    def test_after_the_base_python_changes_the_same_release_rebuilds_beside_the_old_runtime(self) -> None:
+        first = self.install()
+        changed = {"path": BASE, "version": "3.14.99"}  # The same interpreter, reporting a newer patch release.
+
+        with unittest.mock.patch.object(install, "base_python", return_value=changed):
+            second = self.install()
+
+        self.assertNotEqual(second, first)
+        self.assertTrue(first.is_dir())  # Left for D4's cleanup; never removed under a running app.
+        self.assertEqual((self.runtimes / "current").resolve(), second.resolve())
+        self.assertEqual(json.loads((second / "runtime.json").read_text(encoding="utf-8"))["base"], changed)
+        with self.assertRaisesRegex(install.InstallError, "already installed"):
+            self.install()  # The same release on the same Python is a duplicate.
 
     def test_a_virtual_environment_is_refused_as_the_base(self) -> None:
         subprocess.run([BASE, "-m", "venv", "--without-pip", str(self.root / "venv")], check=True)

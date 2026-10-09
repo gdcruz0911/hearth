@@ -1,7 +1,7 @@
 """The Hearth app's managed runtime (ADR-0038): a released, non-editable Hearth in its own Python environment.
 
-`python -m hearth.install lock --base <python>` pins the runtime's dependencies, with hashes, in runtime.lock.
-`python -m hearth.install runtime --base <python> --ref <git ref>` builds a runtime from that ref, never from the working
+`.venv/bin/python -m hearth.install lock --base <python>`, run in the checkout, pins the runtime's dependencies, with hashes, in runtime.lock.
+`.venv/bin/python -m hearth.install runtime --base <python> --ref <git ref>` builds a runtime from that ref, never from the working
 tree, under ~/Library/Application Support/Hearth/runtime/. It records the base interpreter's path and exact version, so the
 app can refuse to start if that Python changes, and it points `current` at the new runtime only after the installed
 backend has started and proved its handshake.
@@ -81,9 +81,10 @@ def install(repo: Path, ref: str, base: str, root: Path = ROOT, pip_options: tup
     """Build a runtime from `ref`, check that its backend starts, then make it current; returns the runtime's folder."""
     interpreter = base_python(base)
     commit = _run(["git", "-C", str(repo), "rev-parse", "--verify", f"{ref}^{{commit}}"]).stdout.strip()
-    target = root / f"{''.join(c if c.isalnum() or c in '.-_' else '-' for c in ref)}-{commit[:12]}"
+    # Named for the base Python too, so rebuilding after that Python changes makes a new runtime instead of meeting the old one.
+    target = root / f"{''.join(c if c.isalnum() or c in '.-_' else '-' for c in ref)}-{commit[:12]}-py{interpreter['version']}"
     if target.exists():
-        raise InstallError(f"A runtime for {ref} at {commit[:12]} is already installed at {target}.\n"
+        raise InstallError(f"A runtime for {ref} at {commit[:12]} on Python {interpreter['version']} is already installed at {target}.\n"
                            f"Next: use it, or remove {target} and install again")
     root.mkdir(parents=True, exist_ok=True)
     try:
@@ -92,7 +93,7 @@ def install(repo: Path, ref: str, base: str, root: Path = ROOT, pip_options: tup
             _export(repo, commit, source)
             if not (source / LOCK).is_file():
                 raise InstallError(f"{ref} has no {LOCK}, so its dependencies are not pinned.\n"
-                                   f"Next: run python -m hearth.install lock, commit {LOCK}, and install from that commit")
+                                   f"Next: run .venv/bin/python -m hearth.install lock, commit {LOCK}, and install from that commit")
             _run([base, "-I", "-m", "venv", str(target)])
             python = str(target / "bin/python")
             pip = [python, "-I", "-m", "pip", "install", "--quiet", "--disable-pip-version-check", *pip_options]
@@ -101,7 +102,7 @@ def install(repo: Path, ref: str, base: str, root: Path = ROOT, pip_options: tup
             _run([*pip, "--no-deps", "--no-build-isolation", str(source)])
         _check_backend(python)
         (target / "runtime.json").write_text(json.dumps({
-            "format": FORMAT, "base": interpreter, "ref": ref, "commit": commit,
+            "format": FORMAT, "base": interpreter, "ref": ref, "commit": commit, "source": str(repo.resolve()),  # Where to rebuild it.
             "installed": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
         }, indent=2) + "\n", encoding="utf-8")
     except BaseException:
@@ -189,7 +190,7 @@ def _run(argv: list[str]) -> subprocess.CompletedProcess:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="python -m hearth.install", description=__doc__.splitlines()[0])
+    parser = argparse.ArgumentParser(prog=".venv/bin/python -m hearth.install", description=__doc__.splitlines()[0])
     parser.add_argument("--repo", type=Path, default=Path.cwd(), help="The Hearth checkout (default: the current folder).")
     commands = parser.add_subparsers(dest="command", required=True)
     locker = commands.add_parser("lock", help=f"Pin the runtime's dependencies, with hashes, in {LOCK}.")

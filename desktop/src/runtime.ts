@@ -46,10 +46,11 @@ export function backendCommand(): BackendCommand | { problem: string } {
     return { prefix, env: process.env };
   }
   const root = process.env.HEARTH_RUNTIME || RUNTIME_ROOT;
-  const reinstall = (base: string, ref: string) =>
-    `Next: from the Hearth checkout, run python3 -m hearth.install runtime --base "${base}" --ref ${ref}`;
+  // Runnable as printed: the installer needs the checkout's development environment, which has Hearth's dependencies.
+  const reinstall = (base: string, ref: string, source?: string) =>
+    `Next: ${source ? `cd "${source}" && ` : "in the Hearth checkout, run "}.venv/bin/python -m hearth.install runtime --base "${base}" --ref ${ref}`;
   let current: string;
-  let record: { base: { path: string; version: string }; ref: string };
+  let record: { base: { path: string; version: string }; ref: string; source?: string };
   try {
     current = realpathSync(join(root, "current"));  // Resolved once, so this start uses one runtime even if it is switched.
     record = JSON.parse(readFileSync(join(current, "runtime.json"), "utf8"));
@@ -64,7 +65,7 @@ export function backendCommand(): BackendCommand | { problem: string } {
   }
   if (found !== record.base.version) {
     return { problem: `Hearth's Python changed. Its runtime was built on Python ${record.base.version} at ${record.base.path}, which now reports ${found}, `
-                      + `so Hearth will not start it.\n${reinstall(record.base.path, record.ref)}` };
+                      + `so Hearth will not start it.\n${reinstall(record.base.path, record.ref, record.source)}` };
   }
   const env: NodeJS.ProcessEnv = { ...process.env, PYTHONNOUSERSITE: "1" };
   for (const name of SCRUBBED) delete env[name];

@@ -18,7 +18,8 @@ function runtime(home: Scratch, recorded: string): { root: string; calls: string
   mkdirSync(join(root, "v1/bin"), { recursive: true });
   writeFileSync(join(root, "v1/bin/python"), `#!/bin/sh\necho "$* | PYTHONPATH=$PYTHONPATH PYTHONNOUSERSITE=$PYTHONNOUSERSITE" >> "${calls}"\nexec "${python}" "$@"\n`);
   chmodSync(join(root, "v1/bin/python"), 0o755);
-  writeFileSync(join(root, "v1/runtime.json"), JSON.stringify({ format: "hearth-runtime-v1", base: { path: base, version: recorded }, ref: "v0.1.0" }));
+  writeFileSync(join(root, "v1/runtime.json"), JSON.stringify({ format: "hearth-runtime-v1", base: { path: base, version: recorded }, ref: "v0.1.0",
+                                                       source: "/Users/person/Projects/hearth" }));
   symlinkSync("v1", join(root, "current"));
   return { root, calls };
 }
@@ -49,7 +50,7 @@ test("a changed base Python is refused with the command that rebuilds the runtim
 
   const text = await page.evaluate(() => document.body.innerText);
   assert.match(text, new RegExp(`built on Python 3\\.13\\.0 at ${base.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}, which now reports ${version.replace(/\./g, "\\.")}`));
-  assert.match(text, /python3 -m hearth\.install runtime --base "[^"]+" --ref v0\.1\.0/);
+  assert.ok(text.includes(`Next: cd "/Users/person/Projects/hearth" && .venv/bin/python -m hearth.install runtime --base "${base}" --ref v0.1.0`), text);
   assert.equal(existsSync(calls), false);
 });
 
