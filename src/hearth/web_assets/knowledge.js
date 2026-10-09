@@ -144,6 +144,7 @@
       parts.push(el("p", "meta", lines[state.indexStatus] || `${shown(state.indexStatus)} (unrecognized)`));
       if (job.status === "cancelled") parts.push(el("p", "meta", "The last rebuild was cancelled. No incomplete index was activated."));
       if (job.status === "failed") parts.push(el("p", "meta", job.error || "The last rebuild stopped before completion. No incomplete index was activated."));
+      if (job.status === "interrupted") parts.push(el("p", "meta", "The last rebuild was interrupted when Hearth stopped. No incomplete index was activated."));
       if (state.indexStatus !== "not configured") parts.push(button("Preview rebuild", "", previewIndex));
     }
     if (job.benchmark) parts.push(benchmark(job.benchmark));

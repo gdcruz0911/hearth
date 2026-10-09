@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fcntl
 import hmac
 import json
 import resource
@@ -115,8 +116,13 @@ class HearthWebApplication:
         workbench_diff: Callable[[str], Mapping[str, Any] | None] | None = None,
         workbench_task_state: Callable[[str, str], str | None] | None = None,
         workbench_task_action: Callable[[str, str, Mapping[str, str], str], Mapping[str, Any] | None] | None = None,
+        rebuild_state: Path | None = None,
     ):
         self._service = service
+        self._rebuild_state = rebuild_state  # ~/.hearth/rebuild.json, so a crash mid-rebuild is reported (ADR-0038); None in tests.
+        self._semantic_index_thread: threading.Thread | None = None
+        self._rebuild_claim = None  # rebuild.lock, held exclusively while this backend's rebuild owns the record.
+        self._stopping = False  # Set once shutdown begins, so no rebuild starts after the wait for one.
         self._workbench_transcript = workbench_transcript
         self._workbench_diff = workbench_diff
         # ADR-0037: the launch token works once; a cookie and a header token, both held only in memory, replace it.
@@ -420,6 +426,60 @@ class HearthWebApplication:
             }
         )
 
+    def stop_semantic_index_rebuild(self) -> None:
+        """Cancel an active rebuild and wait until it has stopped, cleaned up, and released the build lock (ADR-0038)."""
+        with self._semantic_index_job_lock:
+            self._stopping = True
+        self.cancel_semantic_index_rebuild()
+        if self._semantic_index_thread is not None and self._semantic_index_thread.is_alive():
+            self._semantic_index_thread.join()
+        with self._semantic_index_job_lock:
+            # A claim with no rebuild left to release it, after an interrupt between claiming and the thread running.
+            job = self._semantic_index_job
+            if self._rebuild_claim is not None:
+                if job is not None and job.status in {"running", "cancelling"}:
+                    job.status = job.phase = "cancelled"
+                self._release_rebuild("cancelled")
+
+    def _claim_rebuild(self) -> None:
+        """Own the record across processes, so only the backend whose rebuild runs ever writes it (ADR-0038)."""
+        if self._rebuild_state is None:
+            return
+        self._rebuild_state.parent.mkdir(parents=True, exist_ok=True)
+        claim = (self._rebuild_state.parent / "rebuild.lock").open("a")
+        try:
+            fcntl.flock(claim, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            _write_rebuild_state(self._rebuild_state, "running")
+        except BlockingIOError:
+            claim.close()
+            raise WebRequestError("Another Hearth backend is rebuilding the semantic index. Try again after it finishes.") from None
+        except BaseException:
+            claim.close()  # A start that fails keeps no claim, so the next one is not refused.
+            raise
+        self._rebuild_claim = claim
+
+    def _release_rebuild(self, status: str) -> None:
+        """Called under the job lock, so the next rebuild starts only after this one's final state is on disk."""
+        if self._rebuild_claim is None:
+            return
+        try:
+            _write_rebuild_state(self._rebuild_state, status)
+        finally:
+            self._rebuild_claim.close()
+            self._rebuild_claim = None
+
+    def _interrupted_rebuild(self) -> bool:
+        """A rebuild recorded as running whose backend has gone, after a crash, a forced quit, or a restart of the Mac."""
+        if self._rebuild_state is None or not self._rebuild_state.exists():
+            return False
+        with (self._rebuild_state.parent / "rebuild.lock").open("a") as claim:
+            try:
+                fcntl.flock(claim, fcntl.LOCK_SH | fcntl.LOCK_NB)  # The OS released the claim when its owner exited.
+            except BlockingIOError:
+                return False  # Its owner is still running.
+            # Read while holding the lock, so an owner that finished meanwhile has already written its final status.
+            return json.loads(self._rebuild_state.read_text(encoding="utf-8"))["status"] == "running"
+
     def cancel_semantic_index_rebuild(self) -> None:
         """Ask an active local rebuild to stop at its next small batch boundary."""
         with self._semantic_index_job_lock:
@@ -430,8 +490,11 @@ class HearthWebApplication:
     def _start_semantic_index_rebuild(self) -> dict[str, Any]:
         health = self._service.collection_health()
         with self._semantic_index_job_lock:
+            if self._stopping:
+                raise WebRequestError("Hearth is stopping, so no new rebuild starts.")
             if self._semantic_index_job is not None and self._semantic_index_job.status in {"running", "cancelling"}:
                 raise WebRequestError("A local semantic-index rebuild is already running.")
+            self._claim_rebuild()  # Before the job exists, so a failed claim leaves no job that never runs.
             job = _SemanticIndexJob(
                 total=health.chunk_count,
                 completed=0,
@@ -442,7 +505,17 @@ class HearthWebApplication:
             )
             self._semantic_index_job = job
         thread = threading.Thread(target=self._run_semantic_index_rebuild, args=(job,), daemon=True)
-        thread.start()
+        self._semantic_index_thread = thread  # Before start(), so shutdown can always find a thread that did start.
+        try:
+            thread.start()
+        except Exception:  # Raised before any thread exists, so nothing runs: drop the job and the claim.
+            with self._semantic_index_job_lock:
+                self._semantic_index_job = None
+                self._release_rebuild("failed")
+            raise
+        except BaseException:  # An interrupt may land after the thread started; cancel it, and stopping cleans up.
+            job.cancellation_requested.set()
+            raise
         return self._semantic_index_job_payload()
 
     def _run_semantic_index_rebuild(self, job: _SemanticIndexJob) -> None:
@@ -469,6 +542,7 @@ class HearthWebApplication:
                 if self._semantic_index_job is job:
                     job.status = "cancelled"
                     job.phase = "cancelled"
+                    self._release_rebuild(job.status)
         except Exception as exc:
             with self._semantic_index_job_lock:
                 if self._semantic_index_job is job:
@@ -479,6 +553,7 @@ class HearthWebApplication:
                         if isinstance(exc, (IndexBusy, IndexBuildStopped))
                         else "The local semantic-index rebuild stopped before completion."
                     )
+                    self._release_rebuild(job.status)
         else:
             with self._semantic_index_job_lock:
                 if self._semantic_index_job is job:
@@ -486,6 +561,7 @@ class HearthWebApplication:
                     job.status = "completed"
                     job.phase = "ready"
                     job.semantic_index_status = semantic_index_status
+                    self._release_rebuild(job.status)
 
     def _cancel_semantic_index_rebuild(self) -> dict[str, Any]:
         with self._semantic_index_job_lock:
@@ -501,7 +577,7 @@ class HearthWebApplication:
         with self._semantic_index_job_lock:
             job = self._semantic_index_job
             if job is None:
-                return {"status": "idle", "completed": 0, "total": 0}
+                return {"status": "interrupted" if self._interrupted_rebuild() else "idle", "completed": 0, "total": 0}
             elapsed_seconds = max(time.monotonic() - job.started_at, 0.0)
             cpu_seconds = max(time.process_time() - job.cpu_started_at, 0.0)
             throughput_per_minute = (job.completed / elapsed_seconds * 60) if elapsed_seconds and job.completed else 0.0
@@ -607,14 +683,19 @@ class HearthWebServer:
         workbench_diff: Callable[[str], Mapping[str, Any] | None] | None = None,
         workbench_task_state: Callable[[str, str], str | None] | None = None,
         workbench_task_action: Callable[[str, str, Mapping[str, str], str], Mapping[str, Any] | None] | None = None,
+        rebuild_state: Path | None = None,
     ):
         token = secrets.token_urlsafe(32)
         self._application = HearthWebApplication(service, token, choose_file, source_roots, workbench_tasks, workbench_transcript, workbench_diff,
-                                                 workbench_task_state, workbench_task_action)
+                                                 workbench_task_state, workbench_task_action, rebuild_state)
         self._browser_opener = browser_opener
         self._http_server = _LoopbackHTTPServer(("127.0.0.1", port), _handler_type(self._application))
         self._http_server.timeout = 0.5
         self._serving = threading.Event()
+
+    def request_stop(self) -> None:
+        """Make serve_forever return between requests; safe from a signal handler, unlike shutdown() on its own thread."""
+        threading.Thread(target=self._http_server.shutdown, daemon=True).start()
 
     @property
     def url(self) -> str:
@@ -631,10 +712,10 @@ class HearthWebServer:
             self._serving.clear()
 
     def close(self) -> None:
-        self._application.cancel_semantic_index_rebuild()
         if self._serving.is_set():
-            self._http_server.shutdown()
+            self._http_server.shutdown()  # First, so no request can start a rebuild after the wait below.
         self._http_server.server_close()
+        self._application.stop_semantic_index_rebuild()
 
 
 def choose_local_file() -> Path:
@@ -743,6 +824,13 @@ class _LoopbackHTTPServer(HTTPServer):
         request, client_address = super().get_request()
         request.settimeout(_CONNECTION_TIMEOUT_SECONDS)
         return request, client_address
+
+
+def _write_rebuild_state(path: Path, status: str) -> None:
+    """Replace the record whole, so a reader never sees half of one."""
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(json.dumps({"status": status, "at": time.strftime("%Y-%m-%dT%H:%M:%S%z")}), encoding="utf-8")
+    temporary.replace(path)
 
 
 def _json_body(body: bytes) -> Mapping[str, Any]:
