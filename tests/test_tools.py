@@ -25,9 +25,10 @@ class ToolDiscoveryTests(unittest.TestCase):
         self.first, self.second = self.root / "local-bin", self.root / "homebrew-bin"
         self.first.mkdir()
         self.second.mkdir()
-        patch = mock.patch.object(tools, "TOOL_DIRS", (str(self.first), str(self.root / "absent"), str(self.second)))
-        patch.start()
-        self.addCleanup(patch.stop)
+        for patch in (mock.patch.object(tools, "TOOL_DIRS", (str(self.first), str(self.root / "absent"), str(self.second))),
+                      mock.patch.dict(os.environ, {"PATH": BARE})):  # So no test here can reach the person's real agents.
+            patch.start()
+            self.addCleanup(patch.stop)
 
     def tool(self, folder: Path, name: str, version: str) -> None:
         script = folder / name
@@ -73,7 +74,7 @@ class ToolDiscoveryTests(unittest.TestCase):
         on_disk = self.root / "embedding"
         on_disk.mkdir()
 
-        found = tools.report(on_disk, self.root / "reranker")["inference"]
+        found = tools._inference(on_disk, self.root / "reranker")  # Not report(): that would run whatever agents PATH reaches.
 
         self.assertEqual(found["models"], {"embedding": {"path": str(on_disk), "on_disk": True},
                                            "reranker": {"path": str(self.root / "reranker"), "on_disk": False}})

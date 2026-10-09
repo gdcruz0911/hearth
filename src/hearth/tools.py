@@ -27,6 +27,8 @@ TOOLS = (
     ("pdftotext", "reading PDF text", False, "-v"),
     ("pdfinfo", "reading PDF page counts", False, "-v"),
     ("ocrmypdf", "reading scanned PDFs", False, "--version"),
+    ("tesseract", "the text recognition ocrmypdf runs", False, "--version"),  # ocrmypdf --version passes without these two.
+    ("gs", "the PDF rendering ocrmypdf runs (Ghostscript)", False, "--version"),
 )
 AGENTS = ("claude", "codex")  # Tasks need at least one of these to implement.
 TIMEOUT_SECONDS = 15
