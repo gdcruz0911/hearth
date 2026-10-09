@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import http.client
+import hashlib
+import hmac
 import json
+import os
 import re
+import secrets
 import shutil
 import contextlib
 import fcntl
@@ -757,6 +761,246 @@ class RebuildLifecycleTests(unittest.TestCase):
         self.assertIn("stopped", process.stdout.read())
         process.stderr.close()
         process.stdout.close()
+
+
+class DesktopModeTests(unittest.TestCase):
+    """ADR-0038: the desktop backend binds port 0, hands its secrets only to the shell's pipe, and proves it holds them."""
+
+    def setUp(self) -> None:
+        self.temporary_directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary_directory.cleanup)
+        self.root = Path(self.temporary_directory.name)
+
+    def backend(self) -> tuple[subprocess.Popen, dict]:
+        read, write = os.pipe()
+        process = subprocess.Popen([sys.executable, "-m", "hearth.cli", "--database", str(self.root / "web.sqlite"), "web", "--desktop",
+                                    "--handshake-fd", str(write)], env=self.env(), pass_fds=(write,), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                   text=True)
+        os.close(write)
+        self.addCleanup(lambda: (process.kill(), process.wait(), process.stdout.close(), process.stderr.close()))
+        with os.fdopen(read, encoding="utf-8") as pipe:
+            handshake = json.loads(pipe.readline())
+        return process, handshake
+
+    def request(self, handshake: dict, path: str, credentials: bool = True) -> tuple[int, bytes]:
+        connection = http.client.HTTPConnection("127.0.0.1", handshake["port"], timeout=5)
+        headers = {"Cookie": f"{handshake['cookie_name']}={handshake['cookie']}", "X-Hearth-Session": handshake["token"]} if credentials else {}
+        connection.request("GET", path, headers=headers)
+        response = connection.getresponse()
+        body = response.read()
+        connection.close()
+        return response.status, body
+
+    @staticmethod
+    def answer(token: str, challenge: str) -> str:
+        return hmac.new(token.encode(), b"hearth-desktop-challenge\0" + challenge.encode(), hashlib.sha256).hexdigest()
+
+    def test_the_backend_proves_it_holds_this_launchs_secret(self) -> None:
+        _, handshake = self.backend()
+        challenge = secrets.token_hex(32)
+
+        status, body = self.request(handshake, f"/desktop/challenge?c={challenge}", credentials=False)
+
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["answer"], self.answer(handshake["token"], challenge))
+        self.assertNotEqual(json.loads(body)["answer"], self.answer("another launch's token", challenge))
+        for bad in ("short", "z" * 64, "a" * 300, ""):
+            with self.subTest(challenge=bad):
+                self.assertEqual(self.request(handshake, f"/desktop/challenge?c={bad}", credentials=False)[0], 400)
+
+    def test_api_routes_need_the_handed_over_credentials_and_there_is_no_launch_link(self) -> None:
+        _, handshake = self.backend()
+
+        self.assertEqual(self.request(handshake, "/api/workbench/tasks")[0], 200)
+        self.assertEqual(self.request(handshake, "/api/workbench/tasks", credentials=False)[0], 401)
+        self.assertEqual(self.request(handshake, "/launch/anything", credentials=False)[0], 404)
+
+    def test_the_secrets_never_reach_the_backends_output(self) -> None:
+        process, handshake = self.backend()
+        self.request(handshake, "/api/workbench/tasks")
+
+        process.send_signal(signal.SIGTERM)
+        self.assertEqual(process.wait(timeout=10), 0)
+        output = process.stdout.read() + process.stderr.read()
+
+        for secret in (handshake["cookie"], handshake["token"]):
+            self.assertNotIn(secret, output)
+
+    def test_a_restarted_backend_does_not_accept_the_old_secrets(self) -> None:
+        first, old = self.backend()
+        first.send_signal(signal.SIGTERM)
+        first.wait(timeout=10)
+        _, new = self.backend()
+        stale = {**new, "cookie": old["cookie"], "token": old["token"]}
+        challenge = secrets.token_hex(32)
+
+        self.assertEqual(self.request(stale, "/api/workbench/tasks")[0], 401)
+        answer = json.loads(self.request(new, f"/desktop/challenge?c={challenge}", credentials=False)[1])["answer"]
+        self.assertNotEqual(answer, self.answer(old["token"], challenge))
+
+    def test_only_the_desktop_backend_answers_a_challenge(self) -> None:
+        service = HearthService(self.root / "browser.sqlite")
+        self.addCleanup(service.close)
+        app = HearthWebApplication(service, "token")
+        call = signed_in(app)  # A browser session exists, so only the mode can refuse.
+
+        response = call("GET", f"/desktop/challenge?c={secrets.token_hex(32)}")
+
+        self.assertNotEqual(response.status, 200)
+        self.assertNotIn(b"answer", response.body)
+
+    def test_the_desktop_backend_has_no_launch_link_even_for_its_own_token(self) -> None:
+        service = HearthService(self.root / "desktop.sqlite")
+        self.addCleanup(service.close)
+        app = HearthWebApplication(service, "token")
+        app.start_desktop_session(8765)
+
+        self.assertEqual(app.respond("GET", "/launch/token", b"", {"Host": HOST}).status, 404)
+
+    def test_two_desktop_backends_each_bind_a_free_port(self) -> None:
+        _, first = self.backend()
+        _, second = self.backend()
+
+        self.assertNotEqual(first["port"], second["port"])
+        self.assertEqual((self.request(first, "/api/workbench/tasks")[0], self.request(second, "/api/workbench/tasks")[0]), (200, 200))
+
+    def env(self, **extra: str) -> dict[str, str]:
+        return {"HOME": str(self.root), "PATH": "/usr/bin:/bin", "PYTHONPATH": str(Path(__file__).parents[1] / "src"), **extra}
+
+    def test_desktop_flags_that_would_be_ignored_are_refused(self) -> None:
+        for flags, named in ((["--desktop"], "--handshake-fd"), (["--handshake-fd", "3"], "--desktop"),
+                             (["--desktop", "--handshake-fd", "3", "--port", "9000"], "--port")):
+            with self.subTest(flags=flags):
+                result = subprocess.run([sys.executable, "-m", "hearth.cli", "--database", str(self.root / "web.sqlite"), "web", *flags],
+                                        env=self.env(), capture_output=True, text=True, timeout=30)
+                self.assertEqual(result.returncode, 2)
+                self.assertIn(named, result.stderr)
+
+    def test_the_handshake_goes_only_to_a_writable_pipe(self) -> None:
+        command = [sys.executable, "-m", "hearth.cli", "--database", str(self.root / "web.sqlite"), "web", "--desktop", "--handshake-fd"]
+        stdout = subprocess.run([*command, "1"], env=self.env(), capture_output=True, text=True, timeout=30)
+        saved = self.root / "handshake.txt"
+        with saved.open("w") as file:
+            to_file = subprocess.run([*command, str(file.fileno())], env=self.env(), pass_fds=(file.fileno(),), capture_output=True, text=True,
+                                     timeout=30)
+        read, write = os.pipe()
+        read_end = subprocess.run([*command, str(read)], env=self.env(), pass_fds=(read,), capture_output=True, text=True, timeout=30)
+        os.close(read)
+        os.close(write)
+
+        for name, result in (("stdout", stdout), ("a file", to_file), ("a pipe's read end", read_end)):
+            with self.subTest(destination=name):
+                self.assertEqual(result.returncode, 2)
+                self.assertIn("writable pipe", result.stderr)
+                self.assertNotIn("token", result.stdout)
+        self.assertEqual(saved.read_text(encoding="utf-8"), "")
+
+    def test_a_backend_whose_app_died_during_startup_stops(self) -> None:
+        read, write = os.pipe()  # This test keeps the read end, so the handshake still has somewhere to go.
+        launcher = subprocess.run([sys.executable, "-c", """
+import subprocess, sys
+backend = subprocess.Popen([sys.executable, "-m", "hearth.cli", "--database", sys.argv[1], "web", "--desktop", "--handshake-fd", sys.argv[2]],
+                           pass_fds=(int(sys.argv[2]),), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+print(backend.pid)  # Then the app exits at once, before the backend has finished starting.
+""", str(self.root / "web.sqlite"), str(write)], env=self.env(), pass_fds=(write,), capture_output=True, text=True, timeout=30)
+        os.close(write)
+        backend = int(launcher.stdout)
+
+        def kill_backend() -> None:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(backend, signal.SIGKILL)
+
+        self.addCleanup(kill_backend)
+        with os.fdopen(read, encoding="utf-8") as pipe:
+            pipe.readline()  # A handshake, or nothing if it refused to start as an orphan.
+        for _ in range(100):
+            try:
+                os.kill(backend, 0)
+            except ProcessLookupError:
+                return
+            time.sleep(0.1)
+        self.fail("a backend orphaned during startup kept running")
+
+    def test_a_backend_whose_app_dies_after_it_started_up_but_before_the_handshake_stops(self) -> None:
+        database = self.root / "web.sqlite"
+        read, write = os.pipe()
+        launcher = subprocess.Popen([sys.executable, "-c", """
+import subprocess, sys, time
+backend = subprocess.Popen([sys.executable, "-m", "hearth.cli", "--database", sys.argv[1], "web", "--desktop", "--handshake-fd", sys.argv[2]],
+                           pass_fds=(int(sys.argv[2]),), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+print(backend.pid, flush=True)
+time.sleep(60)
+""", str(database), str(write)], env=self.env(), pass_fds=(write,), stdout=subprocess.PIPE, text=True)
+        os.close(write)
+        self.addCleanup(launcher.stdout.close)
+        backend = int(launcher.stdout.readline())
+
+        def kill_backend() -> None:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(backend, signal.SIGCONT)
+                os.kill(backend, signal.SIGKILL)
+
+        self.addCleanup(kill_backend)
+        while not database.exists():  # It has recorded its launcher and opened the database; the handshake comes later.
+            time.sleep(0.001)
+        os.kill(backend, signal.SIGSTOP)
+        launcher.kill()  # The app crashes in that window.
+        launcher.wait()
+        os.kill(backend, signal.SIGCONT)
+        with os.fdopen(read, encoding="utf-8") as pipe:
+            pipe.readline()
+        for _ in range(100):
+            try:
+                os.kill(backend, 0)
+            except ProcessLookupError:
+                return
+            time.sleep(0.1)
+        self.fail("the backend adopted its new parent as its owner and kept running")
+
+    def test_an_agent_cannot_start_a_dashboard_backend(self) -> None:
+        for flags in ([], ["--desktop"]):
+            with self.subTest(flags=flags):
+                read, write = os.pipe()
+                result = subprocess.run([sys.executable, "-m", "hearth.cli", "--database", str(self.root / "web.sqlite"), "web", "--no-open",
+                                         *(flags + ["--handshake-fd", str(write)] if flags else [])], env=self.env(HEARTH_TASK="20260927-000000"),
+                                        pass_fds=(write,), capture_output=True, text=True, timeout=30)
+                os.close(write)
+                with os.fdopen(read, encoding="utf-8") as pipe:
+                    self.assertEqual(pipe.read(), "")
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("Agents cannot", result.stderr)
+
+    def test_the_desktop_backend_stops_when_the_app_that_started_it_dies(self) -> None:
+        launcher = subprocess.Popen([sys.executable, "-c", """
+import json, os, subprocess, sys, time
+read, write = os.pipe()
+backend = subprocess.Popen([sys.executable, "-m", "hearth.cli", "--database", sys.argv[1], "web", "--desktop", "--handshake-fd", str(write)],
+                           pass_fds=(write,), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+os.close(write)
+print(backend.pid, json.loads(os.fdopen(read).readline())["port"], flush=True)
+time.sleep(60)
+""", str(self.root / "web.sqlite")], env=self.env(), stdout=subprocess.PIPE, text=True, start_new_session=True)
+        self.addCleanup(launcher.stdout.close)
+        backend, port = map(int, launcher.stdout.readline().split())
+
+        def kill_backend() -> None:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(backend, signal.SIGKILL)  # Only if the test failed before the backend stopped by itself.
+
+        self.addCleanup(kill_backend)
+
+        launcher.kill()  # The app crashes; the backend is left without its parent.
+        launcher.wait()
+        for _ in range(100):
+            try:
+                os.kill(backend, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.1)
+        else:
+            self.fail("the orphaned backend kept running")
+        with self.assertRaises(ConnectionRefusedError):
+            socket.create_connection(("127.0.0.1", port), timeout=1).close()
 
 
 class SessionTests(unittest.TestCase):
