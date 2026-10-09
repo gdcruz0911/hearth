@@ -2,7 +2,8 @@
 
 FAKE_BACKEND_LOG names a JSON-lines file: the first line holds this backend's pid, port, and secrets, then one line per
 request with its path and headers. FAKE_BACKEND_MODE "wrong-answer" answers the challenge with the wrong secret, and
-"rebuilding" reports a running index rebuild and, on SIGTERM, takes a second to release it, as the real backend waits.
+"rebuilding" reports a running index rebuild and, on SIGTERM, takes a second to release it, as the real backend waits;
+"status-hangs" answers the rebuild status only after six seconds, longer than the app waits.
 """
 
 from __future__ import annotations
@@ -44,6 +45,11 @@ class Handler(BaseHTTPRequestHandler):
             return None
         if url.path == "/api/semantic-index" and os.environ.get("FAKE_BACKEND_MODE") == "rebuilding":
             return self.reply(200, "application/json", json.dumps({"job": {"status": "running"}}))
+        if url.path == "/api/semantic-index" and os.environ.get("FAKE_BACKEND_MODE") == "status-hangs":
+            time.sleep(6)
+            return self.reply(200, "application/json", json.dumps({"job": {"status": "idle"}}))
+        if url.path == "/api/semantic-index":
+            return self.reply(200, "application/json", json.dumps({"job": {"status": "idle"}}))  # As the real backend says.
         if url.path == "/":
             return self.reply(200, "text/html; charset=utf-8", "<!doctype html><title>Fake Hearth</title><p>fake dashboard</p>")
         return self.reply(200, "application/json", "{}")

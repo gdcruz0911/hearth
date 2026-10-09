@@ -1,11 +1,11 @@
 // ADR-0038's proofs for the shell, against the real app: what it trusts, what it sends, and what its window may do.
 
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { test, type TestContext } from "node:test";
 import { backendLog, fakeBackend, openApp, opened, pause, realBackend, scratch, seedTask, stranger, windowShowing } from "./helpers.ts";
 
 test("a server that cannot answer the challenge is refused and receives no credential", async (t) => {
-  const home = scratch(t);
+  const home = scratch();
   const { app } = await openApp(t, home, fakeBackend, { FAKE_BACKEND_MODE: "wrong-answer" });
 
   await windowShowing(app, "could not prove it is this launch's backend");
@@ -17,7 +17,7 @@ test("a server that cannot answer the challenge is refused and receives no crede
 });
 
 test("the token goes only to API routes, the page cannot read either credential, and neither is ever printed", async (t) => {
-  const home = scratch(t);
+  const home = scratch();
   const { app, output } = await openApp(t, home, fakeBackend);
   const page = await windowShowing(app, "fake dashboard");
   const [{ cookie, token }] = backendLog(home).secrets;
@@ -40,7 +40,7 @@ test("the token goes only to API routes, the page cannot read either credential,
 });
 
 test("other origins, redirects, new windows, frames, and device permissions are refused", async (t) => {
-  const home = scratch(t);
+  const home = scratch();
   const other = await stranger(t);
   const { app } = await openApp(t, home, fakeBackend);
   const page = await windowShowing(app, "fake dashboard");
@@ -77,7 +77,7 @@ test("other origins, redirects, new windows, frames, and device permissions are 
 });
 
 test("after the backend exits, a server on its old port gets nothing, and a restart uses new secrets", async (t) => {
-  const home = scratch(t);
+  const home = scratch();
   const { app } = await openApp(t, home, fakeBackend);
   const page = await windowShowing(app, "fake dashboard");
   await page.evaluate(() => void setInterval(() => fetch("/api/poll").catch(() => {}), 50));  // Like the dashboard's polling.
@@ -99,7 +99,7 @@ test("after the backend exits, a server on its old port gets nothing, and a rest
   assert.equal(JSON.stringify(later).includes(first.cookie) || JSON.stringify(later).includes(first.token), false);
 });
 
-async function bindWhenFree(t: Parameters<typeof scratch>[0], port: number) {
+async function bindWhenFree(t: TestContext, port: number) {
   for (let tries = 0; tries < 50; tries++) {
     try {
       return await stranger(t, port);
@@ -111,7 +111,7 @@ async function bindWhenFree(t: Parameters<typeof scratch>[0], port: number) {
 }
 
 test("the real dashboard works through the shell, and agent-written text never runs or links anywhere but https", async (t) => {
-  const home = scratch(t);
+  const home = scratch();
   const hostile = '<img src=x onerror="alert(1)"><script>alert(2)</script>';
   const task = (id: string, url: string) => ({
     id, project: "demo", goal: hostile, status: "failed", stop_reason: hostile, runs: [], created: "2026-10-09T12:00:00", finished: null,
@@ -148,7 +148,7 @@ test("the real dashboard works through the shell, and agent-written text never r
 });
 
 test("when the backend exits, its session stops sending and loses its cookie", async (t) => {
-  const home = scratch(t);
+  const home = scratch();
   const { app } = await openApp(t, home, fakeBackend);
   await windowShowing(app, "fake dashboard");
   const [first] = backendLog(home).secrets;

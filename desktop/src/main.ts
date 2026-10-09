@@ -24,7 +24,15 @@ function backendCommand(): string[] {
   return command;
 }
 
-async function start(): Promise<void> {
+// One start at a time: a backend is not in `running` until its handshake succeeds, so `starting` covers the wait.
+let starting: Promise<void> | null = null;
+
+function start(): Promise<void> {
+  starting ??= launchBackend().finally(() => (starting = null));
+  return starting;
+}
+
+async function launchBackend(): Promise<void> {
   stoppedReason = "";
   let backend: Backend;
   try {
@@ -94,7 +102,11 @@ function openWindow(): void {
 function stoppedPage(reason: string): string {
   const escaped = reason.replace(/[&<>"]/g, (character) => `&#${character.charCodeAt(0)};`);
   const html = `<!doctype html><meta charset=utf-8><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'">`
-    + `<title>Hearth</title><body style="font:15px -apple-system,sans-serif;margin:3rem;max-width:40rem"><h1>Hearth</h1><p>${escaped}</p>`;
+    + "<style>:root{--bg:#17191d;--text:#ebecef;--muted:#969da9;--ember:#f2a26e;color-scheme:dark}"
+    + "@media (prefers-color-scheme:light){:root{--bg:#f7f8fa;--text:#222b3c;--muted:#677184;--ember:#a8481c;color-scheme:light}}"
+    + "body{margin:0;padding:3rem;background:var(--bg);color:var(--text);font:15px -apple-system,BlinkMacSystemFont,sans-serif}"
+    + "h1{color:var(--ember);font-size:20px;margin:0 0 12px}p{max-width:40rem;line-height:1.5}</style>"
+    + `<title>Hearth</title><h1>Hearth</h1><p>${escaped}</p>`;
   return `data:text/html;charset=utf-8,${encodeURIComponent(html)}`;
 }
 
@@ -119,26 +131,29 @@ app.on("web-contents-created", (_event, contents) => {
   });
 });
 
-async function rebuildRunning(backend: Running): Promise<boolean> {
+// "unknown" when the backend cannot say, which is never taken to mean no rebuild is running.
+async function rebuildState(backend: Running): Promise<"running" | "idle" | "unknown"> {
   try {
     const reply = await get(`${backend.origin}/api/semantic-index`, {
       Cookie: `${backend.handshake.cookie_name}=${backend.handshake.cookie}`, "X-Hearth-Session": backend.handshake.token,
     });
-    const job = (JSON.parse(reply.body) as { job?: { status?: string } }).job;
-    return reply.status === 200 && (job?.status === "running" || job?.status === "cancelling");
+    const status = (JSON.parse(reply.body) as { job?: { status?: unknown } }).job?.status;
+    if (reply.status !== 200 || typeof status !== "string") return "unknown";
+    return status === "running" || status === "cancelling" ? "running" : "idle";
   } catch {
-    return false;
+    return "unknown";
   }
 }
 
 // Quitting stops only the backend's own process, never its group, so resumed task loops keep running (ADR-0038).
 async function quit(): Promise<void> {
   const backend = running;
-  if (backend && await rebuildRunning(backend)) {
+  const state = backend ? await rebuildState(backend) : "idle";
+  if (state !== "idle") {
     const { response } = await dialog.showMessageBox({
       type: "warning", buttons: ["Keep Running", "Quit"], defaultId: 0, cancelId: 0,
-      message: "A semantic-index rebuild is running.",
-      detail: "Quitting cancels it and leaves the current index as it was. Hearth waits until the rebuild has stopped and cleaned up.",
+      message: state === "running" ? "A semantic-index rebuild is running." : "Hearth could not check whether a semantic-index rebuild is running.",
+      detail: "Quitting cancels any rebuild and leaves the current index as it was. Hearth waits until the rebuild has stopped and cleaned up.",
     });
     if (response === 0) return;
   }
@@ -169,7 +184,7 @@ if (!app.requestSingleInstanceLock()) {
   void app.whenReady().then(() => {
     Menu.setApplicationMenu(Menu.buildFromTemplate([
       { label: "Hearth", submenu: [
-        { label: "Restart Backend", click: () => { if (!running) void start(); } },
+        { label: "Restart Backend", click: () => { if (!running) void start(); } },  // start() ignores a click while one is starting.
         { type: "separator" },
         { role: "quit" },
       ] },
