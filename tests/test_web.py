@@ -765,6 +765,14 @@ class RebuildLifecycleTests(unittest.TestCase):
         process.stdout.close()
 
 
+class LoopbackBindTests(unittest.TestCase):
+    def test_binding_never_looks_up_a_host_name(self) -> None:
+        # HTTPServer's reverse DNS lookup stalled a CI Mac's backend startup past the app's wait (2026-10-09).
+        with tempfile.TemporaryDirectory() as directory, mock.patch("socket.getfqdn", side_effect=AssertionError("looked up a name")):
+            server = HearthWebServer(HearthService(Path(directory) / "web.sqlite"), port=0)
+            server.close()
+
+
 class DesktopModeTests(unittest.TestCase):
     """ADR-0038: the desktop backend binds port 0, hands its secrets only to the shell's pipe, and proves it holds them."""
 
@@ -896,6 +904,26 @@ class DesktopModeTests(unittest.TestCase):
                 self.assertIn("writable pipe", result.stderr)
                 self.assertNotIn("token", result.stdout)
         self.assertEqual(saved.read_text(encoding="utf-8"), "")
+
+    def test_the_handshake_may_go_to_an_unnamed_socket_pair_but_not_a_named_socket(self) -> None:
+        # Electron's Node gives a child an unnamed socket pair for an extra stdio pipe, which a FIFO-only check refused (2026-10-09).
+        command = [sys.executable, "-m", "hearth.cli", "--database", str(self.root / "web.sqlite"), "web", "--desktop", "--handshake-fd"]
+        ours, theirs = socket.socketpair()
+        process = subprocess.Popen([*command, str(theirs.fileno())], env=self.env(), pass_fds=(theirs.fileno(),),
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        theirs.close()
+        self.addCleanup(lambda: (process.kill(), process.wait(), ours.close()))
+        with ours.makefile(encoding="utf-8") as pipe:
+            self.assertIn("token", json.loads(pipe.readline()))
+        listener = socket.socket(socket.AF_UNIX)
+        listener.bind(str(self.root / "s"))
+        self.addCleanup(listener.close)
+
+        named = subprocess.run([*command, str(listener.fileno())], env=self.env(), pass_fds=(listener.fileno(),), capture_output=True,
+                               text=True, timeout=30)
+
+        self.assertEqual(named.returncode, 2)
+        self.assertIn("writable pipe", named.stderr)
 
     def test_a_backend_whose_app_died_during_startup_stops(self) -> None:
         read, write = os.pipe()  # This test keeps the read end, so the handshake still has somewhere to go.

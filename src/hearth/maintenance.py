@@ -10,7 +10,7 @@ from pathlib import Path
 # Commands that never change Hearth's data. Everything else counts as a writer, so a new command is guarded until it is
 # listed here. Knowledge commands, `hearth web` included, write: opening the database creates or migrates its schema.
 # The statusline is listed because it skips its usage sample during an update rather than fail.
-READ_ONLY = frozenset({"stats", "open", "usage", "usage statusline", "task list", "task show", "task open", "google status"})
+READ_ONLY = frozenset({"stats", "open", "usage", "usage statusline", "task list", "task show", "task open", "google status", "tools"})
 REFUSAL = "Hearth is being updated, and this command changes its data."
 
 

@@ -7,6 +7,7 @@ import json
 import re
 import resource
 import secrets
+import socketserver
 import subprocess
 import sys
 import threading
@@ -101,7 +102,7 @@ class _WebResponse:
 
 
 _RELAUNCH_PAGE = (b"<!doctype html><meta charset=utf-8><title>Hearth</title>"
-                  b"<p>This dashboard needs a fresh launch. Run <code>hearth web</code> in your terminal.</p>")
+                  b"<p>This dashboard needs a fresh launch. Quit and reopen the Hearth app, or run <code>hearth web</code> in your terminal.</p>")
 
 
 class HearthWebApplication:
@@ -163,10 +164,10 @@ class HearthWebApplication:
         relative_path = path.removeprefix("/")
         if not self._has_cookie(headers.get("Cookie", "")):
             if relative_path.startswith("api/"):
-                return self._json_error(HTTPStatus.UNAUTHORIZED, "This dashboard session is not valid. Run hearth web again.")
+                return self._json_error(HTTPStatus.UNAUTHORIZED, "This dashboard session is not valid. Reopen the Hearth app, or run hearth web again.")
             return _WebResponse(HTTPStatus.UNAUTHORIZED, "text/html; charset=utf-8", _RELAUNCH_PAGE)
         if relative_path.startswith("api/") and not self._has_token(headers.get("X-Hearth-Session", "")):
-            return self._json_error(HTTPStatus.UNAUTHORIZED, "This dashboard session is not valid. Run hearth web again.")
+            return self._json_error(HTTPStatus.UNAUTHORIZED, "This dashboard session is not valid. Reopen the Hearth app, or run hearth web again.")
         if method == "POST" and headers.get("Origin") != f"http://{headers.get('Host', '')}":
             # A missing or null Origin is refused too, so another site cannot make the person's browser post here.
             return self._json_error(HTTPStatus.FORBIDDEN, "Hearth accepts changes only from its own page.")
@@ -838,6 +839,12 @@ def _handler_type(application: HearthWebApplication) -> type[BaseHTTPRequestHand
 
 class _LoopbackHTTPServer(HTTPServer):
     """Avoid letting an incomplete loopback connection block the local UI indefinitely."""
+
+    def server_bind(self) -> None:
+        # HTTPServer names itself with socket.getfqdn, a reverse DNS lookup that stalled a CI Mac's startup for over
+        # ten seconds (2026-10-09); a loopback server needs no name, so bind without it.
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = "127.0.0.1", self.server_address[1]
 
     def get_request(self) -> tuple[Any, Any]:
         request, client_address = super().get_request()

@@ -1,3 +1,7 @@
+# The desktop app's installed packages and compiled shell
+desktop/node_modules/
+desktop/out/
+
 # Local Python tooling
 __pycache__/
 *.py[cod]
