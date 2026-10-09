@@ -4,7 +4,12 @@ import http.client
 import json
 import re
 import shutil
+import contextlib
+import fcntl
+import signal
+import socket
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -14,8 +19,9 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from hearth.domain import DocumentRelationship
-from hearth.embedding import IndexBuildCancelled, IndexBuildStopped
+from hearth.embedding import IndexBuildCancelled, IndexBuildStopped, IndexBusy
 from hearth.service import HearthService
+from hearth import web
 from hearth.web import HearthWebApplication, HearthWebServer
 
 
@@ -487,6 +493,272 @@ class WorkbenchTasksEndpointTests(unittest.TestCase):
         self.assertEqual((bad.status, unknown.status), (400, 404))
 
 
+class SlowCleanupIndex(BlockingRelationshipIndex):
+    """Takes a while to clean up after a cancellation, as a real build does when it removes its staging folder."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.cleaned = threading.Event()
+
+    def rebuild(self, chunks, *, on_progress=None, is_cancelled=None, on_warning=None) -> None:
+        try:
+            super().rebuild(chunks, on_progress=on_progress, is_cancelled=is_cancelled, on_warning=on_warning)
+        finally:
+            time.sleep(0.5)
+            self.cleaned.set()
+
+
+class RebuildLifecycleTests(unittest.TestCase):
+    """ADR-0038: a rebuild's state survives a crash, and stopping the backend waits for a rebuild to finish cleaning up."""
+
+    def setUp(self) -> None:
+        self.temporary_directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary_directory.cleanup)
+        self.root = Path(self.temporary_directory.name)
+        self.state = self.root / ".hearth/rebuild.json"
+        note = self.root / "note.md"
+        note.write_text("# Deployment\n\nThe platform team owns deployment.\n", encoding="utf-8")
+        self.index = SlowCleanupIndex()
+        self.service = HearthService(self.root / "hearth.sqlite", semantic_index=self.index)
+        self.addCleanup(self.service.close)
+        self.service.import_with_summary(str(note))
+
+    def app(self) -> tuple[HearthWebApplication, object]:
+        app = HearthWebApplication(self.service, "token", rebuild_state=self.state)
+        return app, signed_in(app)
+
+    def start_rebuild(self, call) -> None:
+        self.index.block_rebuild = True
+        self.index.cleaned.clear()  # The import in setUp already ran one rebuild through this index.
+        preview = json.loads(call("POST", "/api/semantic-index/preview").body)["preview"]
+        call("POST", f"/api/previews/{preview['id']}/apply")
+        self.assertTrue(self.index.started.wait(timeout=5))
+
+    def test_a_rebuild_records_its_state_on_disk_from_start_to_end(self) -> None:
+        app, call = self.app()
+        self.start_rebuild(call)
+
+        running = json.loads(self.state.read_text(encoding="utf-8"))
+        app.stop_semantic_index_rebuild()
+
+        self.assertEqual(running["status"], "running")
+        self.assertEqual(json.loads(self.state.read_text(encoding="utf-8"))["status"], "cancelled")
+
+    def record(self, status: str = "running") -> None:
+        self.state.parent.mkdir(parents=True, exist_ok=True)
+        self.state.write_text(json.dumps({"status": status, "at": "2026-10-08T20:00:00-0400"}), encoding="utf-8")
+
+    def claimed_elsewhere(self) -> None:
+        """Hold the rebuild claim as another live backend would."""
+        handle = (self.state.parent / "rebuild.lock").open("a")
+        self.addCleanup(handle.close)
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+    def test_a_rebuild_whose_backend_died_is_reported_as_interrupted_on_the_next_launch(self) -> None:
+        self.record()  # Its owner is gone, so nothing holds the claim.
+        _, call = self.app()
+
+        job = json.loads(call("GET", "/api/semantic-index").body)["job"]
+
+        self.assertEqual(job["status"], "interrupted")
+
+    def test_a_rebuild_whose_backend_is_alive_is_not_reported_as_interrupted(self) -> None:
+        self.record()
+        self.claimed_elsewhere()
+        _, call = self.app()
+
+        self.assertEqual(json.loads(call("GET", "/api/semantic-index").body)["job"]["status"], "idle")
+
+    def test_a_rebuild_whose_state_cannot_be_written_does_not_start_or_block_the_next(self) -> None:
+        app, call = self.app()
+        preview = json.loads(call("POST", "/api/semantic-index/preview").body)["preview"]
+
+        with mock.patch.object(web, "_write_rebuild_state", side_effect=OSError("disk full")):
+            self.assertEqual(call("POST", f"/api/previews/{preview['id']}/apply").status, 400)
+
+        self.assertEqual(json.loads(call("GET", "/api/semantic-index").body)["job"]["status"], "idle")
+        self.start_rebuild(call)  # Neither refused as "already running" nor by a claim the failed start kept.
+        app.stop_semantic_index_rebuild()
+
+    def test_a_second_backend_cannot_start_a_rebuild_while_another_owns_the_record(self) -> None:
+        first, first_call = self.app()
+        self.start_rebuild(first_call)
+        second, second_call = self.app()  # Another backend on the same ~/.hearth, as the desktop app beside hearth web.
+        preview = json.loads(second_call("POST", "/api/semantic-index/preview").body)["preview"]
+
+        refused = second_call("POST", f"/api/previews/{preview['id']}/apply")
+        recorded = json.loads(self.state.read_text(encoding="utf-8"))["status"]
+        first.stop_semantic_index_rebuild()
+
+        self.assertEqual((refused.status, recorded), (400, "running"))
+        self.assertEqual(json.loads(self.state.read_text(encoding="utf-8"))["status"], "cancelled")
+
+    def test_a_finished_rebuild_publishes_its_state_before_the_next_can_start(self) -> None:
+        app, call = self.app()
+        first = json.loads(call("POST", "/api/semantic-index/preview").body)["preview"]
+        second = json.loads(call("POST", "/api/semantic-index/preview").body)["preview"]
+        writing_final, release = threading.Event(), threading.Event()
+        write = web._write_rebuild_state
+
+        def held_final(path: Path, status: str) -> None:
+            if status == "completed":
+                writing_final.set()
+                release.wait(timeout=10)
+            write(path, status)
+
+        with mock.patch.object(web, "_write_rebuild_state", side_effect=held_final):
+            call("POST", f"/api/previews/{first['id']}/apply")  # Completes at once; its final write is held here.
+            self.assertTrue(writing_final.wait(timeout=5))
+            self.index.block_rebuild = True
+            applied = {}
+            starting = threading.Thread(target=lambda: applied.update(response=call("POST", f"/api/previews/{second['id']}/apply")))
+            starting.start()
+            time.sleep(0.3)
+            self.assertTrue(starting.is_alive())  # Waiting for the first rebuild's state, not refused.
+            release.set()
+            starting.join(timeout=5)
+        self.assertTrue(self.index.started.wait(timeout=5))
+        recorded = json.loads(self.state.read_text(encoding="utf-8"))["status"]
+        app.stop_semantic_index_rebuild()
+
+        self.assertEqual((applied["response"].status, recorded), (200, "running"))  # The second rebuild's, not a late "completed".
+
+    def test_a_rebuild_that_fails_releases_its_claim(self) -> None:
+        app, call = self.app()
+        preview = json.loads(call("POST", "/api/semantic-index/preview").body)["preview"]
+
+        with mock.patch.object(self.index, "rebuild", side_effect=IndexBusy("Another Hearth semantic-index build is running.")):
+            call("POST", f"/api/previews/{preview['id']}/apply")  # As when a hearth import's own rebuild holds the build lock.
+            for _ in range(100):
+                if json.loads(call("GET", "/api/semantic-index").body)["job"]["status"] == "failed":
+                    break
+                time.sleep(0.05)
+
+        self.assertEqual(json.loads(self.state.read_text(encoding="utf-8"))["status"], "failed")
+        self.start_rebuild(call)  # Not refused by a claim the failed rebuild kept.
+        app.stop_semantic_index_rebuild()
+
+    def test_a_rebuild_whose_thread_cannot_start_releases_its_claim(self) -> None:
+        app, call = self.app()
+        preview = json.loads(call("POST", "/api/semantic-index/preview").body)["preview"]
+
+        with mock.patch.object(threading.Thread, "start", side_effect=RuntimeError("can't start new thread")):
+            self.assertEqual(call("POST", f"/api/previews/{preview['id']}/apply").status, 500)
+
+        self.assertEqual(json.loads(call("GET", "/api/semantic-index").body)["job"]["status"], "idle")
+        self.start_rebuild(call)  # Neither refused as "already running" nor by a claim the failed start kept.
+        app.stop_semantic_index_rebuild()
+
+    def test_a_start_interrupted_before_its_thread_runs_is_cleaned_up_by_stopping(self) -> None:
+        app, call = self.app()
+        preview = json.loads(call("POST", "/api/semantic-index/preview").body)["preview"]
+
+        with mock.patch.object(threading.Thread, "start", side_effect=KeyboardInterrupt), self.assertRaises(KeyboardInterrupt):
+            call("POST", f"/api/previews/{preview['id']}/apply")
+        app.stop_semantic_index_rebuild()  # As shutdown does after Ctrl+C.
+
+        self.assertEqual(json.loads(self.state.read_text(encoding="utf-8"))["status"], "cancelled")
+        other_app, other = self.app()  # The claim is free for another backend.
+        self.addCleanup(other_app.stop_semantic_index_rebuild)
+        self.start_rebuild(other)
+
+    def test_an_interrupt_after_the_thread_started_keeps_the_rebuild_owned_until_it_stops(self) -> None:
+        app, call = self.app()
+        self.index.block_rebuild = True
+        self.index.cleaned.clear()  # The import in setUp already ran one rebuild through this index.
+        preview = json.loads(call("POST", "/api/semantic-index/preview").body)["preview"]
+        start = threading.Thread.start
+
+        def started_then_interrupted(thread) -> None:
+            start(thread)
+            raise KeyboardInterrupt  # Ctrl+C lands while start() waits for the thread to report in.
+
+        with mock.patch.object(threading.Thread, "start", started_then_interrupted), self.assertRaises(KeyboardInterrupt):
+            call("POST", f"/api/previews/{preview['id']}/apply")
+        _, other = self.app()
+        other_preview = json.loads(other("POST", "/api/semantic-index/preview").body)["preview"]
+        refused = other("POST", f"/api/previews/{other_preview['id']}/apply").status
+        app.stop_semantic_index_rebuild()
+
+        self.assertEqual(refused, 400)  # The running rebuild still owns the record.
+        self.assertTrue(self.index.cleaned.is_set())  # Stopping waited for the rebuild the interrupt left running.
+        self.assertEqual(json.loads(self.state.read_text(encoding="utf-8"))["status"], "cancelled")
+
+    def test_a_rebuild_that_finishes_while_its_record_is_read_is_not_reported_as_interrupted(self) -> None:
+        self.record()
+        owner = (self.state.parent / "rebuild.lock").open("a")
+        self.addCleanup(owner.close)
+        fcntl.flock(owner, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        _, call = self.app()
+        flock = fcntl.flock
+
+        def owner_finishes_first(handle, operation) -> None:
+            if operation & fcntl.LOCK_SH:  # The other backend finishes just as this one checks its claim.
+                web._write_rebuild_state(self.state, "cancelled")
+                owner.close()
+            flock(handle, operation)
+
+        with mock.patch.object(web.fcntl, "flock", side_effect=owner_finishes_first):
+            job = json.loads(call("GET", "/api/semantic-index").body)["job"]
+
+        self.assertEqual(job["status"], "idle")
+
+    def test_no_rebuild_starts_once_stopping_has_begun(self) -> None:
+        app, call = self.app()
+        app.stop_semantic_index_rebuild()
+        preview = json.loads(call("POST", "/api/semantic-index/preview").body)["preview"]
+
+        response = call("POST", f"/api/previews/{preview['id']}/apply")
+
+        self.assertEqual(response.status, 400)
+        self.assertFalse(self.state.exists())
+
+    def test_stopping_waits_until_the_rebuild_has_cleaned_up(self) -> None:
+        app, call = self.app()
+        self.start_rebuild(call)
+
+        app.stop_semantic_index_rebuild()
+
+        self.assertTrue(self.index.cleaned.is_set())
+        self.assertEqual(json.loads(call("GET", "/api/semantic-index").body)["job"]["status"], "cancelled")
+
+    def test_the_server_waits_for_the_rebuild_when_it_closes(self) -> None:
+        server = HearthWebServer(self.service, port=0, rebuild_state=self.state)
+        self.start_rebuild(signed_in(server._application))
+
+        server.close()
+
+        self.assertTrue(self.index.cleaned.is_set())
+
+    def test_hearth_web_reports_an_interrupted_rebuild_and_stops_through_its_normal_shutdown_on_sigterm(self) -> None:
+        self.record()  # Its ~/.hearth/rebuild.json, left by a backend that crashed.
+        env = {"HOME": str(self.root), "PATH": "/usr/bin:/bin", "PYTHONPATH": str(Path(__file__).parents[1] / "src")}
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            port = probe.getsockname()[1]
+        process = subprocess.Popen([sys.executable, "-m", "hearth.cli", "--database", str(self.root / "web.sqlite"), "web", "--port", str(port),
+                                    "--no-open"], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.addCleanup(process.wait)
+        self.addCleanup(process.kill)
+        launch = urlsplit(process.stdout.readline().split(" at ")[1].strip())
+        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        connection.request("GET", launch.path)
+        redeemed = connection.getresponse()
+        redeemed.read()
+        session = {"Cookie": redeemed.getheader("Set-Cookie").split(";")[0],
+                   "X-Hearth-Session": redeemed.getheader("Location").split("#session=")[1]}
+        connection.request("GET", "/api/semantic-index", headers=session)
+        self.assertEqual(json.loads(connection.getresponse().read())["job"]["status"], "interrupted")
+        connection.close()
+
+        process.send_signal(signal.SIGTERM)
+
+        self.assertEqual(process.wait(timeout=10), 0)
+        self.assertIn("stopped", process.stdout.read())
+        process.stderr.close()
+        process.stdout.close()
+
+
 class SessionTests(unittest.TestCase):
     """ADR-0037: a launch link that works once, a cookie for the page, and cookie plus header token for every API route."""
 
@@ -695,7 +967,8 @@ class DashboardPageTests(unittest.TestCase):
         self.assertIn('src="assets/knowledge.js"', home)
         self.assertEqual((script.status, script.content_type.split(";")[0]), (200, "application/javascript"))
         for route in ("import", "sources/preview", "source-previews/", "semantic-index/preview", "semantic-index/cancel", "/actions/", "previews/",
-                      "elapsed_seconds", "cpu_seconds", "peak_resident_memory_bytes", "evidence_units_per_minute", "job.warning"):
+                      "elapsed_seconds", "cpu_seconds", "peak_resident_memory_bytes", "evidence_units_per_minute", "job.warning",
+                      '"interrupted"'):
             self.assertIn(route, script.body.decode())
 
     def test_the_removed_answer_route_is_gone(self) -> None:

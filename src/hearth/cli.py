@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import shlex
+import signal
 import sys
 from pathlib import Path
 
@@ -287,7 +288,10 @@ def _run(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
         elif args.command == "web":
             server = HearthWebServer(service, port=args.port, source_roots=args.source_roots, workbench_tasks=tasks.dashboard_tasks,
                                      workbench_transcript=transcript.read, workbench_diff=transcript.diff,
-                                     workbench_task_state=tasks.dashboard_task_state, workbench_task_action=tasks.dashboard_action)
+                                     workbench_task_state=tasks.dashboard_task_state, workbench_task_action=tasks.dashboard_action,
+                                     rebuild_state=Path.home() / ".hearth/rebuild.json")
+            # A desktop shell stops its backend with SIGTERM: finish the current request, then shut down as Ctrl+C does.
+            signal.signal(signal.SIGTERM, lambda signum, frame: server.request_stop())
             print(f"Hearth is running locally at {server.url}", flush=True)
             print("It is bound to 127.0.0.1 only. Press Ctrl+C to stop it.", flush=True)
             if not args.no_open:
@@ -295,8 +299,10 @@ def _run(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
             try:
                 server.serve_forever()
             except KeyboardInterrupt:
-                print("\nHearth web interface stopped.")
+                pass
             finally:
+                signal.signal(signal.SIGTERM, signal.SIG_IGN)  # A second SIGTERM must not cut short the wait for a rebuild.
+                print("\nHearth web interface stopped.", flush=True)
                 server.close()
         elif args.command == "evaluate":
             outcomes = evaluate_corpus(service, load_evaluation_corpus(args.corpus))
