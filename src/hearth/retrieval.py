@@ -16,12 +16,6 @@ STOP_WORDS = frozenset({
 RRF_K = 60  # The published default for reciprocal rank fusion.
 
 
-class LocalIndex(Protocol):
-    """Local retrieval boundary for the future vector-index implementation."""
-
-    def search(self, question: str, limit: int = 20) -> list[Evidence]: ...
-
-
 class Reranker(Protocol):
     """Local reranking boundary. Implementations must not send evidence remotely."""
 

@@ -42,17 +42,13 @@ class TextNoteExtractor:
 class PdfExtractor:
     """Boundary for a local PDF extractor with optional local OCR fallback."""
 
-    def __init__(self, native_extractor: PageExtractor | None = None, ocr_fallback: OCRFallback | None = None):
+    def __init__(self, native_extractor: PageExtractor, ocr_fallback: OCRFallback | None = None):
         self._native_extractor = native_extractor
         self._ocr_fallback = ocr_fallback
 
     def extract(self, path: Path) -> SourceDocument:
         if path.suffix.lower() != ".pdf":
             raise ImportError("PDF extractor only accepts .pdf files.")
-        if self._native_extractor is None:
-            raise ImportError(
-                "PDF extraction is not configured. Connect a local PageExtractor and optional OCRFallback."
-            )
         document = self._native_extractor.extract(path)
         if not document.pages:
             raise ImportError("PDF extractor returned no pages.")

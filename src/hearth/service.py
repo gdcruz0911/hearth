@@ -5,7 +5,7 @@ import os
 from collections.abc import Callable
 from pathlib import Path
 
-from .answering import EvidenceAnswerer, validate_answer
+from .answering import answer_from_evidence
 from .chunking import CHUNKING_VERSION, chunk_page
 from .domain import (
     Answer,
@@ -67,7 +67,6 @@ class HearthService:
             ),
         )
         self._reranker = reranker or IdentityReranker()
-        self._answerer = EvidenceAnswerer()
         self._semantic_index = semantic_index
         self._retain_ocr_output = retain_ocr_output
         self._relationship_minimum_score = relationship_minimum_score
@@ -261,7 +260,7 @@ class HearthService:
         reranked = self._reranker.rerank(question, candidates, limit=len(candidates))
         record["reranked"] = _scored(reranked)
         evidence = reranked[:CITATIONS]
-        answer = validate_answer(self._answerer.answer(question, evidence), evidence)
+        answer = answer_from_evidence(evidence)
         if answer.status == "supported":
             record["lexical_support"] = has_lexical_support(question, [citation.quote for citation in answer.citations])
             if not record["lexical_support"]:
