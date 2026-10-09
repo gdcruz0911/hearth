@@ -35,11 +35,14 @@ function start(): Promise<void> {
 async function launchBackend(): Promise<void> {
   stoppedReason = "";
   let backend: Backend;
+  console.log("Hearth: starting the backend.");  // Lifecycle lines only; the handshake's secrets are never logged.
   try {
     backend = await launch(backendCommand(), process.env);
   } catch (error) {
+    console.log(`Hearth: the backend did not start: ${(error as Error).message}`);
     return showStopped(`Hearth could not start its backend. ${(error as Error).message}`);
   }
+  console.log(`Hearth: the backend is ready at ${backend.origin}.`);
   // A fresh in-memory partition per backend: nothing from an earlier backend's session can reach this one.
   const partition = session.fromPartition(`hearth-${randomUUID()}`, { cache: false });
   const current: Running = { ...backend, session: partition };
@@ -69,6 +72,7 @@ async function launchBackend(): Promise<void> {
 // Order matters: block every request first, then drop the header hook, the secrets, and the stored session.
 function stopped(backend: Running, how: string): void {
   if (running !== backend) return;
+  console.log(`Hearth: the backend stopped (${how}).`);
   running = null;
   backend.session.webRequest.onBeforeRequest((_details, decide) => decide({ cancel: true }));
   backend.session.webRequest.onBeforeSendHeaders(null);

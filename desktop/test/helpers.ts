@@ -1,6 +1,7 @@
 // Launches the built app in a scratch home, so no test touches the person's Hearth, app data, or browser.
 
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { createServer, type IncomingHttpHeaders, type Server } from "node:http";
 import { tmpdir } from "node:os";
@@ -59,8 +60,9 @@ export async function openApp(t: TestContext, home: Scratch, backend: string[], 
   // Quit as the person would, so the app stops its own backend; a hung quit is killed and fails the test instead.
   let state = "";
   t.after(async () => {
-    state = await app.evaluate(({ app, BrowserWindow }) => JSON.stringify({ ready: app.isReady(), windows: BrowserWindow.getAllWindows().map((w) => w.webContents.getURL().slice(0, 60)),
-                                                                             userData: app.getPath("userData") })).catch((error) => String(error));
+    state = await app.evaluate(({ app, BrowserWindow }) => JSON.stringify({ ready: app.isReady(), lock: app.hasSingleInstanceLock(),
+      windows: BrowserWindow.getAllWindows().map((w) => w.webContents.getURL().slice(0, 60)), userData: app.getPath("userData") })).catch((error) => String(error));
+    if (process.env.CI) state += "\n" + execFileSync("ps", ["-o", "pid,ppid,etime,command", "-ax"], { encoding: "utf8" }).split("\n").filter((line) => /python|hearth/i.test(line)).join("\n");
   });
   t.after(async () => {
     if (child.exitCode !== null || child.signalCode !== null) return;  // The test quit it already.
