@@ -19,6 +19,7 @@ import time
 from pathlib import Path
 
 from ..runtime import hearth_home
+from . import roles
 from . import usage
 from . import recall
 from . import vault_notes
@@ -49,7 +50,7 @@ REVIEWERS = {
     "codex": ["codex", "exec", "{options}", "--json", "--ignore-user-config", "--sandbox", "read-only", "-"],
     "antigravity": ["agy", "{options}", "--output-format", "stream-json", "--mode", "plan", "-p", "{prompt}"],
 }
-# An empty review falls back to the next reviewer from another model family. Antigravity was dropped on 2026-10-08:
+# An empty review falls back to the next reviewer in the review role's order. Antigravity was dropped on 2026-10-08:
 # its workers' isolation from the person's own CLI config is unchecked, so it reviews only when named with --reviewer.
 REVIEW_ORDER = ["claude", "codex"]
 # Fallback models for the checking roles (test, verify, review), pinned so a default changed in a provider's app, which
@@ -71,6 +72,11 @@ VERIFIERS = {
 }
 VERIFY_ORDER = ["codex", "claude"]
 TEST_ORDER = VERIFY_ORDER  # Test writers must run the tests they write, which headless agy cannot.
+# ADR-0039: who fills a checking role when the roles file does not say. Any model may check any other, so this is only an
+# order: providers other than the implementer's first, the implementer's own last.
+DEFAULT_ORDER = {"test": TEST_ORDER, "verify": VERIFY_ORDER, "review": REVIEW_ORDER, "retro": REVIEW_ORDER}
+# The invocation table each role runs from; a test writer must run the tests it writes, which headless agy cannot.
+LAUNCHERS = {"implement": "PROVIDERS", "test": "VERIFIERS", "verify": "VERIFIERS", "review": "REVIEWERS", "retro": "REVIEWERS"}
 # ponytail: a path heuristic for "test file"; a per-project test glob if a project's layout needs one.
 TEST_PATH = re.compile(r"(^|/)(tests?|spec|__tests__)/|(^|/)test_[^/]*$|_test\.[^/]+$|\.(test|spec)\.[^/]+$")
 # Effort per role when none is given: judgment roles think harder than the runs that write code.
@@ -144,7 +150,7 @@ TEST_PROMPT = """# Task {id}: write the tests first
 Goal: {goal}
 {context}
 Write tests that fail now and will pass once the goal is met, and change no other file.
-Another model family will implement the goal and cannot change your tests, so test the behavior the goal asks for, not implementation details.
+A separate agent run will implement the goal and cannot change your tests, so test the behavior the goal asks for, not implementation details.
 """
 RETRO_PROMPT = """# Retro for task {id}
 
@@ -215,12 +221,12 @@ def add_parser(subcommands: argparse._SubParsersAction) -> None:
     new.add_argument("--recall", nargs="?", const="hybrid", choices=recall.MODES,
                      help="Add excerpts from the keeper's notes to each agent's brief, limited to what that agent may receive "
                           "(ADR-0024). Hybrid search by default; `--recall keyword` asks for keyword search.")
-    new.add_argument("--tests-first", action="store_true", help="Have another model family write failing tests first; the implementer cannot change them.")
+    new.add_argument("--tests-first", action="store_true", help="Have the test role write failing tests first; the implementer cannot change them.")
     new.add_argument("--approve-tests", action="store_true", help="With --tests-first, wait for you to approve the tests before implementing.")
     escape = actions.add_parser("escape", help="Record a problem found after the task passed every gate.")
     escape.add_argument("id")
     escape.add_argument("text", help="What was missed.")
-    retro = actions.add_parser("retro", help="Have another model family propose one permanent fix per escape, for you to approve.")
+    retro = actions.add_parser("retro", help="Have the retro role propose one permanent fix per escape, for you to approve.")
     retro.add_argument("id")
     publish = actions.add_parser("publish", help="Push an approved task and open or update its draft pull request, for a project with pr enabled.")
     publish.add_argument("id")
@@ -253,9 +259,9 @@ def add_parser(subcommands: argparse._SubParsersAction) -> None:
     discard.add_argument("id")
     discard.add_argument("--apply", action="store_true", help="Remove the worktree and branch; the task directory stays as a receipt.")
     discard.add_argument("--discard-uncommitted", action="store_true", help="Also destroy uncommitted changes in the worktree, which --apply otherwise refuses.")
-    loop = subcommands.add_parser("loop", help="Review a finished task with another model family, and fix it until approved or out of rounds.")
+    loop = subcommands.add_parser("loop", help="Review a finished task with the review role, and fix it until approved or out of rounds.")
     loop.add_argument("id")
-    loop.add_argument("--reviewer", choices=sorted(REVIEWERS), help="Reviewing provider. Defaults to the first allowed one from another model family.")
+    loop.add_argument("--reviewer", choices=sorted(REVIEWERS), help="Reviewing provider. Defaults to the review role's order in roles.md.")
     loop.add_argument("--rounds", type=int, default=2, help="Fix runs allowed before stopping. Defaults to 2.")
     loop.add_argument("--timeout", type=int, default=1800, help="Seconds before each run is stopped. Defaults to 1800.")
     project_opener = subcommands.add_parser("open", help="Open or attach to a project's tmux session: an editor, a task list, and interactive tasks.")
@@ -436,15 +442,27 @@ def _new(args: argparse.Namespace) -> int:
         print(f"No file {missing[0]}.\nNext: check the --attach path", file=sys.stderr)
         return 1
     project = projects[args.project]
-    provider = args.agent or project["providers"][0]
+    try:
+        chosen = roles.load(_home(), args.project)
+    except roles.RolesError as exc:
+        print(exc, file=sys.stderr)
+        return 1
+    implement = (chosen.get("implement") or [{"provider": project["providers"][0], "model": None, "effort": None}])[0]
+    provider = args.agent or implement["provider"]
     if provider not in project["providers"]:
         print(f"{args.project} does not allow {provider}.\nNext: add it to the project's providers, or choose one of: {', '.join(project['providers'])}", file=sys.stderr)
         return 1
-    model = args.model or _model(provider, "implement")
-    writer = _test_writer(project, provider, model) if args.tests_first else None
+    model = args.model or (implement["model"] if implement["provider"] == provider else None) or _model(provider, "implement")
+    args.effort = args.effort or (implement["effort"] if implement["provider"] == provider else None)
+    try:
+        resolved = _resolve_roles(chosen, project, provider)
+    except roles.RolesError as exc:
+        print(exc, file=sys.stderr)
+        return 1
+    writer = resolved["test"][0]["provider"] if args.tests_first and resolved["test"] else None
     if args.tests_first and (writer is None or args.interactive):
-        reason = "cannot be interactive" if args.interactive else f"needs a test writer outside {provider}'s model family"
-        print(f"--tests-first {reason}.\nNext: add codex or claude to {args.project}'s providers, or drop --tests-first", file=sys.stderr)
+        reason = "cannot be interactive" if args.interactive else "needs a test writer"
+        print(f"--tests-first {reason}.\nNext: add a provider to {args.project}'s providers, or drop --tests-first", file=sys.stderr)
         return 1
     spent = [row for row in usage.report(usage.codex_limits(Path.home() / ".codex/sessions"), usage.claude_limits(_home() / "usage/claude-limits.jsonl"))
              if row["provider"] == provider and max(row["five_hour"] or 0, row["week"] or 0) >= HEADROOM_LIMIT]
@@ -504,6 +522,7 @@ def _new(args: argparse.Namespace) -> int:
         "created": _now(), "finished": None, "discarded": None, "copied": copied, "context": context, "issue": args.issue, "runs": [],
         "recall": {"mode": args.recall} if args.recall else None,
         "implementer": {"provider": provider, "model": model, "effort": args.effort, "timeout": args.timeout},
+        "roles": resolved,  # ADR-0039: fixed when the task starts, so a later edit to the roles file applies to new tasks only.
     }
     prompt = PROMPT.format(id=task_id, goal=goal, check=project["check"]) + context + recall.for_provider(_home(), task, task_dir, project, provider)
     if args.tests_first:
@@ -529,7 +548,7 @@ def _implement(project: dict, task: dict, task_dir: Path) -> int:
     prompt = (PROMPT.format(id=task["id"], goal=task["goal"], check=project["check"]) + task.get("context", "")
               + recall.for_provider(_home(), task, task_dir, project, implementer["provider"]))
     if task.get("protected_tests"):
-        prompt += ("\nTests written first by another model family: " + ", ".join(task["protected_tests"])
+        prompt += ("\nTests written first by a separate agent run: " + ", ".join(task["protected_tests"])
                    + ".\nMake them pass without changing them; Hearth rejects any change to these files.\n")
     _wait_for_slot("implement", task, task_dir)
     try:
@@ -541,11 +560,12 @@ def _implement(project: dict, task: dict, task_dir: Path) -> int:
 
 
 def _write_tests(project: dict, task: dict, task_dir: Path, writer: str, approve: bool) -> int:
-    """Have another model family write tests that fail on the base commit, then protect them."""
+    """Have the test role write tests that fail on the base commit, then protect them."""
     _wait_for_slot("implement", task, task_dir)
     prompt = (TEST_PROMPT.format(id=task["id"], goal=task["goal"], context=task["context"])
               + recall.for_provider(_home(), task, task_dir, project, writer) + "\n" + INSTRUCTIONS.format(check=project["check"]))
-    result = _run(task, task_dir, "test", writer, PROVIDERS[writer], prompt, None, None, task["implementer"]["timeout"], project["check"])
+    row = _role_rows(task, "test", project)[0]
+    result = _run(task, task_dir, "test", writer, PROVIDERS[writer], prompt, row["model"], row["effort"], task["implementer"]["timeout"], project["check"])
     if result["stop"]:
         return _end(task, task_dir, result["stop"])
     paths = _checkpoint(task, task_dir)
@@ -567,9 +587,30 @@ def _write_tests(project: dict, task: dict, task_dir: Path, writer: str, approve
     return _implement(project, task, task_dir)
 
 
-def _test_writer(project: dict, provider: str, model: str | None) -> str | None:
-    family = _family(provider, model)
-    return next((name for name in TEST_ORDER if name in project["providers"] and _family(name, None) != family), None)
+def _resolve_roles(chosen: dict, project: dict, implementer: str) -> dict:
+    """The checking roles a new task runs with: the roles file's rows, else the default order (ADR-0039)."""
+    resolved = {}
+    for role in DEFAULT_ORDER:
+        rows = chosen.get(role) or _default_rows(role, project, implementer)
+        for row in rows:
+            if row["provider"] not in globals()[LAUNCHERS[role]] or row["provider"] not in project["providers"]:
+                raise roles.RolesError(f"roles.md: the {role} role names {row['provider']}, which this project cannot run for it.\n"
+                                       f"Next: use one of {', '.join(p for p in project['providers'] if p in globals()[LAUNCHERS[role]])}, "
+                                       "or add the provider to the project's providers")
+        resolved[role] = rows
+    return resolved
+
+
+def _default_rows(role: str, project: dict, implementer: str) -> list[dict]:
+    order = [name for name in DEFAULT_ORDER[role] if name in project["providers"]]
+    order = [name for name in order if name != implementer] + [name for name in order if name == implementer]
+    return [{"provider": name, "model": None, "effort": None} for name in order]
+
+
+def _role_rows(task: dict, role: str, project: dict) -> list[dict]:
+    """A role's rows from the task's own copy; tasks started before ADR-0039 use the default order."""
+    rows = (task.get("roles") or {}).get(role) or _default_rows(role, project, task["implementer"]["provider"])
+    return [row for row in rows if row["provider"] in project["providers"]]
 
 
 def _record(task: dict, task_dir: Path, role: str, provider: str, model: str | None, effort: str | None, prompt: str) -> dict:
@@ -657,12 +698,10 @@ def _loop(args: argparse.Namespace) -> int:
         print(f"{task['id']} is {task['status']}{reason}; the loop continues only a finished task whose check ran.\nNext: hearth task show {task['id']}", file=sys.stderr)
         return 1
     project = _projects()[task["project"]]
-    implementer = next(run for run in task["runs"] if run["role"] == "implement")
-    family = _family(implementer["provider"], implementer["model"])
-    candidates = [args.reviewer] if args.reviewer else [name for name in REVIEW_ORDER if name in project["providers"]]
-    reviewers = [name for name in candidates if name in project["providers"] and _family(name, _model(name, "review")) != family]
+    reviewers = ([{"provider": args.reviewer, "model": None, "effort": None}] if args.reviewer in project["providers"] else []) if args.reviewer \
+        else _role_rows(task, "review", project)
     if not reviewers:
-        print(f"No allowed reviewer outside the {family} model family.\nNext: add another provider to {task['project']}'s providers, or pick one with --reviewer", file=sys.stderr)
+        print(f"No reviewer {task['project']} can run.\nNext: add a provider to {task['project']}'s providers, or name one in roles.md", file=sys.stderr)
         return 1
 
     fixes = 0
@@ -685,7 +724,7 @@ def _loop(args: argparse.Namespace) -> int:
                 return _end(task, task_dir, "review_guide_unreadable")
             verification = ""
             if (Path(task["worktree"]) / "VERIFY.md").exists():
-                outcome = _verify(task, task_dir, project, family, args.timeout)
+                outcome = _verify(task, task_dir, project, args.timeout)
                 if outcome["stop"] == "question":
                     return 1
                 if outcome["stop"]:
@@ -696,20 +735,21 @@ def _loop(args: argparse.Namespace) -> int:
                 verification = outcome["summary"]
             if task.get("protected_tests"):
                 verification += ("\nProtected tests, which the implementer cannot change: " + ", ".join(task["protected_tests"])
-                                 + ".\nAnother model family wrote them first on purpose as part of this change, so adding them is in scope;"
+                                 + ".\nA separate agent run wrote them first on purpose as part of this change, so adding them is in scope;"
                                  + " raise a problem with what they test as a finding on that file, and Hearth asks the person about it.\n")
-            permitted = [name for name in reviewers if recall.may_receive(_home(), project, task_dir, name)]
+            permitted = [row for row in reviewers if recall.may_receive(_home(), project, task_dir, row["provider"])]
             if not permitted:
-                print(f"{', '.join(reviewers)} may not receive this task's agent output, which can quote excerpts recalled for another "
+                print(f"{', '.join(row['provider'] for row in reviewers)} may not receive this task's agent output, which can quote excerpts recalled for another "
                       "provider (ADR-0024).\nNext: pick a reviewer whose recall scope covers this task's with --reviewer, or discard the task",
                       file=sys.stderr)
                 return _end(task, task_dir, "no_permitted_reviewer")
             _wait_for_slot("support", task, task_dir)
             diff = _git(Path(task["worktree"]), "diff", f"{task['base']}..HEAD")
-            for reviewer in permitted:
+            for row in permitted:
+                reviewer = row["provider"]
                 prompt = REVIEW_PROMPT.format(id=task["id"], goal=task["goal"], base=task["base"][:12], diff=diff[:100_000], guidance=guidance,
                                               messages=_messages(task_dir, "review", reviewer), verification=verification)  # ponytail: a cap, not paging, for very large diffs.
-                result = _run(task, task_dir, "review", reviewer, REVIEWERS[reviewer], prompt, None, None, args.timeout, project["check"])
+                result = _run(task, task_dir, "review", reviewer, REVIEWERS[reviewer], prompt, row["model"], row["effort"], args.timeout, project["check"])
                 verdict = None if result["stop"] else _verdict(result["final"])
                 task["runs"][-1]["verdict"] = verdict and verdict["verdict"]
                 task["runs"][-1]["risk"] = verdict.get("risk") if verdict and isinstance(verdict.get("risk"), str) else None
@@ -737,7 +777,7 @@ def _loop(args: argparse.Namespace) -> int:
                                          "Answer to keep them, which the reviewer will see, or discard the task to write new ones.", "refs": []})
                 _hold_for_person(task, task_dir, "done", None)
                 return 1
-            feedback = f"A reviewer from another model family asked for these changes:\n\n{_findings_text(verdict['findings'])}"
+            feedback = f"The reviewer asked for these changes:\n\n{_findings_text(verdict['findings'])}"
         if fixes == args.rounds:
             return _end(task, task_dir, "rounds_exhausted")
         fixes += 1
@@ -797,28 +837,29 @@ def _findings_text(findings: list) -> str:
     return "".join(f"- {item.get('standard', '')} {item.get('file', '')}:{item.get('line', '')} {item.get('problem', '')}\n" for item in findings)
 
 
-def _verify(task: dict, task_dir: Path, project: dict, family: str, timeout: int) -> dict:
-    """Run a verifier from another model family and judge its claims by the evidence files it saved.
+def _verify(task: dict, task_dir: Path, project: dict, timeout: int) -> dict:
+    """Run the verify role's verifier and judge its claims by the evidence files it saved.
 
     Returns a stop reason, feedback for a fix run when a claim failed, or a summary of passing claims for the reviewer.
     """
     worktree = Path(task["worktree"])
-    verifiers = [name for name in VERIFY_ORDER if name in project["providers"] and _family(name, None) != family]
+    verifiers = _role_rows(task, "verify", project)
     if not verifiers:
         return {"stop": "no_verifier", "feedback": None, "summary": ""}
-    verifiers = [name for name in verifiers if recall.may_receive(_home(), project, task_dir, name)]
+    verifiers = [row for row in verifiers if recall.may_receive(_home(), project, task_dir, row["provider"])]
     if not verifiers:
         print("No verifier may receive this task's agent output, which can quote excerpts recalled for another provider (ADR-0024).", file=sys.stderr)
         return {"stop": "no_permitted_verifier", "feedback": None, "summary": ""}
     diff = _git(worktree, "diff", f"{task['base']}..HEAD")
     verify = project.get("verify", project["check"])
-    for verifier in verifiers:
+    for row in verifiers:
+        verifier = row["provider"]
         prompt = VERIFY_PROMPT.format(id=task["id"], goal=task["goal"], base=task["base"][:12], diff=diff[:100_000],
                                       check=project["check"], verify=verify, messages=_messages(task_dir, "verify", verifier))
         _wait_for_slot("support", task, task_dir)
         if (worktree / ".hearth/evidence").exists():  # Left by a crashed run: kept as a receipt, never deleted or reused.
             shutil.move(worktree / ".hearth/evidence", task_dir / f"leftover-evidence-{time.strftime('%Y%m%d-%H%M%S')}")
-        result = _run(task, task_dir, "verify", verifier, VERIFIERS[verifier], prompt, None, None, timeout, project["check"], verify)
+        result = _run(task, task_dir, "verify", verifier, VERIFIERS[verifier], prompt, row["model"], row["effort"], timeout, project["check"], verify)
         run_dir = task_dir / "runs" / task["runs"][-1]["dir"]
         if (worktree / ".hearth/evidence").exists():
             shutil.move(worktree / ".hearth/evidence", run_dir / "evidence")
@@ -841,7 +882,7 @@ def _verify(task: dict, task_dir: Path, project: dict, family: str, timeout: int
     lines += "".join(f"- not checked: {item}\n" for item in verdict.get("not_checked", []) if isinstance(item, str))
     if verdict["verdict"] == "verified":
         return {"stop": None, "feedback": None, "summary": f"\nA verifier ran the program; its claims and evidence files:\n{lines}"}
-    return {"stop": None, "summary": "", "feedback": f"A verifier from another model family ran the program, and these claims failed:\n\n{lines}"}
+    return {"stop": None, "summary": "", "feedback": f"The verifier ran the program, and these claims failed:\n\n{lines}"}
 
 
 def _uncommitted(task: dict) -> str:
@@ -1050,17 +1091,15 @@ def _resuming(task_dir: Path) -> bool:
 
 
 def _retro(task: dict, task_dir: Path) -> int:
-    """Ask a read-only agent from another model family for one permanent fix per escape; the person approves each."""
+    """Ask the retro role's read-only agent for one permanent fix per escape; the person approves each."""
     escapes = task.get("escapes", [])
     if not escapes:
         print(f"{task['id']} has no escapes.\nNext: hearth task escape {task['id']} \"<what was missed>\"", file=sys.stderr)
         return 1
     project = _projects()[task["project"]]
-    implementer = next(run for run in task["runs"] if run["role"] == "implement")
-    family = _family(implementer["provider"], implementer["model"])
-    agents = [name for name in REVIEW_ORDER if name in project["providers"] and _family(name, _model(name, "review")) != family]
+    agents = _role_rows(task, "retro", project)
     if not agents:
-        print(f"No allowed agent outside the {family} model family.\nNext: add another provider to {task['project']}'s providers", file=sys.stderr)
+        print(f"No retro agent {task['project']} can run.\nNext: add a provider to {task['project']}'s providers, or name one in roles.md", file=sys.stderr)
         return 1
     saved = {key: task[key] for key in ("status", "stop_reason", "worktree")}
     if not Path(task["worktree"]).exists():
@@ -1073,9 +1112,10 @@ def _retro(task: dict, task_dir: Path) -> int:
         escapes="".join(f"{number}. {escape['text']}\n" for number, escape in enumerate(escapes, 1)),
         runs="".join(f"- {run.get('dir', '')[:2]} {run['role']} {run['provider']}: {_outcome(run)}\n" for run in task["runs"]))
     proposals, refused = None, []
-    for agent in agents:
+    for row in agents:
+        agent = row["provider"]
         _wait_for_slot("support", task, task_dir)
-        result = _run(task, task_dir, "retro", agent, REVIEWERS[agent], prompt, None, None, 1800, project["check"])
+        result = _run(task, task_dir, "retro", agent, REVIEWERS[agent], prompt, row["model"], row["effort"], 1800, project["check"])
         if result["stop"] == "recall_not_permitted":
             refused.append(agent)
         proposals = None if result["stop"] else _proposals(result["final"], len(escapes))
@@ -1084,7 +1124,7 @@ def _retro(task: dict, task_dir: Path) -> int:
     task.update(saved)
     if not proposals:
         _write(task_dir, task)
-        if refused == agents:
+        if refused == [row["provider"] for row in agents]:
             print(f"{task['id']}: retro refused: its recall scope does not cover excerpts delivered in this task (ADR-0029), "
                   f"for {', '.join(refused)}.\nNext: widen that provider's recall roots in ~/.hearth/recall.json, or add another provider to the project", file=sys.stderr)
             return 1
@@ -1510,19 +1550,21 @@ def _verdict(text: str, verdicts: tuple[str, str] = ("approve", "changes"), item
 
 
 def _model(provider: str, role: str) -> str | None:
-    """The model Hearth runs for a provider: the person's choice in ~/.hearth/models.json, else the pin for the role."""
+    """The model Hearth runs for a provider: the person's choice in models.json, else the pin for the role.
+
+    Once a roles file exists it names models instead (ADR-0039), and models.json is ignored, which Hearth says once.
+    """
     path = _home() / "models.json"
-    chosen = json.loads(path.read_text(encoding="utf-8")).get(provider) if path.exists() else None
+    if roles.exists(_home()) and path.exists() and not _IGNORED_MODELS_NOTED:
+        globals()["_IGNORED_MODELS_NOTED"] = True
+        print("models.json is ignored because roles.md exists; set models there.", file=sys.stderr)
+    chosen = json.loads(path.read_text(encoding="utf-8")).get(provider) if path.exists() and not roles.exists(_home()) else None
     if isinstance(chosen, str) and chosen:
         return chosen
     return (CHECK_MODELS if role in CHECK_ROLES else IMPLEMENT_MODELS).get(provider)
 
 
-def _family(provider: str, model: str | None) -> str:
-    """The model's maker, which review independence is judged by."""
-    if provider == "antigravity" and model:
-        return "anthropic" if model.startswith("claude") else "openai" if model.startswith("gpt") else "google"
-    return {"claude": "anthropic", "codex": "openai", "antigravity": "google"}[provider]
+_IGNORED_MODELS_NOTED = False
 
 
 def _wait_for_slot(kind: str, task: dict, task_dir: Path) -> None:
@@ -1847,6 +1889,7 @@ def _summary(task: dict, task_dir: Path) -> dict:
         "questions": [{key: question.get(key) for key in ("id", "from", "kind", "body")} for question in _open_questions(task_dir)],
         "created": task["created"], "finished": task["finished"], "branch": task["branch"], "base": task["base"],
         "review": task.get("review"), "pr": task.get("pr"), "protected_tests": task.get("protected_tests") or [],
+        "roles": task.get("roles"),  # ADR-0039: who each checking role ran on, fixed when the task started.
         "approval_failed": task.get("approval_failed"),
         "runs": [{"dir": run.get("dir"), "role": run["role"], "provider": run["provider"], "model": run.get("model_used") or run.get("model"),
                   "started": run.get("started"), "finished": run.get("finished"), "outcome": _outcome(run), "verdict": run.get("verdict"),

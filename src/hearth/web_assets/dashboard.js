@@ -345,6 +345,11 @@ function detail(task) {
     parts.push(box);
   }
   if (task.stop_reason) parts.push(field("Stopped because", task.stop_reason));
+  if (task.roles) {
+    // ADR-0039: the roles this task started with, each in fallback order; a model left to its default shows as the provider alone.
+    const order = (rows) => (Array.isArray(rows) ? rows : []).map((row) => shown(row.provider) + (row.model ? ` ${shown(row.model)}` : "")).join(" → ");
+    parts.push(field("Roles", ["test", "verify", "review"].map((role) => `${role}: ${order(task.roles[role]) || "none"}`).join(" · ")));
+  }
   // Shown on its own, since the box it came from is gone once the question is answered or the tests approved.
   if (acting && acting.task === task.id && acting.message) parts.push(el("p", "meta act-result", acting.message));
   const cancel = cancelBox(task);

@@ -88,6 +88,13 @@ class TaskTestCase(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary_directory.cleanup()
 
+    def write_roles(self, **chosen: str) -> None:
+        """Write roles.md (ADR-0039), each role as its providers in order, such as review="antigravity,codex"."""
+        table = "| order | provider | model | effort |\n|---|---|---|---|\n"
+        (self.home / ".hearth/roles.md").write_text("".join(
+            f"## {role}\n{table}" + "".join(f"| {order} | {name} | | |\n" for order, name in enumerate(names.split(","), 1))
+            for role, names in chosen.items()), encoding="utf-8")
+
     def write_projects(self, check: str, providers: tuple[str, ...] = ("claude",)) -> None:
         config = self.home / ".hearth/projects.json"
         config.parent.mkdir(parents=True, exist_ok=True)
@@ -433,10 +440,12 @@ class LoopTests(LoopTestCase):
         self.assertEqual((status, task["status"], task["stop_reason"]), (1, "failed", "rounds_exhausted"))
 
     def test_an_unreadable_verdict_stops_the_loop(self) -> None:
+        self.write_roles(review="codex")  # One reviewer, so nothing falls back.
         self.assertEqual(self.loop(self.start(), "garbage"), 1)
         self.assertEqual(self.only_task()["stop_reason"], "review_unparsed")
 
     def test_the_loop_can_be_rerun_after_an_unreadable_verdict(self) -> None:
+        self.write_roles(review="codex")
         task = self.start()
         self.loop(task, "garbage")
 
@@ -467,10 +476,10 @@ class LoopTests(LoopTestCase):
 
     def test_an_empty_review_falls_back_to_the_next_reviewer(self) -> None:
         self.write_projects(check="test -f hello.txt", providers=("claude", "codex", "antigravity"))
+        self.write_roles(review="antigravity,codex")
         self.cli("task", "new", "demo", "Add hello.txt")
 
-        with mock.patch.object(tasks, "REVIEW_ORDER", ["antigravity", "codex"]):  # Two reviewers outside Claude's family.
-            status = self.loop(self.only_task(), "garbage,approve")
+        status = self.loop(self.only_task(), "garbage,approve")
 
         task = self.only_task()
         self.assertEqual(status, 0)
@@ -486,9 +495,9 @@ class LoopTests(LoopTestCase):
 
         self.assertEqual((status, self.only_task()["stop_reason"]), (1, "review_unparsed"))
 
-    def test_a_reviewer_from_the_implementer_family_is_refused(self) -> None:
-        self.assertEqual(self.loop(self.start(), "approve", "--reviewer", "claude"), 1)
-        self.assertEqual(len(self.only_task()["runs"]), 1)
+    def test_the_implementers_own_provider_may_review_when_named(self) -> None:
+        self.assertEqual(self.loop(self.start(), "approve", "--reviewer", "claude"), 0)  # ADR-0039: any model may check any other.
+        self.assertEqual([(run["role"], run["provider"]) for run in self.only_task()["runs"]], [("implement", "claude"), ("review", "claude")])
 
     def test_work_waits_as_queued_while_its_slot_is_full(self) -> None:
         task = self.start()
@@ -933,10 +942,82 @@ class TestsFirstTests(LoopTestCase):
         task = self.only_task()
         self.assertEqual((approved, task["status"], [run["role"] for run in task["runs"]]), (0, "done", ["test", "implement"]))
 
-    def test_tests_first_needs_a_test_writer_from_another_family(self) -> None:
+    def test_a_single_provider_project_writes_its_own_tests_first(self) -> None:
         self.write_projects(check="test -f hello.txt", providers=("claude",))
 
         status, _ = self.cli("task", "new", "demo", "Add hello.txt", "--tests-first")
+
+        task = self.only_task()
+        self.assertEqual((status, [(run["role"], run["provider"]) for run in task["runs"]]), (0, [("test", "claude"), ("implement", "claude")]))
+
+
+class RolesTests(LoopTestCase):
+    """ADR-0039: the roles file chooses who fills each role, and each task keeps the roles it started with."""
+
+    def test_without_a_roles_file_the_checking_roles_try_the_other_provider_first(self) -> None:
+        task = self.start()
+        _, listed = self.cli("task", "list", "--json")
+
+        self.assertEqual([row["provider"] for row in task["roles"]["review"]], ["codex", "claude"])
+        self.assertEqual(json.loads(listed)["tasks"][0]["roles"], task["roles"])  # Shown on the task page.
+        self.assertEqual([row["provider"] for row in task["roles"]["verify"]], ["codex", "claude"])
+
+    def test_a_role_row_names_the_model_and_effort_of_its_run(self) -> None:
+        (self.home / ".hearth/roles.md").write_text(
+            "## review\n| order | provider | model | effort |\n|---|---|---|---|\n| 1 | claude | claude-opus-5-5 | low |\n", encoding="utf-8")
+
+        self.assertEqual(self.loop(self.start(), "approve"), 0)
+
+        review = self.only_task()["runs"][-1]
+        self.assertEqual((review["role"], review["provider"], review["model"], review["effort"]), ("review", "claude", "claude-opus-5-5", "low"))
+
+    def test_a_task_keeps_the_roles_it_started_with(self) -> None:
+        self.write_roles(review="codex")
+        task = self.start()
+        self.write_roles(review="claude")  # Edited after the task started: applies to new tasks only.
+
+        self.loop(task, "approve")
+
+        self.assertEqual(self.only_task()["runs"][-1]["provider"], "codex")
+
+    def test_the_implement_role_chooses_the_implementer_unless_agent_is_given(self) -> None:
+        self.write_roles(implement="codex")
+        self.write_projects(check="test -f hello.txt", providers=("claude", "codex"))
+        with mock.patch.dict(tasks.PROVIDERS, {"codex": FAKE_CODEX}):
+            self.cli("task", "new", "demo", "Add hello.txt")
+
+        self.assertEqual(self.only_task()["implementer"]["provider"], "codex")
+
+    def test_models_json_is_ignored_once_a_roles_file_exists(self) -> None:
+        (self.home / ".hearth/models.json").write_text('{"codex": "gpt-from-models-json"}', encoding="utf-8")
+        self.write_roles(verify="codex")
+        stderr = io.StringIO()
+
+        with contextlib.redirect_stderr(stderr), mock.patch.object(tasks, "_IGNORED_MODELS_NOTED", False):
+            model = tasks._model("codex", "review")
+
+        self.assertEqual(model, tasks.CHECK_MODELS["codex"])
+        self.assertIn("models.json is ignored because roles.md exists", stderr.getvalue())
+
+    def test_a_role_naming_a_provider_the_project_cannot_run_is_refused_before_anything_starts(self) -> None:
+        for chosen in ({"review": "antigravity"}, {"verify": "antigravity"}, {"test": "antigravity"}):
+            with self.subTest(roles=chosen):
+                self.write_roles(**chosen)
+                self.write_projects(check="test -f hello.txt", providers=("claude", "codex", "antigravity") if "review" not in chosen
+                                    else ("claude", "codex"))
+                stderr = io.StringIO()
+                with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(stderr):
+                    status = main(["task", "new", "demo", "Add hello.txt"])
+                self.assertEqual(status, 1)
+                self.assertIn("Next:", stderr.getvalue())
+                self.assertFalse((self.home / ".hearth/tasks").exists())
+
+    def test_a_roles_file_hearth_cannot_read_stops_the_task_before_it_starts(self) -> None:
+        (self.home / ".hearth/roles.md").write_text("## reviewer\n| order | provider | model | effort |\n|---|---|---|---|\n| 1 | claude | | |\n",
+                                                    encoding="utf-8")
+        self.write_projects(check="test -f hello.txt", providers=("claude", "codex"))
+
+        status, _ = self.cli("task", "new", "demo", "Add hello.txt")
 
         self.assertEqual(status, 1)
         self.assertFalse((self.home / ".hearth/tasks").exists())
@@ -1150,10 +1231,10 @@ class PullRequestTests(LoopTestCase):
         projects = json.loads(config.read_text(encoding="utf-8"))
         projects["demo"]["pr"] = True
         config.write_text(json.dumps(projects), encoding="utf-8")
+        self.write_roles(review="antigravity,codex")
         self.cli("task", "new", "demo", "Add hello.txt")
 
-        with mock.patch.object(tasks, "REVIEW_ORDER", ["antigravity", "codex"]):
-            self.loop(self.only_task(), "garbage,approve")
+        self.loop(self.only_task(), "garbage,approve")
 
         body = self.created()[self.created().index("--body") + 1]
         self.assertIn("implement claude, review codex.", body)
@@ -1520,14 +1601,14 @@ class KnowledgeBoardTests(RecallFixture):
 
     def test_a_fallback_reviewer_does_not_inherit_the_first_reviewers_recall_answer(self) -> None:
         self.configure({"claude": [str(self.vault)]}, [str(self.vault)], members=("claude", "codex", "antigravity"))
+        self.write_roles(review="antigravity,codex")
         self.cli("task", "new", "demo", "Add hello.txt")
         task = self.only_task()
         task_dir = self.home / ".hearth/tasks" / task["id"]
         tasks._post(task_dir, {"id": "m9", "from": "knowledge", "to": "review", "kind": "answer", "body": "ANSWER-FOR-AGY-ONLY",
                                "refs": [], "reply_to": "m8", "provider": "antigravity"})
 
-        with mock.patch.object(tasks, "REVIEW_ORDER", ["antigravity", "codex"]):
-            self.loop(task, "garbage,approve")
+        self.loop(task, "garbage,approve")
 
         reviews = [run for run in self.only_task()["runs"] if run["role"] == "review"]
         prompts = {run["provider"]: (task_dir / "runs" / run["dir"] / "prompt.md").read_text(encoding="utf-8") for run in reviews}
@@ -1864,10 +1945,10 @@ class ReviewPermissionTests(RecallFixture):
 
     def test_a_recall_task_with_only_an_unpermitted_reviewer_stops_before_any_review(self) -> None:
         self.configure({"claude": [str(self.vault)]}, [str(self.vault)], members=("claude", "antigravity"))
+        self.write_roles(review="antigravity")
         self.cli("task", "new", "demo", "Add hello.txt", "--recall", "keyword")
 
-        with mock.patch.object(tasks, "REVIEW_ORDER", ["antigravity"]):
-            self.assertEqual(self.loop(self.only_task(), "approve"), 1)
+        self.assertEqual(self.loop(self.only_task(), "approve"), 1)
 
         task = self.only_task()
         self.assertEqual((task["stop_reason"], [run["role"] for run in task["runs"]]), ("no_permitted_reviewer", ["implement"]))
@@ -1890,6 +1971,7 @@ class ReviewPermissionTests(RecallFixture):
         git(self.repo, "add", "VERIFY.md")
         git(self.repo, "commit", "-q", "-m", "add VERIFY.md")
         self.configure({"claude": [str(self.vault)]}, [str(self.vault)])
+        self.write_roles(verify="codex")
         self.cli("task", "new", "demo", "Add hello.txt", "--recall", "keyword")
 
         self.assertEqual(self.loop(self.only_task(), "approve"), 1)
@@ -2470,12 +2552,13 @@ class CancelTests(TaskTestCase):
 class RetroRefusalTests(RecallFixture):
     def test_a_retro_refused_for_recall_says_so_instead_of_unreadable(self) -> None:
         self.configure({"claude": [str(self.vault)], "codex": [str(self.vault)]}, [str(self.vault)])
+        self.write_roles(retro="codex")
         self.cli("task", "new", "demo", "Add hello.txt", "--recall", "keyword")
         task = self.only_task()
         os.environ["FAKE_REVIEWS"] = "approve"
         self.cli("loop", task["id"])
         self.cli("task", "escape", task["id"], "hello.txt never says the person's name.")
-        self.configure({"claude": [str(self.vault)]}, [str(self.vault)])  # Codex, the only other family, loses recall.
+        self.configure({"claude": [str(self.vault)]}, [str(self.vault)])  # Codex, the only retro agent, loses recall.
 
         stderr = io.StringIO()
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(stderr):

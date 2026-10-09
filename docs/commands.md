@@ -3,7 +3,7 @@
 Link the command once with `ln -s "$PWD/.venv/bin/hearth" ~/.local/bin/hearth` from the repository, then run `hearth` from anywhere; `hearth <command> --help` shows every option.
 Wherever a command takes a task ID, `last` or a unique ending of the ID also works, such as `hearth task show last`.
 Hearth keeps its records and settings in `~/.hearth`; set `HEARTH_HOME` to an absolute path to use another folder, such as for a trial run, while agents keep the sign-ins under your real home.
-Agents run on the models in `~/.hearth/models.json`, one per provider, such as `{"claude": "claude-sonnet-5-5", "codex": "gpt-6-sol"}`, for every role; without it Hearth uses its built-in pins, never the apps' own defaults, and `--model` overrides both for one task.
+Which provider, model, and effort fill each role (implement, test, verify, review, retro, and the supervisor) is set in `roles.md` in Hearth's home, and per project in `roles/<project>.md` (ADR-0039): one `## <role>` heading per role with a table of `order | provider | model | effort` rows, tried in order. Any model may check any other. Without a roles file, `~/.hearth/models.json` sets one model per provider, the checking roles try providers other than the implementer's first, and `--model` overrides both for one task. Each task keeps the roles it started with. `hearth ask` is not a role: once `roles.md` exists it uses Hearth's built-in model pin unless you pass `--model`.
 A test fails when a command is missing from this table, so it grows with every pull request that adds one.
 While a Hearth update holds the maintenance lock (`~/.hearth/maintenance.lock`), every command that changes Hearth's data refuses and names the command to run again afterwards.
 That includes the knowledge commands and `hearth web`, which open the database; `task list`, `task show`, `stats`, and `usage` still work.
@@ -38,17 +38,17 @@ A running `hearth web` holds an update off until it stops.
 | `hearth task discard <id>` | Preview, or with `--apply` remove, a task's worktree and branch. |
 | `hearth task new <project> "<goal>" --interactive` | Open the agent in a tmux window instead, with the goal as its first message. |
 | `hearth task answer <id> "<text>"` | Answer the question an agent left for you; `hearth loop` then continues the task. On the task's page in `hearth web`, a previewed answer also continues the task in its own process. Refused inside a task. |
-| `hearth task new <project> "<goal>" --tests-first` | Have another model family write failing tests first; the implementer must pass them unchanged. Add `--approve-tests` to read them before implementation starts. |
+| `hearth task new <project> "<goal>" --tests-first` | Have the test role write failing tests first; the implementer must pass them unchanged. Add `--approve-tests` to read them before implementation starts. |
 | `hearth task approve-tests <id>` | Approve a tests-first task's tests and start implementing. The task's page in `hearth web` can approve them too, after a preview, when their diff is shown in full; implementation then runs in its own process. Either way the tests are approved once, only as they were written, and the implementer does not start if they changed after the approval. Refused inside a task. |
 | `hearth task publish <id>` | Push an approved task and open or update its draft pull request (DEL-7), in a project with `"pr": true`; `hearth loop` does this on approval. A task that received excerpts from your notes pushes nothing until you have read the exact commits, changes, and pull request text it prints and run the command again with `--approve` and the code printed with them, and it is refused outright when it copies a delivered excerpt. |
 | `hearth task promote <id>` | Show the task's final report as it would be written to your notes folder's `reports/`, and each note in its `## Notes for the vault` section as it would be written to `agent-notes/<provider>/`, with which agents could recall them. `--apply` records each file, writes it, and commits only those files with the agent as author; it never overwrites, never imports, and refuses a task whose recalled evidence a reader of `reports/` may not receive. Running it again finishes an interrupted promotion. Move a note into `notes/` to accept it. Refused inside a task. |
 | `hearth task ci <id>` | Read the pull request's checks: wait while pending, mark it ready when all pass, or send the failing log to a fix run. Never merges. |
 | `hearth task escape <id> "<text>"` | Record a problem found after the task passed every gate. |
 | `hearth task retro <id> --approve N` | Approve escape N's stored proposal by starting it as a tests-first task. |
-| `hearth task retro <id>` | Have another model family propose one permanent fix per escape; you approve by running or editing the printed command. |
+| `hearth task retro <id>` | Have the retro role propose one permanent fix per escape; you approve by running or editing the printed command. |
 | `hearth task collect <id>` | After an interactive task, commit its checkpoint, run the check, and save the diff. |
 | `hearth task open <id>` | Open a task's worktree in VS Code. |
-| `hearth loop <id>` | Review a finished task with another model family and fix it, up to `--rounds` times, until approved. |
+| `hearth loop <id>` | Review a finished task with the review role and fix it, up to `--rounds` times, until approved. |
 | `hearth verify-eval <cases> --verifier NAME` | Score a verifier on seeded changes whose stated behavior does or does not hold, and append the results to `~/.hearth/evals/verifies.jsonl`. |
 | `hearth stats` | Show runs, usable replies, pass rates, time, models, and effort per provider and role, with escapes and plan use; `--json` for the command center. |
 | `hearth review-eval <cases> --reviewer NAME` | Score a reviewer on seeded changes, some with planted bugs, and append the results to `~/.hearth/evals/reviews.jsonl`. |
