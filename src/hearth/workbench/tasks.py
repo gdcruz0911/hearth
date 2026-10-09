@@ -232,6 +232,7 @@ def add_parser(subcommands: argparse._SubParsersAction) -> None:
     promote.add_argument("--apply", action="store_true", help="Write the file; without it, only show what would be written.")
     approve = actions.add_parser("approve-tests", help="Approve a tests-first task's tests, then start implementing.")
     approve.add_argument("id")
+    approve.add_argument("--resume", action="store_true", help=argparse.SUPPRESS)  # The dashboard's resumed process: checks its recorded approval.
     answer = actions.add_parser("answer", help="Answer the question an agent left for you, so the task can continue.")
     answer.add_argument("id")
     answer.add_argument("text")
@@ -271,6 +272,14 @@ class Cancelled(Exception):
     """Raised where a cancelled task would otherwise start or continue an agent run."""
 
 
+class NotStarted(Exception):
+    """Raised where a provider's CLI could not be started at all, so no agent process exists."""
+
+
+class TestsChanged(Exception):
+    """Raised where an implementer would start on tests that differ from the ones the person approved."""
+
+
 def run(args: argparse.Namespace) -> int:
     try:
         return _command(args)
@@ -284,8 +293,8 @@ def _command(args: argparse.Namespace) -> int:
         return 1
     if getattr(args, "task_command", None) == "promote" and refused_inside_task("promote reports into the person's notes"):
         return 1
-    if getattr(args, "task_command", None) == "cancel" and refused_inside_task("cancel tasks"):  # ADR-0033: the person's alone.
-        return 1
+    if getattr(args, "task_command", None) in ("cancel", "answer", "approve-tests") and refused_inside_task("act for the person"):
+        return 1  # ADR-0033: cancelling, answering, and approving tests are the person's alone.
     if args.command == "loop":
         return _loop(args)
     if args.command == "open":
@@ -339,12 +348,38 @@ def _command(args: argparse.Namespace) -> int:
     if args.task_command == "retro":
         return _approve_proposal(task, task_dir, args.approve) if args.approve else _retro(task, task_dir)
     if args.task_command == "approve-tests":
-        if task["status"] != "waiting" or task["stop_reason"] != "tests_to_approve":
-            print(f"{task['id']} has no tests waiting for approval.\nNext: hearth task show {task['id']}", file=sys.stderr)
+        with _task_lock(task_dir):  # One approval, from the terminal or the dashboard, of the tests as they are now.
+            task = _read(task_dir)
+            approval = task.get("tests_approved")
+            if task["status"] != "waiting" or task["stop_reason"] != "tests_to_approve" or bool(approval) != args.resume:
+                print(f"{task['id']} has no tests waiting for approval.\nNext: hearth task show {task['id']}", file=sys.stderr)
+                return 1
+            if not (task_dir / "diff.patch").exists():  # Written at approval time only since the dashboard could approve.
+                (task_dir / "diff.patch").write_text(_git(Path(task["worktree"]), "diff", f"{task['base']}..HEAD"), encoding="utf-8")
+            digest = _tests_digest(task, task_dir)
+            if approval and approval["digest"] != digest:
+                return _end(task, task_dir, "tests_changed_after_approval")
+            if digest is None:
+                print(f"{task['id']}'s tests changed after they were written, or were edited without being committed.\n"
+                      f"Next: hearth task show {task['id']}, then discard it or start a new task", file=sys.stderr)
+                return 1
+            if not approval:
+                task["tests_approved"] = {"via": "terminal", "at": _now(), "digest": digest}
+            task.pop("approval_failed", None)
+            _write(task_dir, task)
+        try:
+            return _implement(_projects()[task["project"]], task, task_dir)
+        except NotStarted as exc:  # Only when no implementer process exists: after one does, its run is recorded instead.
+            with _task_lock(task_dir):
+                task = _read(task_dir)
+                task.pop("tests_approved", None)  # Approve again, from the terminal or the dashboard, under the same checks.
+                task["approval_failed"] = {"at": _now(), "error": f"The implementer could not start: {exc}"}
+                _write(task_dir, task)
+            print(f"{task['id']}: the implementer could not start: {exc}\nNext: fix that, then hearth task approve-tests {task['id']}", file=sys.stderr)
             return 1
-        return _implement(_projects()[task["project"]], task, task_dir)
     if args.task_command == "answer":
-        return _answer(task, task_dir, args.text)
+        with _task_lock(task_dir):  # The dashboard answers under the same lock, so neither answers the other's question.
+            return _answer(_read(task_dir), task_dir, args.text)
     if args.task_command == "cancel":
         return _cancel(task, task_dir)
     return _discard(task, task_dir, args.apply, args.discard_uncommitted)
@@ -495,8 +530,11 @@ def _implement(project: dict, task: dict, task_dir: Path) -> int:
         prompt += ("\nTests written first by another model family: " + ", ".join(task["protected_tests"])
                    + ".\nMake them pass without changing them; Hearth rejects any change to these files.\n")
     _wait_for_slot("implement", task, task_dir)
-    result = _run(task, task_dir, "implement", implementer["provider"], PROVIDERS[implementer["provider"]], prompt,
-                  implementer["model"], implementer["effort"], implementer["timeout"], project["check"])
+    try:
+        result = _run(task, task_dir, "implement", implementer["provider"], PROVIDERS[implementer["provider"]], prompt,
+                      implementer["model"], implementer["effort"], implementer["timeout"], project["check"])
+    except TestsChanged:
+        return _end(task, task_dir, "tests_changed_after_approval")
     return _finish(project, task, task_dir, result["stop"])
 
 
@@ -518,6 +556,8 @@ def _write_tests(project: dict, task: dict, task_dir: Path, writer: str, approve
     task.update(protected_tests=paths, protected_commit=_git(Path(task["worktree"]), "rev-parse", "HEAD").strip())
     if approve:
         task.update(status="waiting", stop_reason="tests_to_approve")
+        # The dashboard's diff pane shows these tests, and its approval is bound to exactly these bytes (ADR-0037).
+        (task_dir / "diff.patch").write_text(_git(Path(task["worktree"]), "diff", f"{task['base']}..HEAD"), encoding="utf-8")
         _write(task_dir, task)
         print(f"{task['id']}  waiting  tests to approve: {', '.join(paths)}")
         print(f"Next: read them in {task['worktree']}, then hearth task approve-tests {task['id']}", file=sys.stderr)
@@ -536,7 +576,7 @@ def _record(task: dict, task_dir: Path, role: str, provider: str, model: str | N
               "dir": f"{len(task['runs']) + 1:02d}-{role}-{provider}", "pid": None, "exit_code": None, "session_id": None,
               "usage": None, "check_exit_code": None, "started": _now(), "finished": None}
     task["runs"].append(record)
-    (task_dir / "runs" / record["dir"]).mkdir(parents=True)
+    (task_dir / "runs" / record["dir"]).mkdir(parents=True, exist_ok=True)  # A run that never started left its folder unrecorded.
     (task_dir / "runs" / record["dir"] / "prompt.md").write_text(prompt, encoding="utf-8")
     return record
 
@@ -552,6 +592,8 @@ def _run(task: dict, task_dir: Path, role: str, provider: str, template: list[st
     with _task_lock(task_dir):
         if (task_dir / "cancel").exists():
             raise Cancelled(task["id"])
+        if role == "implement" and task.get("tests_approved") and _tests_digest(task, task_dir) != task["tests_approved"]["digest"]:
+            raise TestsChanged(task["id"])  # Checked here, after any wait for a slot, so the implementer starts on the approved tests.
         record = _record(task, task_dir, role, provider, model, effort, prompt)
         run_dir = task_dir / "runs" / record["dir"]
         if not recall.may_receive(_home(), _projects().get(task.get("project")) if (task_dir / "recall").is_dir() else None, task_dir, provider):
@@ -562,12 +604,19 @@ def _run(task: dict, task_dir: Path, role: str, provider: str, template: list[st
         argv = _argv(template, provider, prompt, check, model, effort, verify)
         events = (run_dir / "events.jsonl").open("w", encoding="utf-8")
         errors = (run_dir / "stderr.txt").open("w", encoding="utf-8")
-        process = subprocess.Popen(argv, cwd=task["worktree"], stdin=subprocess.PIPE, stdout=events, stderr=errors, text=True,
-                                   start_new_session=True, env={**os.environ, "HEARTH_TASK": task["id"]})
+        try:
+            process = subprocess.Popen(argv, cwd=task["worktree"], stdin=subprocess.PIPE, stdout=events, stderr=errors, text=True,
+                                       start_new_session=True, env={**os.environ, "HEARTH_TASK": task["id"]})
+        except OSError as exc:
+            events.close()
+            errors.close()
+            raise NotStarted(exc) from exc  # No process exists, so nothing ran.
         record["pid"] = process.pid
-        record["pid_identity"] = _identity(process.pid)  # Lets a later cancel prove it signals this run, not a reused ID.
         task["status"] = "running"
-        _write(task_dir, task)
+        try:
+            record["pid_identity"] = _identity(process.pid)  # Lets a later cancel prove it signals this run, not a reused ID.
+        finally:
+            _write(task_dir, task)  # Once a process exists, the task owns it, whatever fails next.
     with events, errors:
         timed_out = False
         try:
@@ -589,13 +638,19 @@ def _run(task: dict, task_dir: Path, role: str, provider: str, template: list[st
     return parsed
 
 
+def _loopable(task: dict) -> bool:
+    return task["status"] in ("done", "failed") and task["stop_reason"] in (
+        None, "check_failed", "guard_failed", "no_changes", "review_unparsed", "review_guide_unreadable", "no_permitted_reviewer",
+        "no_permitted_verifier", "recall_not_permitted", "verify_rejected", "rounds_exhausted")
+
+
 def _loop(args: argparse.Namespace) -> int:
     task_dir = _resolve(args.id)
     if task_dir is None:
         print(f"No single task matches {args.id}.\nNext: hearth task list, then use last, a full ID, or a unique ending of one", file=sys.stderr)
         return 1
     task = _read(task_dir)
-    if task["status"] not in ("done", "failed") or task["stop_reason"] not in (None, "check_failed", "guard_failed", "no_changes", "review_unparsed", "review_guide_unreadable", "no_permitted_reviewer", "no_permitted_verifier", "recall_not_permitted", "verify_rejected", "rounds_exhausted"):
+    if not _loopable(task):
         reason = f" ({task['stop_reason']})" if task["stop_reason"] else ""
         print(f"{task['id']} is {task['status']}{reason}; the loop continues only a finished task whose check ran.\nNext: hearth task show {task['id']}", file=sys.stderr)
         return 1
@@ -940,14 +995,15 @@ def _hold_for_person(task: dict, task_dir: Path, status: str, stop_reason: str |
     return True
 
 
-def _answer(task: dict, task_dir: Path, text: str) -> int:
+def _answer(task: dict, task_dir: Path, text: str, via: str = "terminal", question_id: str | None = None) -> int:
+    """Answer the first open question; the caller holds the task lock, and the dashboard names the question it showed."""
     questions = _open_questions(task_dir)
-    if task["status"] != "waiting" or not questions:
-        print(f"{task['id']} has no open question.\nNext: hearth task show {task['id']}", file=sys.stderr)
+    if task["status"] != "waiting" or not questions or question_id not in (None, questions[0]["id"]):
+        print(f"{task['id']} has no open question{f' {question_id}' if question_id else ''}.\nNext: hearth task show {task['id']}", file=sys.stderr)
         return 1
     question = questions[0]
     _post(task_dir, {"id": f"m{len(_board(task_dir)) + 1}", "from": "person", "to": _role(question["from"]),
-                     "kind": "answer", "body": text, "refs": [], "reply_to": question["id"]})
+                     "kind": "answer", "body": text, "refs": [], "reply_to": question["id"], "via": via})
     if len(questions) == 1:
         task.update(task.pop("resume"))
         _write(task_dir, task)
@@ -959,7 +1015,7 @@ def _answer(task: dict, task_dir: Path, text: str) -> int:
     return 0
 
 
-RESUME = {"loop": ["loop"], "approve-tests": ["task", "approve-tests"]}
+RESUME = {"loop": ["loop"], "approve-tests": ["task", "approve-tests", "--resume"]}
 
 
 def resume_detached(task_id: str, command: str) -> int | None:
@@ -968,12 +1024,23 @@ def resume_detached(task_id: str, command: str) -> int | None:
     `command` is "loop" (after an answer) or "approve-tests"; returns the process ID, or None where an agent is refused.
     Cancelling needs no ID: the process is a normal task command, so it stops at the task's cancel marker.
     """
-    if refused_inside_task():
+    if not TASK_ID.match(task_id) or refused_inside_task():
         return None
     task_dir = _home() / "tasks" / task_id
     with (task_dir / "resume.log").open("ab") as log:
-        return subprocess.Popen([sys.executable, "-m", "hearth.cli", *RESUME[command], task_id], stdin=subprocess.DEVNULL,
-                                stdout=log, stderr=log, start_new_session=True).pid
+        pid = subprocess.Popen([sys.executable, "-m", "hearth.cli", *RESUME[command], task_id], stdin=subprocess.DEVNULL,
+                               stdout=log, stderr=log, start_new_session=True).pid
+    # Until it ends, no second resume starts: a resumed approval keeps its state while it waits for a slot.
+    (task_dir / "resume.json").write_text(json.dumps({"pid": pid, "identity": _identity(pid), "command": command}), encoding="utf-8")
+    return pid
+
+
+def _resuming(task_dir: Path) -> bool:
+    path = task_dir / "resume.json"
+    if not path.exists():
+        return False
+    record = json.loads(path.read_text(encoding="utf-8"))
+    return record.get("identity") is not None and _identity(record["pid"]) == record["identity"]
 
 
 def _retro(task: dict, task_dir: Path) -> int:
@@ -1631,15 +1698,43 @@ def _stop(process: subprocess.Popen) -> None:
 
 TASK_ID = re.compile(r"^[0-9]{8}-[0-9]{6}(-[0-9]+)?$")
 FINISHED = ("done", "cancelled")  # Nothing left to cancel.
+DIFF_LIMIT = 400_000  # Bytes of a task's diff the dashboard shows; a larger diff is cut at a line and says so.
 
 
 def dashboard_task_state(task_id: str, action: str) -> str | None:
     """ADR-0037: the state a dashboard preview is bound to, or None where the action is not available for the task."""
     task_dir = _home() / "tasks" / task_id
-    if action != "cancel" or not TASK_ID.match(task_id) or not (task_dir / "task.json").exists():
+    if action not in ("cancel", "answer", "approve-tests") or not TASK_ID.match(task_id) or not (task_dir / "task.json").exists():
         return None
     task = _read(task_dir)
-    return None if task["status"] in FINISHED else f"{task['status']}:{len(task['runs'])}"
+    if task["status"] in FINISHED:
+        return None
+    state = f"{task['status']}:{len(task['runs'])}"
+    if action == "cancel":
+        return state
+    if task["status"] != "waiting" or _resuming(task_dir):
+        return None
+    if action == "answer":
+        questions = _open_questions(task_dir)  # The answer goes to the first one, as `task answer` does.
+        return f"{state}:{questions[0]['id']}" if questions else None
+    if task["stop_reason"] != "tests_to_approve" or task.get("tests_approved") or _size(task_dir / "diff.patch") > DIFF_LIMIT:
+        return None  # Approved once; and the dashboard approves only tests it shows in full, a longer diff in the terminal.
+    digest = _tests_digest(task, task_dir)
+    return f"{state}:{digest}" if digest else None
+
+
+def _size(path: Path) -> int:
+    return path.stat().st_size if path.exists() else 0
+
+
+def _tests_digest(task: dict, task_dir: Path) -> str | None:
+    """The tests an approval covers, as the dashboard shows them; None unless the saved diff, the commit, and the files agree."""
+    worktree, shown = Path(task["worktree"]), task_dir / "diff.patch"
+    if (not shown.exists() or _git(worktree, "rev-parse", "HEAD").strip() != task["protected_commit"]
+            or _git(worktree, "status", "--porcelain", "--", *task["protected_tests"])
+            or shown.read_text(encoding="utf-8") != _git(worktree, "diff", f"{task['base']}..{task['protected_commit']}")):
+        return None
+    return hashlib.sha256(shown.read_bytes()).hexdigest()
 
 
 @contextlib.contextmanager
@@ -1656,6 +1751,23 @@ def dashboard_action(task_id: str, action: str, arguments: dict, fingerprint: st
     with _task_lock(task_dir):
         if dashboard_task_state(task_id, action) != fingerprint:
             return None
+        if action == "answer":
+            _answer(_read(task_dir), task_dir, arguments.get("text", ""), via="dashboard", question_id=fingerprint.rsplit(":", 1)[1])
+            remaining = len(_open_questions(task_dir))
+            # CODE-7: answered and resumed are reported apart; a loop starts only from a state `hearth loop` continues.
+            task = _read(task_dir)
+            loop = resume_detached(task_id, "loop") if _loopable(task) else None
+            return {"task": task_id, "action": "answer", "answered": True, "remaining": remaining, "loop": loop,
+                    "loopable": _loopable(task), "status": task["status"], "stop_reason": task["stop_reason"]}
+        if action == "approve-tests":
+            # Launched first, while this lock is held: the child takes the lock before it reads the approval, and an approval
+            # whose implementer never started is not recorded, so the terminal can still approve.
+            loop = resume_detached(task_id, "approve-tests")
+            if loop is not None:
+                task = _read(task_dir)
+                task["tests_approved"] = {"via": "dashboard", "at": _now(), "digest": fingerprint.rsplit(":", 1)[1]}
+                _write(task_dir, task)
+            return {"task": task_id, "action": "approve-tests", "approved": loop is not None, "loop": loop}
         _cancel(_read(task_dir), task_dir, source="dashboard")
     task = _read(task_dir)
     run = task["runs"][-1] if task["runs"] else None
@@ -1728,7 +1840,8 @@ def _summary(task: dict, task_dir: Path) -> dict:
         "queued": task["status"] == "queued",
         "questions": [{key: question.get(key) for key in ("id", "from", "kind", "body")} for question in _open_questions(task_dir)],
         "created": task["created"], "finished": task["finished"], "branch": task["branch"], "base": task["base"],
-        "review": task.get("review"), "pr": task.get("pr"),
+        "review": task.get("review"), "pr": task.get("pr"), "protected_tests": task.get("protected_tests") or [],
+        "approval_failed": task.get("approval_failed"),
         "runs": [{"dir": run.get("dir"), "role": run["role"], "provider": run["provider"], "model": run.get("model_used") or run.get("model"),
                   "started": run.get("started"), "finished": run.get("finished"), "outcome": _outcome(run), "verdict": run.get("verdict"),
                   "claims": run.get("claims"), "not_checked": run.get("not_checked"), "risk": run.get("risk"),

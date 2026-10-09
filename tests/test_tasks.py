@@ -2507,3 +2507,262 @@ class DetachedResumeTests(VerifyTestCase):
 
         self.assertIsNone(tasks.resume_detached(task["id"], "loop"))
         self.assertFalse((self.home / ".hearth/tasks" / task["id"] / "resume.log").exists())
+
+    def wait_until(self, done) -> dict:
+        for _ in range(400):
+            task = self.only_task()
+            if done(task):
+                return task
+            time.sleep(0.1)
+        self.fail("the resumed process never got there")
+
+    def waiting_on_a_question(self, outbox: str = '{"to": "person", "kind": "question", "body": "Which greeting?"}') -> dict:
+        os.environ["FAKE_OUTBOX"] = outbox
+        task = self.start()
+        os.environ.pop("FAKE_OUTBOX")
+        return task
+
+    def waiting_for_test_approval(self) -> dict:
+        patch = mock.patch.dict(tasks.PROVIDERS, {"codex": FAKE_CODEX})
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.write_projects(check="test -f hello.txt", providers=("claude", "codex"))
+        self.cli("task", "new", "demo", "Add hello.txt", "--tests-first", "--approve-tests")
+        return self.only_task()
+
+    def test_the_dashboard_answers_the_first_question_and_resumes_the_loop(self) -> None:
+        self.fake_clis_on_path()
+        task = self.waiting_on_a_question()
+        state = tasks.dashboard_task_state(task["id"], "answer")
+        os.environ["FAKE_REVIEWS"] = "approve"
+
+        result = tasks.dashboard_action(task["id"], "answer", {"text": "Say hello."}, state)
+
+        self.assertEqual((result["answered"], result["remaining"]), (True, 0))
+        self.assertIsInstance(result["loop"], int)
+        answer = tasks._board(self.home / ".hearth/tasks" / task["id"])[-1]
+        self.assertEqual((answer["kind"], answer["body"], answer["via"]), ("answer", "Say hello.", "dashboard"))
+        finished = self.wait_until(lambda task: "review" in task or task["status"] == "failed")
+        self.assertEqual([run["role"] for run in finished["runs"]], ["implement", "verify", "review"])
+
+    def test_an_answer_with_questions_left_or_a_state_the_loop_refuses_starts_no_loop(self) -> None:
+        task = self.waiting_on_a_question('{"to": "person", "kind": "question", "body": "One?"}\n'
+                                          '{"to": "person", "kind": "question", "body": "Two?"}')
+        first = tasks.dashboard_action(task["id"], "answer", {"text": "Yes."}, tasks.dashboard_task_state(task["id"], "answer"))
+        record = self.home / ".hearth/tasks" / task["id"] / "task.json"
+        stuck = json.loads(record.read_text(encoding="utf-8"))
+        stuck["resume"] = {"status": "failed", "stop_reason": "timeout"}  # The loop does not continue a timed-out run.
+        record.write_text(json.dumps(stuck), encoding="utf-8")
+        second = tasks.dashboard_action(task["id"], "answer", {"text": "No."}, tasks.dashboard_task_state(task["id"], "answer"))
+
+        self.assertEqual((first["remaining"], first["loop"]), (1, None))
+        self.assertEqual((second["remaining"], second["loop"], second["loopable"], second["status"]), (0, None, False, "failed"))
+        self.assertFalse((self.home / ".hearth/tasks" / task["id"] / "resume.log").exists())
+
+    def test_an_answer_previewed_for_a_question_answered_elsewhere_is_refused(self) -> None:
+        task = self.waiting_on_a_question('{"to": "person", "kind": "question", "body": "One?"}\n'
+                                          '{"to": "person", "kind": "question", "body": "Two?"}')
+        previewed = tasks.dashboard_task_state(task["id"], "answer")
+        self.cli("task", "answer", task["id"], "Yes, from the terminal.")  # Same status and runs; only the open question changed.
+
+        self.assertIsNone(tasks.dashboard_action(task["id"], "answer", {"text": "Meant for One."}, previewed))
+        self.assertEqual([question["body"] for question in tasks._open_questions(self.home / ".hearth/tasks" / task["id"])], ["Two?"])
+
+    def test_approval_is_not_offered_for_tests_the_dashboard_cannot_show_in_full(self) -> None:
+        task = self.waiting_for_test_approval()
+        self.assertIsNotNone(tasks.dashboard_task_state(task["id"], "approve-tests"))
+
+        with mock.patch.object(tasks, "DIFF_LIMIT", 10):
+            self.assertIsNone(tasks.dashboard_task_state(task["id"], "approve-tests"))
+
+    def test_the_dashboard_offers_answer_and_approval_only_in_their_states(self) -> None:
+        task = self.waiting_on_a_question()
+
+        self.assertIn(":m1", tasks.dashboard_task_state(task["id"], "answer"))
+        self.assertIsNone(tasks.dashboard_task_state(task["id"], "approve-tests"))
+        tasks.dashboard_action(task["id"], "answer", {"text": "Hi."}, tasks.dashboard_task_state(task["id"], "answer"))
+        self.assertIsNone(tasks.dashboard_task_state(task["id"], "answer"))
+
+    def test_the_dashboard_approves_exactly_the_tests_it_showed(self) -> None:
+        self.fake_clis_on_path()
+        task = self.waiting_for_test_approval()
+        task_dir = self.home / ".hearth/tasks" / task["id"]
+        shown = tasks.dashboard_task_state(task["id"], "approve-tests")
+        self.assertIn("tests/test_hello.txt", (task_dir / "diff.patch").read_text(encoding="utf-8"))
+        test_file = Path(task["worktree"]) / "tests/test_hello.txt"
+        original = test_file.read_text(encoding="utf-8")
+
+        test_file.write_text(original + "changed after the preview\n", encoding="utf-8")
+        self.assertIsNone(tasks.dashboard_action(task["id"], "approve-tests", {}, shown))
+        test_file.write_text(original, encoding="utf-8")
+        result = tasks.dashboard_action(task["id"], "approve-tests", {}, shown)
+
+        self.assertIsInstance(result["loop"], int)
+        self.assertEqual(self.only_task()["tests_approved"]["via"], "dashboard")
+        finished = self.wait_until(lambda task: task["status"] != "waiting" and task["runs"][-1]["finished"])
+        self.assertEqual([run["role"] for run in finished["runs"]], ["test", "implement"])
+
+    def test_no_second_resume_starts_while_one_is_alive(self) -> None:
+        task = self.waiting_for_test_approval()
+        task_dir = self.home / ".hearth/tasks" / task["id"]
+        self.assertIsNotNone(tasks.dashboard_task_state(task["id"], "approve-tests"))
+        resumed = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"], start_new_session=True)
+        self.addCleanup(resumed.kill)
+        (task_dir / "resume.json").write_text(json.dumps({"pid": resumed.pid, "identity": tasks._identity(resumed.pid)}), encoding="utf-8")
+
+        self.assertIsNone(tasks.dashboard_task_state(task["id"], "approve-tests"))
+        self.assertIsNotNone(tasks.dashboard_task_state(task["id"], "cancel"))  # Cancelling stays possible.
+        resumed.kill()
+        resumed.wait()
+        self.assertIsNotNone(tasks.dashboard_task_state(task["id"], "approve-tests"))
+        record = task_dir / "task.json"
+        started = json.loads(record.read_text(encoding="utf-8"))
+        started["status"] = "running"  # The approved implementer has started; its stop reason still reads tests_to_approve.
+        record.write_text(json.dumps(started), encoding="utf-8")
+        self.assertIsNone(tasks.dashboard_task_state(task["id"], "approve-tests"))
+
+    def test_resuming_refuses_a_malformed_task_id(self) -> None:
+        self.assertIsNone(tasks.resume_detached("../elsewhere", "loop"))
+
+    def test_an_agent_cannot_answer_or_approve_tests(self) -> None:
+        task = self.waiting_on_a_question()
+        os.environ["HEARTH_TASK"] = "20260927-000000"
+
+        self.assertEqual(self.cli("task", "answer", task["id"], "Yes.")[0], 1)
+        self.assertEqual(self.cli("task", "approve-tests", task["id"])[0], 1)
+        self.assertEqual(len(tasks._open_questions(self.home / ".hearth/tasks" / task["id"])), 1)
+
+    def test_approval_is_not_offered_when_the_tests_differ_from_the_diff_the_page_shows(self) -> None:
+        task = self.waiting_for_test_approval()
+        test_file = Path(task["worktree"]) / "tests/test_hello.txt"
+        original = test_file.read_text(encoding="utf-8")
+        self.assertIsNotNone(tasks.dashboard_task_state(task["id"], "approve-tests"))
+
+        test_file.write_text(original + "edited before the preview\n", encoding="utf-8")
+        self.assertIsNone(tasks.dashboard_task_state(task["id"], "approve-tests"))  # Uncommitted: the Changes pane omits it.
+        git(Path(task["worktree"]), "commit", "-qam", "edit the test")
+        self.assertIsNone(tasks.dashboard_task_state(task["id"], "approve-tests"))  # Committed after the diff was saved.
+
+    def test_approval_is_not_offered_when_the_saved_diff_is_not_the_commits(self) -> None:
+        task = self.waiting_for_test_approval()
+        shown = self.home / ".hearth/tasks" / task["id"] / "diff.patch"
+
+        shown.write_text(shown.read_text(encoding="utf-8").replace("+", "+not "), encoding="utf-8")
+
+        self.assertIsNone(tasks.dashboard_task_state(task["id"], "approve-tests"))
+
+    def test_a_terminal_answer_waits_for_the_task_lock_and_names_its_question(self) -> None:
+        task = self.waiting_on_a_question('{"to": "person", "kind": "question", "body": "One?"}\n'
+                                          '{"to": "person", "kind": "question", "body": "Two?"}')
+        task_dir = self.home / ".hearth/tasks" / task["id"]
+
+        with tasks._task_lock(task_dir):
+            worker = threading.Thread(target=self.cli, args=("task", "answer", task["id"], "From the terminal."))
+            worker.start()
+            time.sleep(0.5)
+            self.assertEqual([message for message in tasks._board(task_dir) if message["kind"] == "answer"], [])
+        worker.join(timeout=10)
+        self.assertEqual(tasks._answer(tasks._read(task_dir), task_dir, "Meant for One.", question_id="m1"), 1)
+        answers = [(message["reply_to"], message["body"]) for message in tasks._board(task_dir) if message["kind"] == "answer"]
+        self.assertEqual(answers, [("m1", "From the terminal.")])
+
+    def test_tests_are_approved_once_whichever_way(self) -> None:
+        task = self.waiting_for_test_approval()
+        with mock.patch.object(tasks, "_implement", return_value=0):
+            self.assertEqual(self.cli("task", "approve-tests", task["id"])[0], 0)
+            self.assertEqual(self.cli("task", "approve-tests", task["id"])[0], 1)
+
+        self.assertEqual(self.only_task()["tests_approved"]["via"], "terminal")
+        self.assertIsNone(tasks.dashboard_task_state(task["id"], "approve-tests"))
+
+    def test_the_implementer_does_not_start_if_approved_tests_change_while_it_waits(self) -> None:
+        task = self.waiting_for_test_approval()
+        test_file = Path(task["worktree"]) / "tests/test_hello.txt"
+        changed = lambda *args: test_file.write_text("changed while waiting for a slot\n", encoding="utf-8")
+
+        with mock.patch.object(tasks, "_wait_for_slot", side_effect=changed):
+            self.assertEqual(self.cli("task", "approve-tests", task["id"])[0], 1)
+
+        task = self.only_task()
+        self.assertEqual((task["status"], task["stop_reason"], [run["role"] for run in task["runs"]]),
+                         ("failed", "tests_changed_after_approval", ["test"]))
+
+    def test_a_resumed_approval_checks_the_tests_it_recorded(self) -> None:
+        task = self.waiting_for_test_approval()
+        with mock.patch.object(tasks, "resume_detached", return_value=99999):  # A launched child, which this test plays itself.
+            tasks.dashboard_action(task["id"], "approve-tests", {}, tasks.dashboard_task_state(task["id"], "approve-tests"))
+        (Path(task["worktree"]) / "tests/test_hello.txt").write_text("changed after the approval\n", encoding="utf-8")
+
+        self.assertEqual(self.cli("task", "approve-tests", task["id"], "--resume")[0], 1)
+        task = self.only_task()
+        self.assertEqual((task["stop_reason"], [run["role"] for run in task["runs"]]), ("tests_changed_after_approval", ["test"]))
+
+    def test_the_dashboard_refuses_to_preview_tests_edited_after_their_diff_was_saved(self) -> None:
+        from hearth.service import HearthService
+        from hearth.web import HearthWebApplication
+        task = self.waiting_for_test_approval()
+        service = HearthService(self.home / "hearth.sqlite")
+        self.addCleanup(service.close)
+        app = HearthWebApplication(service, "token", workbench_task_state=tasks.dashboard_task_state, workbench_task_action=tasks.dashboard_action)
+        launch = dict(app.respond("GET", app.launch_path, b"", {"Host": "127.0.0.1:1"}).headers)
+        headers = {"Host": "127.0.0.1:1", "Origin": "http://127.0.0.1:1", "Cookie": launch["Set-Cookie"].split(";")[0],
+                   "X-Hearth-Session": launch["Location"].split("#session=")[1]}
+        test_file = Path(task["worktree"]) / "tests/test_hello.txt"
+        test_file.write_text(test_file.read_text(encoding="utf-8") + "edited before the preview\n", encoding="utf-8")
+
+        response = app.respond("POST", f"/api/tasks/{task['id']}/actions/approve-tests/preview", b"{}", headers)
+
+        self.assertEqual(response.status, 409)
+        self.assertNotIn("tests_approved", self.only_task())
+
+    def test_an_approval_whose_implementer_cannot_start_is_not_recorded(self) -> None:
+        task = self.waiting_for_test_approval()
+
+        with mock.patch.object(tasks, "resume_detached", return_value=None):
+            result = tasks.dashboard_action(task["id"], "approve-tests", {}, tasks.dashboard_task_state(task["id"], "approve-tests"))
+
+        self.assertEqual((result["approved"], result["loop"]), (False, None))
+        self.assertNotIn("tests_approved", self.only_task())
+        with mock.patch.object(tasks, "_implement", return_value=0):
+            self.assertEqual(self.cli("task", "approve-tests", task["id"])[0], 0)
+
+    def test_the_terminal_approves_a_task_saved_before_its_diff_was(self) -> None:
+        task = self.waiting_for_test_approval()
+        (self.home / ".hearth/tasks" / task["id"] / "diff.patch").unlink()
+
+        with mock.patch.object(tasks, "_implement", return_value=0):
+            self.assertEqual(self.cli("task", "approve-tests", task["id"])[0], 0)
+
+        self.assertTrue(self.only_task()["tests_approved"]["digest"])
+
+    def test_an_approval_whose_provider_cannot_start_is_reported_and_can_be_retried(self) -> None:
+        self.fake_clis_on_path()
+        (self.home / "bin/claude").unlink()  # The resumed child starts, but the implementer's CLI is missing.
+        task = self.waiting_for_test_approval()
+
+        result = tasks.dashboard_action(task["id"], "approve-tests", {}, tasks.dashboard_task_state(task["id"], "approve-tests"))
+        self.assertIsInstance(result["loop"], int)
+        failed = self.wait_until(lambda task: "approval_failed" in task)
+
+        self.assertEqual((failed["status"], failed["stop_reason"], [run["role"] for run in failed["runs"]]), ("waiting", "tests_to_approve", ["test"]))
+        self.assertNotIn("tests_approved", failed)
+        self.assertIn("could not start", failed["approval_failed"]["error"])
+        self.assertIsNotNone(tasks.dashboard_task_state(task["id"], "approve-tests"))
+        self.assertEqual(self.cli("task", "approve-tests", task["id"])[0], 0)  # The retry, in-process with the fake implementer.
+        retried = self.only_task()
+        self.assertEqual((retried["status"], [run["role"] for run in retried["runs"]]), ("done", ["test", "implement"]))
+        self.assertNotIn("approval_failed", retried)
+
+    def test_a_failure_after_the_implementer_spawned_keeps_its_approval_and_its_process(self) -> None:
+        task = self.waiting_for_test_approval()
+
+        with mock.patch.object(tasks, "_identity", side_effect=OSError("ps failed")), self.assertRaises(OSError):
+            self.cli("task", "approve-tests", task["id"])
+
+        task = self.only_task()
+        implement = task["runs"][-1]
+        self.assertEqual((implement["role"], task["status"]), ("implement", "running"))
+        self.assertIsInstance(implement["pid"], int)  # Recorded, so cancel can find it and nothing else starts.
+        self.assertIn("tests_approved", task)
+        self.assertNotIn("approval_failed", task)
+        self.assertIsNone(tasks.dashboard_task_state(task["id"], "approve-tests"))

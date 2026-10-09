@@ -105,10 +105,10 @@ class DiffTests(unittest.TestCase):
             transcript.diff("../../etc")
 
     def test_a_large_diff_is_cut_at_a_line_and_says_so(self) -> None:
-        (self.task_dir / "diff.patch").write_text("+line\n" * (transcript.DIFF_LIMIT // 3), encoding="utf-8")
+        (self.task_dir / "diff.patch").write_text("+line\n" * (transcript.tasks.DIFF_LIMIT // 3), encoding="utf-8")
 
         shown = transcript.diff("20260930-120000")
 
         self.assertTrue(shown["truncated"])
-        self.assertLessEqual(len(shown["diff"].encode()), transcript.DIFF_LIMIT)
+        self.assertLessEqual(len(shown["diff"].encode()), transcript.tasks.DIFF_LIMIT)
         self.assertTrue(shown["diff"].endswith("\n"))

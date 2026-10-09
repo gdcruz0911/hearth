@@ -12,7 +12,6 @@ from . import tasks
 
 LIMIT = 256_000  # Bytes read per call; the page asks again from the returned offset.
 TEXT = 20_000  # Characters kept per item.
-DIFF_LIMIT = 400_000  # Bytes of a task's diff the dashboard shows; a larger diff is cut at a line and says so.
 
 
 def read(task_id: str, run: str, offset: int) -> dict | None:
@@ -50,12 +49,12 @@ def diff(task_id: str) -> dict | None:
         return {"task": task_id, "diff": None, "added": 0, "removed": 0, "truncated": False}
     raw = path.read_bytes()
     lines = raw.decode("utf-8", errors="replace").splitlines()
-    shown = raw[:DIFF_LIMIT]
-    shown = shown if len(raw) <= DIFF_LIMIT else shown[: shown.rfind(b"\n") + 1]
+    shown = raw[:tasks.DIFF_LIMIT]
+    shown = shown if len(raw) <= tasks.DIFF_LIMIT else shown[: shown.rfind(b"\n") + 1]
     return {"task": task_id, "diff": shown.decode("utf-8", errors="replace"),
             "added": sum(line.startswith("+") and not line.startswith("+++") for line in lines),
             "removed": sum(line.startswith("-") and not line.startswith("---") for line in lines),
-            "truncated": len(raw) > DIFF_LIMIT}
+            "truncated": len(raw) > tasks.DIFF_LIMIT}
 
 
 def _items(provider: str, line: str) -> list[dict]:

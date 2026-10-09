@@ -646,6 +646,13 @@ class TaskPreviewTests(unittest.TestCase):
                 self.assertNotEqual(self.call("POST", path, body).status, 200)
         self.assertEqual(self.applied, [])
 
+    def test_an_empty_answer_is_refused_before_any_preview(self) -> None:
+        for text in ("", "   "):
+            with self.subTest(text=text):
+                response = self.call("POST", "/api/tasks/t1/actions/answer/preview", json.dumps({"arguments": {"text": text}}).encode())
+                self.assertEqual(response.status, 400)
+        self.assertEqual(self.app._pending_task_actions, {})
+
     def test_an_apply_from_a_foreign_origin_is_refused(self) -> None:
         preview_id = self.preview()
         foreign = {**self.call.headers, "Origin": "http://127.0.0.1:3000"}
