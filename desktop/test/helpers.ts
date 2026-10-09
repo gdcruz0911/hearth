@@ -46,6 +46,7 @@ export async function openApp(t: TestContext, home: Scratch, backend: string[], 
   let output = "";
   child.stdout?.on("data", (chunk: Buffer) => (output += chunk.toString()));
   child.stderr?.on("data", (chunk: Buffer) => (output += chunk.toString()));
+  if (process.env.CI) t.after(() => void process.stderr.write(`--- app output for "${t.name}" ---\n${output}\n`));  // CI only shows what is printed.
   // Links the app would hand to the person's browser are recorded instead.
   await app.evaluate(({ shell }) => {
     (globalThis as { opened?: string[] }).opened = [];
@@ -73,7 +74,8 @@ export async function windowShowing(app: ElectronApplication, text: string): Pro
     }
     await new Promise((done) => setTimeout(done, 100));
   }
-  throw new Error(`No window showed ${JSON.stringify(text)}.`);
+  const seen = await Promise.all(app.windows().map(async (page) => `${page.url().slice(0, 80)}: ${(await page.evaluate(() => document.body?.innerText ?? "").catch((error) => String(error))).slice(0, 200)}`));
+  throw new Error(`No window showed ${JSON.stringify(text)}; windows: ${JSON.stringify(seen)}.`);
 }
 
 export interface Logged {
