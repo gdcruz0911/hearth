@@ -5,6 +5,7 @@ import contextlib
 import io
 import json
 import os
+import signal
 import shutil
 import subprocess
 import sys
@@ -2286,6 +2287,7 @@ class CancelTests(TaskTestCase):
         os.environ["FAKE_AGENT_SCENARIO"] = "idle"
         self.cli("task", "new", "demo", "Add hello.txt")
         stranger = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"], start_new_session=True)
+        self.addCleanup(stranger.wait)
         self.addCleanup(stranger.kill)
         task = self.only_task()
         task.update(status="running", finished=None)
@@ -2344,6 +2346,7 @@ class CancelTests(TaskTestCase):
         os.environ["FAKE_AGENT_SCENARIO"] = "idle"
         self.cli("task", "new", "demo", "Add hello.txt")
         stranger = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"], start_new_session=True)
+        self.addCleanup(stranger.wait)
         self.addCleanup(stranger.kill)
         task = self.only_task()
         task.update(status="running", finished=None)
@@ -2456,8 +2459,10 @@ class RetroRefusalTests(RecallFixture):
 class DetachedResumeTests(VerifyTestCase):
     """ADR-0038: work the dashboard sets going runs as its own hearth process, so quitting the app does not end it."""
 
-    def fake_clis_on_path(self) -> None:
-        # The child process cannot inherit this suite's patches, so it finds fakes where it would find the real CLIs: on PATH.
+    def setUp(self) -> None:
+        super().setUp()
+        # A resumed child cannot inherit this suite's patches, so every test here puts fakes where the real CLIs would be
+        # found, on PATH, and no child it resumes can reach a real agent (TEST-2).
         bin_dir = self.home / "bin"
         bin_dir.mkdir()
         fake = Path(__file__).with_name("fake_agent.py")
@@ -2468,6 +2473,28 @@ class DetachedResumeTests(VerifyTestCase):
         patch = mock.patch.dict(os.environ, {"PATH": f"{bin_dir}{os.pathsep}/usr/bin:/bin", "PYTHONPATH": str(Path(tasks.__file__).parents[2])})
         patch.start()
         self.addCleanup(patch.stop)
+        launch = tasks.resume_detached
+
+        def resumed(task_id: str, command: str) -> int | None:
+            pid = launch(task_id, command)
+            if pid is not None:
+                self.addCleanup(self.finished, pid)
+            return pid
+
+        patch = mock.patch.object(tasks, "resume_detached", side_effect=resumed)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def finished(self, pid: int) -> None:
+        """Let a resumed child end before its task folder is removed, and stop it if it does not."""
+        for _ in range(200):
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return
+            time.sleep(0.05)
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(pid, signal.SIGKILL)
 
     def answered_task(self) -> dict:
         os.environ["FAKE_OUTBOX"] = '{"to": "person", "kind": "question", "body": "Which greeting?"}'
@@ -2477,7 +2504,6 @@ class DetachedResumeTests(VerifyTestCase):
         return task
 
     def test_the_whole_loop_finishes_after_the_process_that_launched_it_is_killed(self) -> None:
-        self.fake_clis_on_path()
         task = self.answered_task()
         os.environ["FAKE_REVIEWS"] = "approve"
         launcher = subprocess.Popen(
@@ -2531,7 +2557,6 @@ class DetachedResumeTests(VerifyTestCase):
         return self.only_task()
 
     def test_the_dashboard_answers_the_first_question_and_resumes_the_loop(self) -> None:
-        self.fake_clis_on_path()
         task = self.waiting_on_a_question()
         state = tasks.dashboard_task_state(task["id"], "answer")
         os.environ["FAKE_REVIEWS"] = "approve"
@@ -2584,7 +2609,6 @@ class DetachedResumeTests(VerifyTestCase):
         self.assertIsNone(tasks.dashboard_task_state(task["id"], "answer"))
 
     def test_the_dashboard_approves_exactly_the_tests_it_showed(self) -> None:
-        self.fake_clis_on_path()
         task = self.waiting_for_test_approval()
         task_dir = self.home / ".hearth/tasks" / task["id"]
         shown = tasks.dashboard_task_state(task["id"], "approve-tests")
@@ -2607,6 +2631,7 @@ class DetachedResumeTests(VerifyTestCase):
         task_dir = self.home / ".hearth/tasks" / task["id"]
         self.assertIsNotNone(tasks.dashboard_task_state(task["id"], "approve-tests"))
         resumed = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"], start_new_session=True)
+        self.addCleanup(resumed.wait)
         self.addCleanup(resumed.kill)
         (task_dir / "resume.json").write_text(json.dumps({"pid": resumed.pid, "identity": tasks._identity(resumed.pid)}), encoding="utf-8")
 
@@ -2736,7 +2761,6 @@ class DetachedResumeTests(VerifyTestCase):
         self.assertTrue(self.only_task()["tests_approved"]["digest"])
 
     def test_an_approval_whose_provider_cannot_start_is_reported_and_can_be_retried(self) -> None:
-        self.fake_clis_on_path()
         (self.home / "bin/claude").unlink()  # The resumed child starts, but the implementer's CLI is missing.
         task = self.waiting_for_test_approval()
 
@@ -2761,6 +2785,7 @@ class DetachedResumeTests(VerifyTestCase):
 
         task = self.only_task()
         implement = task["runs"][-1]
+        self.addCleanup(self.finished, implement["pid"])
         self.assertEqual((implement["role"], task["status"]), ("implement", "running"))
         self.assertIsInstance(implement["pid"], int)  # Recorded, so cancel can find it and nothing else starts.
         self.assertIn("tests_approved", task)
