@@ -174,6 +174,7 @@ function field(label, value) {
 let cancelling = null;
 
 async function cancelStep(task, step) {
+  document.activeElement.blur();  // As in actStep: a focused answer box would keep detail() from showing the step.
   try {
     if (step === "preview") {
       const { preview } = await api(`tasks/${encodeURIComponent(task.id)}/actions/cancel/preview`, {});
@@ -215,9 +216,94 @@ function cancelBox(task) {
   return box;
 }
 
+// An answer or a test approval in progress, and unsent answer drafts, kept across the five-second refresh (ADR-0037).
+let acting = null;
+const drafts = new Map();
+
+async function actStep(task, action, step) {
+  document.activeElement.blur();  // Otherwise detail() keeps the answer box as it was and the step never shows.
+  const path = `tasks/${encodeURIComponent(task.id)}/actions/${action}`;
+  try {
+    if (step === "preview") {
+      const text = drafts.get(task.id) || "";
+      const { preview } = await api(`${path}/preview`, action === "answer" ? { arguments: { text } } : {});
+      acting = { task: task.id, action, preview: preview.id, text };
+    } else if (step === "apply") {
+      const { applied } = await api(`${path}/apply`, { preview: acting.preview });
+      if (action === "answer") drafts.delete(task.id);
+      acting = { task: task.id, action, message: outcome(task, action, applied) };
+    } else {
+      acting = null;
+    }
+  } catch (error) {
+    acting = { task: task.id, action, message: error.message };
+  }
+  refresh();
+}
+
+function outcome(task, action, applied) {
+  // CODE-7: say what happened, and where it stopped short, the command that finishes it (UI-9).
+  if (action === "answer") {
+    if (applied.remaining) return `Answered. ${applied.remaining} more question${applied.remaining === 1 ? "" : "s"} open.`;
+    if (applied.loop) return "Answered. The task continues in its own process.";
+    if (applied.loopable) return `Answered, but the loop did not start. Run hearth loop ${task.id}`;
+    const why = applied.stop_reason ? ` (${shown(applied.stop_reason)})` : "";
+    return `Answered. The task is ${shown(applied.status)}${why} and does not continue on its own. See hearth task show ${task.id}`;
+  }
+  return applied.loop ? "Approved. The implementer starts in its own process." : `Not approved: the implementer could not start. Run hearth task approve-tests ${task.id}`;
+}
+
+function answerBox(task, question) {
+  const box = el("div", "act-box");
+  const state = acting && acting.task === task.id && acting.action === "answer" ? acting : null;
+  if (state && state.preview) {
+    box.append(el("p", "meta", `Your answer to ${shown(question.from)}:`), el("p", "question-body", state.text));
+    const confirm = el("button", "ask-button", "Send answer");
+    const edit = el("button", "link-button", "Edit");
+    confirm.addEventListener("click", () => actStep(task, "answer", "apply"));
+    edit.addEventListener("click", () => actStep(task, "answer", "dismiss"));
+    box.append(confirm, edit);
+    return box;
+  }
+  const input = el("textarea", "answer-input");
+  input.rows = 3;
+  input.dataset.task = task.id;
+  input.setAttribute("aria-label", "Your answer");
+  input.value = drafts.get(task.id) || "";
+  input.addEventListener("input", () => drafts.set(task.id, input.value));
+  const preview = el("button", "ask-button", "Preview answer");
+  preview.addEventListener("click", () => actStep(task, "answer", "preview"));
+  box.append(input, preview);
+  return box;
+}
+
+function approveBox(task) {
+  const box = el("div", "act-box");
+  const state = acting && acting.task === task.id && acting.action === "approve-tests" ? acting : null;
+  const tests = el("ul", "claims");
+  for (const path of task.protected_tests || []) tests.append(el("li", "id", shown(path)));
+  box.append(el("p", "meta", "Tests written first, shown in the Changes pane:"), tests);
+  if (task.approval_failed) box.append(el("p", "meta", `The last approval did not start the implementer: ${shown(task.approval_failed.error)}`));
+  if (state && state.preview) {
+    box.append(el("p", "", "Approve exactly these tests? The implementer then runs and must make them pass without changing them."));
+    const confirm = el("button", "ask-button", "Approve tests");
+    const back = el("button", "link-button", "Not now");
+    confirm.addEventListener("click", () => actStep(task, "approve-tests", "apply"));
+    back.addEventListener("click", () => actStep(task, "approve-tests", "dismiss"));
+    box.append(confirm, back);
+    return box;
+  }
+  const preview = el("button", "ask-button", "Preview approval");
+  preview.addEventListener("click", () => actStep(task, "approve-tests", "preview"));
+  box.append(preview);
+  return box;
+}
+
 function detail(task) {
   const summary = document.getElementById("task-summary");
   const sessionBox = document.getElementById("task-session");
+  const typing = document.activeElement;
+  if (task && typing && typing.classList.contains("answer-input") && typing.dataset.task === task.id) return;  // Keep the cursor.
   if (!task) {
     summary.replaceChildren(el("p", "empty", "No tasks yet. Start one with hearth task new."));
     sessionBox.hidden = true;
@@ -248,15 +334,19 @@ function detail(task) {
   if (why) {
     const box = el("section", "needs-box");
     box.append(el("h3", "group", "Needs you"), el("p", "", why));
-    for (const question of task.questions || []) {
+    for (const [index, question] of (task.questions || []).entries()) {
       const asked = el("div", "question");
       asked.append(el("p", "meta", `${shown(question.from)} asks (${shown(question.kind)})`), el("p", "question-body", shown(question.body)));
+      if (index === 0 && task.status === "waiting") asked.append(answerBox(task, question));  // `task answer` answers the first.
       box.append(asked);
     }
+    if (task.stop_reason === "tests_to_approve" && task.status === "waiting") box.append(approveBox(task));
     box.append(el("code", "command", command(task))); // UI-9: the command until dashboard actions exist.
     parts.push(box);
   }
   if (task.stop_reason) parts.push(field("Stopped because", task.stop_reason));
+  // Shown on its own, since the box it came from is gone once the question is answered or the tests approved.
+  if (acting && acting.task === task.id && acting.message) parts.push(el("p", "meta act-result", acting.message));
   const cancel = cancelBox(task);
   if (cancel) parts.push(cancel);
 

@@ -312,6 +312,8 @@ class HearthWebApplication:
             arguments = payload.get("arguments", {})
             if not isinstance(arguments, dict) or not all(isinstance(value, str) for value in arguments.values()):
                 raise WebRequestError("Action input must be text.")
+            if action == "answer" and not str(arguments.get("text", "")).strip():
+                raise WebRequestError("Write an answer before previewing it.")
             fingerprint = self._workbench_task_state(task_id, action)
             if fingerprint is None:
                 return self._json_error(HTTPStatus.CONFLICT, "This action is not available for this task.")
