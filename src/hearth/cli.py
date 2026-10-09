@@ -6,6 +6,7 @@ import json
 import os
 import shlex
 import signal
+import socket
 import stat
 import sys
 import threading
@@ -178,9 +179,17 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _writable_pipe(fd: int) -> bool:
-    """The app's pipe, never a standard stream or a file, where the secrets would be shown or saved (ADR-0038)."""
+    """The app's pipe, never a standard stream or a file, where the secrets would be shown or saved (ADR-0038).
+
+    Electron's Node gives a child an unnamed socket pair rather than a pipe, which is just as private; a named or network
+    socket is refused, since something else could connect to it.
+    """
     try:
-        return fd > 2 and stat.S_ISFIFO(os.fstat(fd).st_mode) and fcntl.fcntl(fd, fcntl.F_GETFL) & os.O_ACCMODE in (os.O_WRONLY, os.O_RDWR)
+        mode = os.fstat(fd).st_mode
+        if stat.S_ISSOCK(mode):
+            with socket.socket(fileno=os.dup(fd)) as inherited:
+                return fd > 2 and inherited.family == socket.AF_UNIX and not inherited.getsockname() and not inherited.getpeername()
+        return fd > 2 and stat.S_ISFIFO(mode) and fcntl.fcntl(fd, fcntl.F_GETFL) & os.O_ACCMODE in (os.O_WRONLY, os.O_RDWR)
     except OSError:
         return False
 
