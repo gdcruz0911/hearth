@@ -8,6 +8,10 @@ request with its path and headers. FAKE_BACKEND_MODE "wrong-answer" answers the 
 
 from __future__ import annotations
 
+import faulthandler
+
+faulthandler.dump_traceback_later(5)  # Shows where startup is stuck if it takes this long, as on CI (2026-10-09).
+
 import hashlib
 import hmac
 import json
@@ -73,6 +77,7 @@ log({"pid": os.getpid(), "port": PORT, "cookie": COOKIE, "token": TOKEN})
 with os.fdopen(3, "w", encoding="utf-8") as pipe:
     pipe.write(json.dumps({"port": PORT, "cookie_name": f"hearth_{PORT}", "cookie": COOKIE, "token": TOKEN}) + "\n")
 print("fake backend running", flush=True)
+faulthandler.cancel_dump_traceback_later()
 
 
 def stop_when_orphaned(parent: int) -> None:
