@@ -740,7 +740,7 @@ def _run(task: dict, task_dir: Path, role: str, provider: str, template: list[st
         errors = (run_dir / "stderr.txt").open("w", encoding="utf-8")
         try:
             process = subprocess.Popen(argv, cwd=task["worktree"], stdin=subprocess.PIPE, stdout=events, stderr=errors, text=True,
-                                       start_new_session=True, env={**os.environ, "HEARTH_TASK": task["id"], "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
+                                       start_new_session=True, env={**os.environ, **NO_BYTECODE, "HEARTH_TASK": task["id"], "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
                                                                     **({"CODEX_HOME": str(_codex_home(task_dir))} if provider == "codex" else {})})
         except OSError as exc:
             events.close()
@@ -1749,10 +1749,14 @@ def _checkpoint(task: dict, task_dir: Path) -> list[str]:
     return paths
 
 
+# Python's import cache would otherwise land in the checkpoint of a project that does not ignore it.
+NO_BYTECODE = {"PYTHONDONTWRITEBYTECODE": "1"}
+
+
 def _check(project: dict, task: dict, task_dir: Path) -> int:
     """Run the project's check in the worktree and save its output with the last run; returns the exit code."""
     record = task["runs"][-1]
-    check = subprocess.run(project["check"], shell=True, cwd=task["worktree"], capture_output=True, text=True)
+    check = subprocess.run(project["check"], shell=True, cwd=task["worktree"], capture_output=True, text=True, env={**os.environ, **NO_BYTECODE})
     (task_dir / "runs" / record["dir"] / "checks.txt").write_text(
         f"$ {project['check']}\n{check.stdout}{check.stderr}\nexit code: {check.returncode}\n", encoding="utf-8")
     record["check_exit_code"] = check.returncode

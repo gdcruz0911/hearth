@@ -180,6 +180,27 @@ class TaskTests(TaskTestCase):
         self.assertEqual(git(worktree, "show", "--name-only", "--format=", "HEAD"), "hello.txt\n")
         self.assertEqual((worktree / "AGENTS.md").read_text(encoding="utf-8"), "Run the check.\n")
 
+    def test_running_python_in_a_worker_and_the_check_leaves_no_bytecode_in_the_checkpoint(self) -> None:
+        # The smoke task on 2026-10-09 spent two fix runs on __pycache__ files committed from a repo with no ignore rule for them.
+        (self.repo / "calc.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+        (self.repo / "test_calc.py").write_text("import unittest\nimport calc\n\n\nclass T(unittest.TestCase):\n"
+                                                "    def test_add(self):\n        self.assertEqual(calc.add(1, 2), 3)\n", encoding="utf-8")
+        git(self.repo, "add", "calc.py", "test_calc.py")
+        git(self.repo, "commit", "-q", "-m", "calc")
+        tests = f"{sys.executable} -m unittest test_calc"
+        self.write_projects(check=f"{tests} && test -f hello.txt")
+        environment = {key: value for key, value in os.environ.items() if key != "PYTHONDONTWRITEBYTECODE"}
+
+        with mock.patch.dict(os.environ, {**environment, "FAKE_RUN": tests}, clear=True):
+            status, _ = self.cli("task", "new", "demo", "Add hello.txt", "--model", "fake-model")
+
+        task = self.only_task()
+        worktree = Path(task["worktree"])
+        self.assertEqual((status, task["status"]), (0, "done"))
+        self.assertIn("OK", (self.home / ".hearth/tasks" / task["id"] / "runs/01-implement-claude/checks.txt").read_text(encoding="utf-8"))
+        self.assertEqual(git(worktree, "show", "--name-only", "--format=", "HEAD"), "hello.txt\n")
+        self.assertEqual(list(worktree.rglob("__pycache__")), [])
+
     def test_hearth_home_keeps_every_record_out_of_the_home_folder(self) -> None:
         elsewhere = self.home / "smoke"
         (elsewhere).mkdir()
