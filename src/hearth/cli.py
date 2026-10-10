@@ -193,7 +193,8 @@ def main(argv: list[str] | None = None) -> int:
     except maintenance.Held as exc:
         given = sys.argv[1:] if argv is None else argv
         tasks.record_refused_resume(given)  # A dashboard resume is continued after the update, without the person's action again.
-        print(f"{exc}\nNext: once the update finishes, hearth {shlex.join(given)}", file=sys.stderr)
+        # An interrupted update's refusal names its own next step, recovering; otherwise the command waits out the update.
+        print(exc if "\nNext:" in str(exc) else f"{exc}\nNext: once the update finishes, hearth {shlex.join(given)}", file=sys.stderr)
         return 1
 
 

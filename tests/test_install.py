@@ -161,6 +161,23 @@ class RuntimeInstallTests(unittest.TestCase):
         self.assertEqual(json.loads((second / "runtime.json").read_text(encoding="utf-8"))["base"], moved)
         self.assertEqual((self.runtimes / "current").resolve(), second.resolve())
 
+    def test_the_runtime_command_installs_another_release_only_through_an_update(self) -> None:
+        options = ("--no-index", "--find-links", str(self.wheels))
+        with unittest.mock.patch.dict(os.environ, {"HEARTH_HOME": str(self.root / "hearth")}):
+            first = install.runtime(self.repo, "main", BASE, self.runtimes, options)
+            (self.repo / "hearth/__init__.py").write_text('RELEASE = "newer"\n', encoding="utf-8")
+            self.commit()
+            with self.assertRaisesRegex(install.InstallError, "only through an update[\\s\\S]*hearth.install update --ref main"):
+                install.runtime(self.repo, "main", BASE, self.runtimes, options)
+            self.assertEqual((self.runtimes / "current").resolve(), first.resolve())
+            git(self.repo, "reset", "-q", "--hard", "HEAD~1")
+            version = json.loads((first / "runtime.json").read_text(encoding="utf-8"))["base"]["version"]
+            with unittest.mock.patch.object(install, "base_python", return_value={"path": str(self.root / "new/python3"), "version": version}):
+                rebuilt = install.runtime(self.repo, "main", BASE, self.runtimes, options)  # The same release on another Python.
+
+        self.assertNotEqual(rebuilt, first)
+        self.assertEqual((self.runtimes / "current").resolve(), rebuilt.resolve())
+
     def test_a_virtual_environment_is_refused_as_the_base(self) -> None:
         subprocess.run([BASE, "-m", "venv", "--without-pip", str(self.root / "venv")], check=True)
 

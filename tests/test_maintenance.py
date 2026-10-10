@@ -128,6 +128,36 @@ if __name__ == "__main__":
     unittest.main()
 
 
+class InterruptedUpdateTests(unittest.TestCase):
+    """While an interrupted update is unrecovered, nothing writes, checked once the writer holds its lock."""
+
+    def setUp(self) -> None:
+        self.temporary_directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary_directory.cleanup)
+        self.home = Path(self.temporary_directory.name)
+
+    def test_a_marker_that_appears_while_a_writer_takes_its_lock_still_stops_it(self) -> None:
+        real = fcntl.flock
+
+        def update_dies_meanwhile(handle, operation):
+            (self.home / "update.json").write_text(json.dumps({"step": "changing", "source": "/x"}), encoding="utf-8")
+            return real(handle, operation)
+
+        with mock.patch.object(maintenance.fcntl, "flock", side_effect=update_dies_meanwhile):
+            with self.assertRaisesRegex(maintenance.Held, "interrupted[\\s\\S]*hearth.install recover"):
+                with maintenance.writing(self.home):
+                    self.fail("the writer ran")
+
+    def test_the_recovery_command_survives_any_checkout_path_in_zsh(self) -> None:
+        source = str(self.home / "a $HOME `date` 'quoted' folder")
+        Path(source).mkdir()
+        command = maintenance.recover_command(source).replace(".venv/bin/python -m hearth.install recover", "pwd -P")
+
+        shown = subprocess.run(["/bin/zsh", "-f", "-c", command], capture_output=True, text=True, check=True).stdout.strip()
+
+        self.assertEqual(shown, str(Path(source).resolve()))
+
+
 class InheritedLockTests(unittest.TestCase):
     """ADR-0040: the update's own steps run inside its exclusive lock, inherited, and can neither release it nor pass it on."""
 

@@ -77,17 +77,27 @@ def lock(repo: Path, base: str, uploaded_prior_to: str) -> Path:
     return repo / LOCK
 
 
-def install(repo: Path, ref: str, base: str, root: Path = ROOT, pip_options: tuple[str, ...] = ()) -> Path:
-    """Build a runtime from `ref`, check that its backend starts, then make it current; returns the runtime's folder."""
+class AlreadyInstalled(InstallError):
+    """Raised for a complete runtime of the same release on the same Python; `target` is that runtime."""
+
+    def __init__(self, message: str, target: Path):
+        super().__init__(message)
+        self.target = target
+
+
+def install(repo: Path, ref: str, base: str, root: Path = ROOT, pip_options: tuple[str, ...] = (), make_current: bool = True) -> Path:
+    """Build a runtime from `ref`, check that its backend starts, then make it current unless `make_current` is False; returns its folder."""
     interpreter = base_python(base)
     commit = _run(["git", "-C", str(repo), "rev-parse", "--verify", f"{ref}^{{commit}}"]).stdout.strip()
     # Named for the base Python's version and path too, so rebuilding after that Python is upgraded, or replaced by one at
     # another path, makes a new runtime beside the old one instead of meeting it.
     identity = hashlib.sha256(interpreter["path"].encode()).hexdigest()[:8]
     target = root / f"{''.join(c if c.isalnum() or c in '.-_' else '-' for c in ref)}-{commit[:12]}-py{interpreter['version']}-{identity}"
+    if target.exists() and not (target / "runtime.json").is_file() and not (root / "current").resolve() == target.resolve():
+        shutil.rmtree(target)  # Left half-built by a run that died; a runtime is complete only once runtime.json is written.
     if target.exists():
-        raise InstallError(f"A runtime for {ref} at {commit[:12]} on Python {interpreter['version']} is already installed at {target}, from that same interpreter.\n"
-                           f"Next: use it, or remove {target} and install again")
+        raise AlreadyInstalled(f"A runtime for {ref} at {commit[:12]} on Python {interpreter['version']} is already installed at {target}, from that same interpreter.\n"
+                               f"Next: use it, or remove {target} and install again", target)
     root.mkdir(parents=True, exist_ok=True)
     try:
         with tempfile.TemporaryDirectory() as scratch:
@@ -110,8 +120,30 @@ def install(repo: Path, ref: str, base: str, root: Path = ROOT, pip_options: tup
     except BaseException:
         shutil.rmtree(target, ignore_errors=True)  # Never leave a half-built runtime where the app could pick it up.
         raise
-    _switch(root / "current", target)
+    if make_current:
+        switch(root / "current", target)
     return target
+
+
+def runtime(repo: Path, ref: str, base: str, root: Path = ROOT, pip_options: tuple[str, ...] = ()) -> Path:
+    """The `runtime` command: a first install, or the current release rebuilt, such as on a new Python. Any other release
+    changes what the app runs on the person's data, so it goes through `update`, which backs up and checks it first."""
+    from . import update
+    from .runtime import hearth_home
+
+    with update.only_update(hearth_home()):  # Never beside an update, which could otherwise build or remove the same runtime.
+        commit = _run(["git", "-C", str(repo), "rev-parse", "--verify", f"{ref}^{{commit}}"]).stdout.strip()
+        current = root / "current"
+        if current.exists() or current.is_symlink():
+            try:
+                installed = json.loads((current / "runtime.json").read_text(encoding="utf-8"))["commit"]
+            except (OSError, ValueError, KeyError, TypeError):
+                installed = None
+            if installed != commit:
+                raise InstallError(f"{ref} is not the release the current runtime was built from ({str(installed)[:12]}), so it is installed only "
+                                   "through an update, which backs up and checks your data first.\n"
+                                   f"Next: quit the Hearth app, then run .venv/bin/python -m hearth.install update --ref {ref}")
+        return install(repo, ref, base, root, pip_options)
 
 
 def _export(repo: Path, commit: str, destination: Path) -> None:
@@ -143,27 +175,36 @@ def _check_backend(python: str) -> None:
                                    pass_fds=(theirs.fileno(),), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=environment, cwd=scratch)
         theirs.close()
         try:
-            ours.settimeout(READY_SECONDS)  # As long as the app waits; a backend that stalls fails here instead of hanging.
-            try:
-                with ours.makefile(encoding="utf-8") as pipe:
-                    line = pipe.readline()
-            except TimeoutError:
-                raise InstallError(f"The installed backend did not start within {READY_SECONDS} seconds.") from None
-            if not line:
-                raise InstallError(f"The installed backend stopped before its handshake (exit code {backend.wait(timeout=30)}).")
-            handshake = json.loads(line)
-            challenge = secrets.token_hex(32)
-            answer = json.loads(_get(handshake["port"], f"/desktop/challenge?c={challenge}", {})[1])["answer"]
-            expected = hmac.new(handshake["token"].encode(), b"hearth-desktop-challenge\0" + challenge.encode(), hashlib.sha256).hexdigest()
-            if not hmac.compare_digest(answer, expected):
-                raise InstallError("The installed backend did not answer its challenge.")
-            status, body = _get(handshake["port"], "/assets/dashboard.js", {"Cookie": f"{handshake['cookie_name']}={handshake['cookie']}"})
-            if status != 200 or not body:
-                raise InstallError(f"The installed backend did not serve the dashboard's script (HTTP {status}), so its web assets are missing.")
+            check_handshake(ours, backend)
         finally:
             ours.close()
             backend.terminate()
-            backend.wait(timeout=30)
+            try:
+                backend.wait(timeout=30)
+            except subprocess.TimeoutExpired:  # A backend that ignores SIGTERM is killed, never left running.
+                backend.kill()
+                backend.wait()
+
+
+def check_handshake(ours: socket.socket, backend: subprocess.Popen) -> None:
+    """Require a started backend's handshake on `ours`, a correct challenge answer, and the dashboard's script."""
+    ours.settimeout(READY_SECONDS)  # As long as the app waits; a backend that stalls fails here instead of hanging.
+    try:
+        with ours.makefile(encoding="utf-8") as pipe:
+            line = pipe.readline()
+    except TimeoutError:
+        raise InstallError(f"The installed backend did not start within {READY_SECONDS} seconds.") from None
+    if not line:
+        raise InstallError(f"The installed backend stopped before its handshake (exit code {backend.wait(timeout=30)}).")
+    handshake = json.loads(line)
+    challenge = secrets.token_hex(32)
+    answer = json.loads(_get(handshake["port"], f"/desktop/challenge?c={challenge}", {})[1])["answer"]
+    expected = hmac.new(handshake["token"].encode(), b"hearth-desktop-challenge\0" + challenge.encode(), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(answer, expected):
+        raise InstallError("The installed backend did not answer its challenge.")
+    status, body = _get(handshake["port"], "/assets/dashboard.js", {"Cookie": f"{handshake['cookie_name']}={handshake['cookie']}"})
+    if status != 200 or not body:
+        raise InstallError(f"The installed backend did not serve the dashboard's script (HTTP {status}), so its web assets are missing.")
 
 
 def _get(port: int, path: str, headers: dict[str, str]) -> tuple[int, bytes]:
@@ -176,7 +217,7 @@ def _get(port: int, path: str, headers: dict[str, str]) -> tuple[int, bytes]:
         connection.close()
 
 
-def _switch(link: Path, target: Path) -> None:
+def switch(link: Path, target: Path) -> None:
     """Point `current` at the new runtime in one step, so the app sees either the old one or the new one."""
     staged = link.with_name(".current-switching")
     staged.unlink(missing_ok=True)
@@ -203,12 +244,26 @@ def main(argv: list[str] | None = None) -> int:
     runtime.add_argument("--base", required=True, help="The base Python, such as /Library/Frameworks/Python.framework/Versions/3.14/bin/python3.14.")
     runtime.add_argument("--ref", required=True, help="The commit or tag to release; uncommitted edits are never included.")
     runtime.add_argument("--root", type=Path, default=ROOT, help=f"Where runtimes live (default: {ROOT}).")
+    updater = commands.add_parser("update", help="Update the app's runtime to a release, backing up and checking your data first (ADR-0040).")
+    updater.add_argument("--ref", required=True, help="The release tag to update to.")
+    updater.add_argument("--base", help="The base Python; by default, the one the current runtime was built on.")
+    updater.add_argument("--root", type=Path, default=ROOT, help=f"Where runtimes live (default: {ROOT}).")
+    commands.add_parser("recover", help="Finish an interrupted update: undo it if it had changed your data, otherwise only clear it.")
     args = parser.parse_args(argv)
+    if args.command in ("update", "recover") and os.environ.get("HEARTH_TASK"):
+        print("Agents cannot update Hearth; this shell belongs to a task.\nNext: ask the person, through the task board or your final report", file=sys.stderr)
+        return 1
     try:
         if args.command == "lock":
             print(f"Wrote {lock(args.repo, args.base, args.uploaded_prior_to)}")
+        elif args.command == "update":
+            from . import update
+            print(update.update(args.repo, args.ref, args.base, args.root))
+        elif args.command == "recover":
+            from . import update
+            print(update.recover())
         else:
-            print(f"Installed {install(args.repo, args.ref, args.base, args.root)} and made it current.")
+            print(f"Installed {runtime(args.repo, args.ref, args.base, args.root)} and made it current.")
     except InstallError as exc:
         print(exc, file=sys.stderr)
         return 1
