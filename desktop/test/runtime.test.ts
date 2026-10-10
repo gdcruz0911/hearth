@@ -62,3 +62,19 @@ test("with no runtime installed, the app says how to install one", async (t) => 
 
   assert.match(await page.evaluate(() => document.body.innerText), /hearth\.install runtime --base "\/Library\/Frameworks\/Python\.framework/);
 });
+
+test("malformed runtime metadata is explained in the window instead of leaving none", async (t) => {
+  for (const [contents, reason] of [["{}", "names no absolute base Python"], ["not json", "cannot read"]]) {
+    const home = scratch();
+    const root = join(home.dir, "runtime");
+    mkdirSync(join(root, "v1"), { recursive: true });
+    writeFileSync(join(root, "v1/runtime.json"), contents);
+    symlinkSync("v1", join(root, "current"));
+    const { app } = await openApp(t, home, null, { env: { HEARTH_RUNTIME: root } });
+
+    const page = await windowShowing(app, reason);
+
+    assert.match(await page.evaluate(() => document.body.innerText), /will not start that runtime\.\nNext: .*hearth\.install runtime --base/);
+    await app.close();
+  }
+});

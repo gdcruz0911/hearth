@@ -26,6 +26,20 @@ test("with no profile, setup can create a new knowledge base, and the dashboard 
   assert.equal(existsSync(join(desktop, ".hearth")), false, "nothing lands in the folder the app was opened from");
 });
 
+test("when a new knowledge base cannot be created, setup says why and another location still works", async (t) => {
+  const home = scratch();
+  writeFileSync(join(home.dir, "a-file"), "not a folder");  // Nothing can be created under a file.
+  mkdirSync(join(home.dir, "Knowledge"));
+  const good = join(home.dir, "Knowledge/hearth.sqlite");
+  const { app } = await openApp(t, home, [python, "-m", "hearth.cli"], { profile: false, answers: [1, join(home.dir, "a-file/hearth.sqlite"), 0, 1, good] });
+
+  await windowShowing(app, "Hub");
+
+  const dialogs = await asked(app);
+  assert.match(dialogs[2].detail, /could not create a knowledge base/);
+  assert.equal(JSON.parse(readFileSync(join(home.dir, "hearth/profile.json"), "utf8")).database, realpathSync(good));
+});
+
 test("choosing a file that is not a Hearth database changes nothing, and quitting setup leaves no profile", async (t) => {
   const home = scratch();
   const other = join(home.dir, "notes.sqlite");

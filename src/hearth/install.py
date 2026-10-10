@@ -81,10 +81,12 @@ def install(repo: Path, ref: str, base: str, root: Path = ROOT, pip_options: tup
     """Build a runtime from `ref`, check that its backend starts, then make it current; returns the runtime's folder."""
     interpreter = base_python(base)
     commit = _run(["git", "-C", str(repo), "rev-parse", "--verify", f"{ref}^{{commit}}"]).stdout.strip()
-    # Named for the base Python too, so rebuilding after that Python changes makes a new runtime instead of meeting the old one.
-    target = root / f"{''.join(c if c.isalnum() or c in '.-_' else '-' for c in ref)}-{commit[:12]}-py{interpreter['version']}"
+    # Named for the base Python's version and path too, so rebuilding after that Python is upgraded, or replaced by one at
+    # another path, makes a new runtime beside the old one instead of meeting it.
+    identity = hashlib.sha256(interpreter["path"].encode()).hexdigest()[:8]
+    target = root / f"{''.join(c if c.isalnum() or c in '.-_' else '-' for c in ref)}-{commit[:12]}-py{interpreter['version']}-{identity}"
     if target.exists():
-        raise InstallError(f"A runtime for {ref} at {commit[:12]} on Python {interpreter['version']} is already installed at {target}.\n"
+        raise InstallError(f"A runtime for {ref} at {commit[:12]} on Python {interpreter['version']} is already installed at {target}, from that same interpreter.\n"
                            f"Next: use it, or remove {target} and install again")
     root.mkdir(parents=True, exist_ok=True)
     try:
