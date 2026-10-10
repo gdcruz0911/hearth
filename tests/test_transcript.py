@@ -21,6 +21,7 @@ class TranscriptTests(unittest.TestCase):
         patch = mock.patch.dict(os.environ, {"HOME": str(home)})
         patch.start()
         self.addCleanup(patch.stop)
+        os.environ.pop("HEARTH_HOME", None)  # Restored by the patch; a set HEARTH_HOME would move these records.
         self.task_dir = home / ".hearth/tasks/20260930-120000"
 
     def run_with(self, provider: str, events: bytes, finished: bool = True) -> Path:
@@ -86,6 +87,7 @@ class DiffTests(unittest.TestCase):
         patch = mock.patch.dict(os.environ, {"HOME": str(home)})
         patch.start()
         self.addCleanup(patch.stop)
+        os.environ.pop("HEARTH_HOME", None)  # Restored by the patch; a set HEARTH_HOME would move these records.
         self.task_dir = home / ".hearth/tasks/20260930-120000"
         self.task_dir.mkdir(parents=True)
         (self.task_dir / "task.json").write_text(json.dumps({"id": "20260930-120000", "status": "done", "runs": []}), encoding="utf-8")

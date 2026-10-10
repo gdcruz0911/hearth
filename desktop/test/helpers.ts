@@ -32,7 +32,14 @@ export function scratch(): Scratch {
 }
 
 export const fakeBackend = [python, join(desktop, "test/fake_backend.py")];
-export const realBackend = (dir: string) => [python, "-m", "hearth.cli", "--database", join(dir, "web.sqlite"), "web", "--desktop", "--handshake-fd", "3"];
+// The real backend, reading its data from the scratch home's <HEARTH_HOME>/profile.json, which names a new, empty knowledge base.
+export function realBackend(dir: string): string[] {
+  if (!existsSync(join(dir, "hearth/profile.json"))) {
+    execFileSync(python, ["-m", "hearth.cli", "profile", "create", join(dir, "hearth/profile.json"), "--database", join(dir, "web.sqlite"), "--create-database"],
+                 { env: { PATH: "/usr/bin:/bin", HOME: join(dir, "home"), HEARTH_HOME: join(dir, "hearth"), PYTHONPATH: join(repo, "src") } });
+  }
+  return [python, "-m", "hearth.cli", "web", "--desktop", "--handshake-fd", "3"];
+}
 
 export interface App {
   app: ElectronApplication;

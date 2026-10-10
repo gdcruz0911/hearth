@@ -44,6 +44,7 @@ class GoogleSignInTests(unittest.TestCase):
         for patch in patches:
             patch.start()
             self.addCleanup(patch.stop)
+        os.environ.pop("HEARTH_HOME", None)  # Restored by the patch; a set HEARTH_HOME would move these records.
         os.environ.pop("HEARTH_TASK", None)
 
     def tearDown(self) -> None:

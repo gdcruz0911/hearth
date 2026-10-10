@@ -124,10 +124,20 @@ def _export(repo: Path, commit: str, destination: Path) -> None:
 def _check_backend(python: str) -> None:
     """Start the installed backend as the app would, and require the handshake, the challenge, and the dashboard's script."""
     with tempfile.TemporaryDirectory() as scratch:
+        environment = clean_environment(HEARTH_HOME=f"{scratch}/hearth")  # Never the person's ~/.hearth or their data.
+        # The desktop backend reads its data only from <HEARTH_HOME>/profile.json, so the check gets a scratch one, made by the
+        # release itself, naming a new, empty knowledge base.
+        try:
+            made = subprocess.run([python, "-m", "hearth.cli", "profile", "create", f"{scratch}/hearth/profile.json", "--database",
+                                   f"{scratch}/check.sqlite", "--create-database"], capture_output=True, text=True, env=environment,
+                                  cwd=scratch, timeout=READY_SECONDS)
+        except subprocess.TimeoutExpired:
+            raise InstallError(f"The installed Hearth did not create a scratch profile within {READY_SECONDS} seconds.") from None
+        if made.returncode != 0:
+            raise InstallError(f"The installed Hearth could not create a scratch profile:\n{(made.stderr or made.stdout).strip()[-1000:]}")
         ours, theirs = socket.socketpair()  # What the app's Node hands the backend, so the check passes only if the app's would.
-        backend = subprocess.Popen([python, "-m", "hearth.cli", "--database", f"{scratch}/check.sqlite", "web", "--desktop",
-                                    "--handshake-fd", str(theirs.fileno())], pass_fds=(theirs.fileno(),), stdout=subprocess.DEVNULL,
-                                   stderr=subprocess.DEVNULL, env=clean_environment(HEARTH_HOME=f"{scratch}/hearth"), cwd=scratch)
+        backend = subprocess.Popen([python, "-m", "hearth.cli", "web", "--desktop", "--handshake-fd", str(theirs.fileno())],
+                                   pass_fds=(theirs.fileno(),), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=environment, cwd=scratch)
         theirs.close()
         try:
             ours.settimeout(READY_SECONDS)  # As long as the app waits; a backend that stalls fails here instead of hanging.

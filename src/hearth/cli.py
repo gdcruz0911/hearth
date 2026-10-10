@@ -6,6 +6,7 @@ import json
 import os
 import shlex
 import signal
+import sqlite3
 import socket
 import stat
 import sys
@@ -43,6 +44,7 @@ from .runtime import (
     write_runtime_profile,
 )
 from .service import HearthService
+from .store import SQLiteStore, current_database_problem
 from .web import HearthWebServer, _document_payload
 from .workbench import ask, evals, google, stats, tasks, transcript, usage
 
@@ -150,7 +152,10 @@ def main(argv: list[str] | None = None) -> int:
     profile_commands = profile.add_subparsers(dest="profile_command", required=True)
     profile_create = profile_commands.add_parser("create", help="Create a new profile without overwriting an existing file.")
     profile_create.add_argument("path", type=Path)
-    profile_create.add_argument("--database", type=Path, required=True)
+    profile_create.add_argument("--database", type=Path, required=True,
+                                help="An existing, current Hearth database, which is checked without being changed.")
+    profile_create.add_argument("--create-database", action="store_true",
+                                help="Create a new, empty knowledge base at --database, which must not exist yet.")
     profile_create.add_argument("--embedding-model", type=Path)
     profile_create.add_argument("--index-directory", type=Path)
     profile_create.add_argument("--reranker-model", type=Path)
@@ -178,6 +183,21 @@ def main(argv: list[str] | None = None) -> int:
     except maintenance.Held as exc:
         print(f"{exc}\nNext: once the update finishes, hearth {shlex.join(sys.argv[1:] if argv is None else argv)}", file=sys.stderr)
         return 1
+
+
+def _require_desktop_profile(parser: argparse.ArgumentParser, path: Path | None, profile: RuntimeProfile, default: Path,
+                             given: list[str]) -> None:
+    """The app's backend reads its data only from a profile that names an existing database, never from its working folder."""
+    if path is None:
+        parser.error(f"Hearth has no profile at {default}.\n"
+                     f"Next: open the Hearth app to set one up, or run hearth profile create {default} --database <file>.")
+    if given:
+        parser.error(f"{', '.join(given)} do not apply with --desktop: the profile at {path} chooses the data.")
+    if profile.database is None:
+        parser.error(f"{path} names no database.\nNext: add \"database\" to {path}.")
+    if not profile.database.is_file():
+        parser.error(f"{path} names {profile.database}, which does not exist, so Hearth will not open an empty one there.\n"
+                     f"Next: restore that file, or point {path} at your database.")
 
 
 def _writable_pipe(fd: int) -> bool:
@@ -216,10 +236,27 @@ def _run(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     if args.command == "google":
         return google.run(args)
     if args.command == "profile":
+        if args.path.expanduser().exists():
+            parser.error(f"{args.path} already exists, and Hearth never overwrites a profile.\nNext: edit it, or choose another path.")
+        if args.create_database:
+            if args.database.expanduser().exists() or args.database.expanduser().is_symlink():
+                parser.error(f"{args.database} already exists, so Hearth will not create a new knowledge base there.\n"
+                             "Next: drop --create-database to use it, or choose a new path.")
+        elif problem := current_database_problem(args.database.expanduser()):
+            parser.error(f"{problem}\nNext: choose a current Hearth database, or add --create-database for a new knowledge base.")
         if (args.embedding_model is None) != (args.index_directory is None):
             parser.error("--embedding-model and --index-directory must be provided together.")
         if args.retain_ocr_output and args.ocr_output_directory is None:
             parser.error("--retain-ocr-output requires --ocr-output-directory.")
+        created = args.database.expanduser().resolve() if args.create_database else None
+        if created is not None:
+            # The knowledge base comes first, so a profile is only ever published once the database it names exists; a
+            # failure leaves no profile behind, and the same command can be run again with another location.
+            try:
+                SQLiteStore(created).close()
+            except (OSError, sqlite3.Error) as exc:
+                parser.error(f"Hearth could not create a knowledge base at {args.database}: {exc}.\n"
+                             "Next: choose a folder you can write to, and run the command again.")
         try:
             profile_path = write_runtime_profile(
                 args.path,
@@ -236,13 +273,22 @@ def _run(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
                 ),
             )
         except RuntimeProfileError as exc:
+            if created is not None:
+                created.unlink(missing_ok=True)  # Only the empty database this command just made, so it can be run again.
             parser.error(str(exc))
         print(f"Created private runtime profile: {profile_path}")
         return 0
+    # <HEARTH_HOME>/profile.json is the default, so the app and every terminal use the same data; an explicit --profile wins,
+    # and command-line options still override what a profile says. A default that is present but broken is reported, never
+    # replaced by another database. A link counts as present even when its target is gone.
+    default = hearth_home() / "profile.json"
+    profile_path = args.profile if args.profile is not None else default if default.is_symlink() or default.exists() else None
     try:
-        profile = load_runtime_profile(args.profile) if args.profile is not None else RuntimeProfile()
+        profile = load_runtime_profile(profile_path) if profile_path is not None else RuntimeProfile()
     except RuntimeProfileError as exc:
-        parser.error(str(exc))
+        parser.error(f"{profile_path}: {exc}\nNext: fix {profile_path}, or pass --profile with another one.")
+    given = [flag for flag, value in (("--database", args.database), ("--embedding-model", args.embedding_model),
+                                      ("--index-directory", args.index_directory), ("--reranker-model", args.reranker_model)) if value]
     args.database = args.database or profile.database or Path(".hearth/hearth.sqlite")
     args.source_roots = tuple(args.source_root) if args.source_root else profile.source_roots
     # Recall roots come only from the profile, so a command line cannot widen what agents receive.
@@ -274,6 +320,8 @@ def _run(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
         parser.error("--port does not apply with --desktop, which binds a free port.")
     if args.command == "web" and args.desktop and not _writable_pipe(args.handshake_fd):
         parser.error("--handshake-fd must be a writable pipe from the Hearth app, not a standard stream or a file.")
+    if args.command == "web" and args.desktop:
+        _require_desktop_profile(parser, profile_path, profile, default, given)
     service: HearthService | None = None
     try:
         semantic_index = (

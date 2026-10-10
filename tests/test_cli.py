@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import io
 import json
 import os
 import re
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -13,6 +15,8 @@ from unittest import mock
 from hearth.cli import main
 from hearth.domain import ExtractedPage, SourceDocument
 from hearth.service import HearthService
+from hearth.runtime import RuntimeProfileError
+from hearth.store import current_database_problem
 
 
 class OcrPdfExtractor:
@@ -516,3 +520,178 @@ class CommandReferenceTests(unittest.TestCase):
         missing = [command for command in commands if f"`hearth {command}" not in readme]
 
         self.assertEqual(missing, [])
+
+
+class ProfileTestCase(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary_directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary_directory.cleanup)
+        self.root = Path(self.temporary_directory.name)
+        patch = mock.patch.dict(os.environ, {"HOME": str(self.root)})
+        patch.start()
+        self.addCleanup(patch.stop)
+        os.environ.pop("HEARTH_HOME", None)
+        self.elsewhere = self.root / "elsewhere"  # The working folder, where the old fallback created .hearth/hearth.sqlite.
+        self.elsewhere.mkdir()
+        self.addCleanup(os.chdir, os.getcwd())
+        os.chdir(self.elsewhere)
+        self.database = self.root / "data/hearth.sqlite"
+        self.database.parent.mkdir()
+        note = self.root / "operations.md"
+        note.write_text("# Operations\n\nThe deployment owner is Ada.\n", encoding="utf-8")
+        service = HearthService(self.database)
+        service.import_document(str(note))
+        service.close()
+        self.default = self.root / ".hearth/profile.json"
+
+    def run_main(self, *argv: str) -> tuple[int, str, str]:
+        output, errors = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
+            try:
+                status = main(list(argv))
+            except SystemExit as exc:
+                status = exc.code
+        return status, output.getvalue(), errors.getvalue()
+
+    def write_profile(self, path: Path, database: Path) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"format": "hearth-runtime-profile-v1", "database": str(database)}), encoding="utf-8")
+
+
+class DefaultProfileTests(ProfileTestCase):
+    """<HEARTH_HOME>/profile.json is the default, so the app and every terminal use one configuration; nothing falls back silently."""
+
+    def test_the_default_profile_chooses_the_data_from_any_folder(self) -> None:
+        self.write_profile(self.default, self.database)
+
+        status, output, _ = self.run_main("list")
+
+        self.assertEqual(status, 0)
+        self.assertIn("operations.md", output)
+        self.assertFalse((self.elsewhere / ".hearth").exists())
+
+    def test_a_linked_default_profile_is_followed(self) -> None:
+        kept = self.root / "Library/Hearth/hearth.json"
+        self.write_profile(kept, self.database)
+        self.default.parent.mkdir()
+        self.default.symlink_to(kept)
+
+        self.assertIn("operations.md", self.run_main("list")[1])
+
+    def test_an_explicit_profile_and_options_keep_their_precedence(self) -> None:
+        self.write_profile(self.default, self.root / "missing.sqlite")
+        other = self.root / "other.json"
+        self.write_profile(other, self.database)
+
+        self.assertIn("operations.md", self.run_main("--profile", str(other), "list")[1])
+        self.assertIn("operations.md", self.run_main("--database", str(self.database), "list")[1])
+
+    def test_a_broken_default_profile_is_reported_and_nothing_else_is_opened(self) -> None:
+        self.default.parent.mkdir()
+        for name, make in (("malformed", lambda: self.default.write_text("{not json", encoding="utf-8")),
+                           ("a dangling link", lambda: self.default.symlink_to(self.root / "gone.json"))):
+            with self.subTest(profile=name):
+                self.default.unlink(missing_ok=True)
+                make()
+
+                status, _, errors = self.run_main("list")
+
+                self.assertEqual(status, 2)
+                self.assertIn(str(self.default), errors)
+                self.assertIn("Next:", errors)
+                self.assertFalse((self.elsewhere / ".hearth").exists())
+
+    def test_profile_create_accepts_only_a_current_hearth_database_and_never_changes_it(self) -> None:
+        other = self.root / "other.sqlite"
+        sqlite3.connect(other).executescript("CREATE TABLE notes (body TEXT); INSERT INTO notes VALUES ('mine');")
+        before = hashlib.sha256(other.read_bytes()).hexdigest()
+
+        refused, _, errors = self.run_main("profile", "create", str(self.default), "--database", str(other))
+        missing, _, missing_errors = self.run_main("profile", "create", str(self.default), "--database", str(self.root / "none.sqlite"))
+        accepted, _, _ = self.run_main("profile", "create", str(self.default), "--database", str(self.database))
+
+        self.assertEqual((refused, missing, accepted), (2, 2, 0))
+        self.assertIn("not a current Hearth database", errors)
+        self.assertIn("does not exist", missing_errors)
+        self.assertEqual(hashlib.sha256(other.read_bytes()).hexdigest(), before)
+        self.assertEqual(json.loads(self.default.read_text(encoding="utf-8"))["database"], str(self.database.resolve()))
+
+    def test_a_new_knowledge_base_is_created_only_when_asked_and_only_where_nothing_exists(self) -> None:
+        fresh = self.root / "new/hearth.sqlite"
+
+        taken, _, errors = self.run_main("profile", "create", str(self.default), "--database", str(self.database), "--create-database")
+        created, _, _ = self.run_main("profile", "create", str(self.default), "--database", str(fresh), "--create-database")
+        again, _, again_errors = self.run_main("profile", "create", str(self.default), "--database", str(self.database))
+
+        self.assertEqual((taken, created, again), (2, 0, 2))
+        self.assertIn("already exists", errors)
+        self.assertIsNone(current_database_problem(fresh))
+        self.assertIn("never overwrites a profile", again_errors)
+
+
+    def test_a_knowledge_base_that_cannot_be_created_leaves_no_profile_so_another_location_works(self) -> None:
+        blocked = self.root / "a-file"
+        blocked.write_text("not a folder", encoding="utf-8")  # Nothing can be created under a file.
+
+        failed, _, errors = self.run_main("profile", "create", str(self.default), "--database", str(blocked / "hearth.sqlite"), "--create-database")
+        retried, _, _ = self.run_main("profile", "create", str(self.default), "--database", str(self.root / "kb/hearth.sqlite"), "--create-database")
+
+        self.assertEqual((failed, retried), (2, 0))
+        self.assertIn("could not create a knowledge base", errors)
+        self.assertIn("Next:", errors)
+        self.assertEqual(json.loads(self.default.read_text(encoding="utf-8"))["database"], str((self.root / "kb/hearth.sqlite").resolve()))
+
+    def test_a_profile_that_cannot_be_written_removes_the_database_it_just_created(self) -> None:
+        fresh = self.root / "kb/hearth.sqlite"
+        with mock.patch("hearth.cli.write_runtime_profile", side_effect=RuntimeProfileError("The runtime profile could not be created.")):
+            status, _, _ = self.run_main("profile", "create", str(self.default), "--database", str(fresh), "--create-database")
+
+        self.assertEqual(status, 2)
+        self.assertFalse(fresh.exists())
+        self.assertFalse(self.default.exists())
+
+
+class DesktopProfileTests(ProfileTestCase):
+    """The app's backend opens only the database its profile names, and never creates one."""
+
+    def desktop(self) -> tuple[int, str]:
+        read, write = os.pipe()
+        self.addCleanup(os.close, read)
+        self.addCleanup(os.close, write)
+        with mock.patch("hearth.cli.HearthWebServer") as server:
+            status, _, errors = self.run_main("web", "--desktop", "--handshake-fd", str(write))
+        self.started = server.called
+        return status, errors
+
+    def test_without_a_profile_the_app_is_told_to_set_one_up(self) -> None:
+        status, errors = self.desktop()
+
+        self.assertEqual(status, 2)
+        self.assertIn(f"no profile at {self.default}", errors)
+        self.assertFalse(self.started)
+        self.assertFalse((self.elsewhere / ".hearth").exists())
+
+    def test_a_profile_without_an_existing_database_is_refused_and_nothing_is_created(self) -> None:
+        for database in (None, self.root / "moved/hearth.sqlite"):
+            with self.subTest(database=database):
+                self.default.parent.mkdir(exist_ok=True)
+                self.default.write_text(json.dumps({"format": "hearth-runtime-profile-v1", **({"database": str(database)} if database else {})}),
+                                        encoding="utf-8")
+
+                status, errors = self.desktop()
+
+                self.assertEqual(status, 2)
+                self.assertIn("names no database" if database is None else "does not exist", errors)
+                self.assertFalse(self.started)
+                self.assertFalse((self.root / "moved").exists())
+
+    def test_the_profile_is_the_only_source_of_data_in_desktop_mode(self) -> None:
+        self.write_profile(self.default, self.database)
+        read, write = os.pipe()
+        self.addCleanup(os.close, read)
+        self.addCleanup(os.close, write)
+        with mock.patch("hearth.cli.HearthWebServer"):
+            status, _, errors = self.run_main("--database", str(self.root / "other.sqlite"), "web", "--desktop", "--handshake-fd", str(write))
+
+        self.assertEqual(status, 2)
+        self.assertIn("--database do not apply with --desktop", errors)

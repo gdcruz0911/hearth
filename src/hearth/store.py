@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+import tempfile
 from pathlib import Path
 
 from .chunking import CHUNKING_VERSION
@@ -14,6 +15,40 @@ from .domain import (
     PageInspection,
     SourceAttention,
 )
+
+
+def current_database_problem(path: Path) -> str | None:
+    """Why opening `path` would not use it as it is, or None when it is a Hearth database that needs no change.
+
+    Read-only: opening a database creates or migrates its schema, so a chosen file is compared with a fresh one first, and
+    anything missing, whether it is not Hearth's or is older than this code, is reported instead of written (ADR-0038).
+    """
+    if not path.is_file():
+        return f"{path} does not exist."
+    with tempfile.TemporaryDirectory() as scratch:
+        fresh = SQLiteStore(Path(scratch) / "fresh.sqlite")
+        expected = _schema(fresh._connection)
+        fresh.close()
+    try:
+        connection = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
+        try:
+            found = _schema(connection)
+        finally:
+            connection.close()
+    except sqlite3.DatabaseError:
+        return f"{path} is not an SQLite database."
+    missing = sorted(f"{table}.{column}" if column else table for table, column in expected - found)
+    if missing:
+        return f"{path} is not a current Hearth database; it lacks {', '.join(missing[:5])}{' and more' if len(missing) > 5 else ''}."
+    return None
+
+
+def _schema(connection: sqlite3.Connection) -> set[tuple[str, str]]:
+    """Every named table, index, and trigger, and every column of each table, as (name, column or "")."""
+    names = [row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'")]
+    tables = [row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'")]
+    columns = {(table, row[1]) for table in tables for row in connection.execute(f'PRAGMA table_info("{table}")')}
+    return {(name, "") for name in names} | columns
 
 
 class SQLiteStore:

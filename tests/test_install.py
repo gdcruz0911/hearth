@@ -42,6 +42,8 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import parse_qs, urlsplit
 import standin_dep
 
+if sys.argv[1:3] == ["profile", "create"]:  # The installer's scratch profile; this stand-in reads no data.
+    sys.exit(0)
 TOKEN, COOKIE = secrets.token_urlsafe(32), secrets.token_urlsafe(32)
 SCRIPT = pathlib.Path(__file__).with_name("web_assets") / "dashboard.js"
 
@@ -155,7 +157,8 @@ class RuntimeInstallTests(unittest.TestCase):
         self.assertEqual(sorted(path.name for path in self.runtimes.iterdir()), sorted(["current", first.name]))
 
     def test_a_backend_that_never_hands_over_its_session_fails_the_install_within_the_apps_wait(self) -> None:
-        (self.repo / "hearth/cli.py").write_text("import time\ntime.sleep(60)\n", encoding="utf-8")  # Stalls, as a reverse DNS lookup did.
+        (self.repo / "hearth/cli.py").write_text(  # The backend stalls, as a reverse DNS lookup did; the profile step does not.
+            "import sys, time\nif sys.argv[1:3] != ['profile', 'create']:\n    time.sleep(60)\n", encoding="utf-8")
         self.commit()
 
         with unittest.mock.patch.object(install, "READY_SECONDS", 2), self.assertRaisesRegex(install.InstallError, "within 2 seconds"):
