@@ -24,7 +24,7 @@ from pathlib import Path
 
 from . import install
 from .install import InstallError, clean_environment
-from .runtime import hearth_home, load_runtime_profile
+from .runtime import RuntimeProfileError, hearth_home, load_runtime_profile
 
 MARKER = "update.json"
 BACKUPS = "backups"
@@ -38,7 +38,7 @@ SKIPPED = {"maintenance.lock", "rebuild.lock", "update.lock", MARKER, BACKUPS, "
 def update(repo: Path, ref: str, base: str | None, root: Path = install.ROOT, runtime: Path | None = None) -> str:
     """Install `ref` as the current runtime; returns what to tell the person. `runtime` skips building, for tests."""
     home = hearth_home()
-    with _only_update(home):
+    with only_update(home):
         if (home / MARKER).exists():
             raise InstallError(f"An earlier update was interrupted.\nNext: {_recover_command(_marker(home).get('source'))}")
         new = runtime or _built(repo, ref, base or _current_base(root), root)  # No live data is touched before this is done.
@@ -81,7 +81,7 @@ def update(repo: Path, ref: str, base: str | None, root: Path = install.ROOT, ru
 def recover() -> str:
     """Finish an interrupted update: undo it if live data may have changed, and only clear its marker if not."""
     home = hearth_home()
-    with _only_update(home):
+    with only_update(home):
         if not (home / MARKER).exists():
             return "No update was interrupted; nothing to recover."
         lock = _exclusive(home)
@@ -97,7 +97,7 @@ def recover() -> str:
 
 
 @contextlib.contextmanager
-def _only_update(home: Path) -> Iterator[None]:
+def only_update(home: Path) -> Iterator[None]:
     """One update or recovery at a time, from building onwards, so two never build or restore over each other."""
     home.mkdir(parents=True, exist_ok=True)
     with (home / "update.lock").open("a") as handle:
@@ -161,7 +161,10 @@ def _database(home: Path) -> Path | None:
     path = home / "profile.json"
     if not (path.exists() or path.is_symlink()):
         return None
-    database = load_runtime_profile(path).database
+    try:
+        database = load_runtime_profile(path).database
+    except RuntimeProfileError as exc:
+        raise InstallError(f"{path}: {exc}\nNext: fix {path}, then run the update again.") from None
     return database if database is not None and database.is_file() else None
 
 
@@ -230,8 +233,17 @@ def _trial_backend(runtime: Path, lock: int) -> None:
         install.check_handshake(ours, backend)
     finally:
         ours.close()
-        backend.terminate()
-        backend.communicate(timeout=60)  # Reaped here: it holds the lock's descriptor until it has exited.
+        _stop(backend)  # Reaped here, before any restore or release: it holds the lock's descriptor until it has exited.
+
+
+def _stop(process: subprocess.Popen) -> None:
+    """Stop a process and reap it; one that ignores SIGTERM is killed, since Popen.communicate's timeout alone kills nothing."""
+    process.terminate()
+    try:
+        process.communicate(timeout=60)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.communicate()
 
 
 def _continue_refused(runtime: Path) -> list[str]:

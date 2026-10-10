@@ -23,12 +23,16 @@ SRC = REPO / "src"
 DEV_PYTHON = sys.executable
 
 # Run inside the fake runtime, as the new release's migration would, when FAKE_RUNTIME_CRASH is set: it changes the live
-# database enough to spill to disk, leaving a hot journal, then kills the updater and itself mid-migration.
+# database enough to spill to disk, leaving a hot journal, then kills the updater and itself mid-migration. It commits one
+# change first, which the backup does not have: a restore that copied the backup's file and left the hot journal would let
+# SQLite roll that committed state back over it, instead of returning the backup's. (No apostrophes inside: the fake
+# runtime passes this program in single quotes.)
 CRASH = textwrap.dedent("""
     import os, signal, sqlite3, sys
     database = os.environ["FAKE_RUNTIME_DATABASE"]
     live = sqlite3.connect(database, isolation_level=None)
     live.execute("PRAGMA cache_size = 1")
+    live.execute("CREATE TABLE committed_by_migration (x TEXT)")
     live.execute("BEGIN")
     live.execute("CREATE TABLE half_migrated (x TEXT)")
     live.executemany("INSERT INTO half_migrated VALUES (?)", [("x" * 500,)] * 2000)
@@ -161,6 +165,48 @@ class UpdateTests(unittest.TestCase):
                         self.run_update()
                 self.unchanged(before)
 
+    def test_work_that_starts_while_the_update_takes_the_lock_stops_it_before_anything_changes(self) -> None:
+        before = self.digest(self.database)
+        late = ["- task 20261010-090300 is running. Next: let it finish"]
+
+        with mock.patch.object(update, "_busy", side_effect=[[], late]):
+            with self.assertRaisesRegex(install.InstallError, "started while the update was getting ready[\\s\\S]*20261010-090300"):
+                self.run_update()
+
+        self.unchanged(before)
+        self.assertFalse((self.hearth / update.BACKUPS).exists())
+        with maintenance.writing(self.hearth):
+            pass  # The lock was released.
+
+    def test_a_trial_backend_that_will_not_stop_is_killed_before_the_restore_and_the_release(self) -> None:
+        before = self.digest(self.database)
+        started = []
+        real = update.subprocess.Popen
+
+        class Recorded(real):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.trial = "--desktop" in args[0]  # Only the trial backend; the update's other commands run as they are.
+                if self.trial:
+                    started.append(self)
+
+            def communicate(self, *args, **kwargs):
+                if self.trial and kwargs.get("timeout") and not getattr(self, "timed_out", False):
+                    self.timed_out = True  # As a backend that ignores SIGTERM: the first, polite wait runs out.
+                    raise subprocess.TimeoutExpired(self.args, kwargs["timeout"])
+                return super().communicate(*args, **kwargs)
+
+        with mock.patch.object(update.subprocess, "Popen", Recorded), \
+                mock.patch.object(install, "check_handshake", side_effect=RuntimeError("no handshake")):
+            with self.assertRaisesRegex(install.InstallError, "undone[\\s\\S]*no handshake"):
+                self.run_update()
+
+        (backend,) = started
+        self.assertIsNotNone(backend.returncode)  # Killed and reaped, not left holding the lock.
+        self.unchanged(before)
+        with maintenance.writing(self.hearth):
+            pass
+
     def test_a_database_newer_than_the_release_is_refused_and_left_as_it_was(self) -> None:
         sqlite3.connect(self.database).execute("PRAGMA user_version = 99").connection.close()
         before = self.digest(self.database)
@@ -191,6 +237,7 @@ class UpdateTests(unittest.TestCase):
         connection = sqlite3.connect(self.database)
         self.assertEqual(connection.execute("PRAGMA integrity_check").fetchone()[0], "ok")
         self.assertIsNone(connection.execute("SELECT name FROM sqlite_master WHERE name = 'half_migrated'").fetchone())
+        self.assertIsNone(connection.execute("SELECT name FROM sqlite_master WHERE name = 'committed_by_migration'").fetchone())
         connection.close()
         self.assertEqual(self.documents(), documents)
         self.assertEqual(os.readlink(self.runtimes / "current"), "v1")

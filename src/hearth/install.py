@@ -125,6 +125,27 @@ def install(repo: Path, ref: str, base: str, root: Path = ROOT, pip_options: tup
     return target
 
 
+def runtime(repo: Path, ref: str, base: str, root: Path = ROOT, pip_options: tuple[str, ...] = ()) -> Path:
+    """The `runtime` command: a first install, or the current release rebuilt, such as on a new Python. Any other release
+    changes what the app runs on the person's data, so it goes through `update`, which backs up and checks it first."""
+    from . import update
+    from .runtime import hearth_home
+
+    with update.only_update(hearth_home()):  # Never beside an update, which could otherwise build or remove the same runtime.
+        commit = _run(["git", "-C", str(repo), "rev-parse", "--verify", f"{ref}^{{commit}}"]).stdout.strip()
+        current = root / "current"
+        if current.exists() or current.is_symlink():
+            try:
+                installed = json.loads((current / "runtime.json").read_text(encoding="utf-8"))["commit"]
+            except (OSError, ValueError, KeyError, TypeError):
+                installed = None
+            if installed != commit:
+                raise InstallError(f"{ref} is not the release the current runtime was built from ({str(installed)[:12]}), so it is installed only "
+                                   "through an update, which backs up and checks your data first.\n"
+                                   f"Next: quit the Hearth app, then run .venv/bin/python -m hearth.install update --ref {ref}")
+        return install(repo, ref, base, root, pip_options)
+
+
 def _export(repo: Path, commit: str, destination: Path) -> None:
     """The committed tree only: uncommitted edits in the checkout never reach a release."""
     destination.mkdir()
@@ -158,7 +179,11 @@ def _check_backend(python: str) -> None:
         finally:
             ours.close()
             backend.terminate()
-            backend.wait(timeout=30)
+            try:
+                backend.wait(timeout=30)
+            except subprocess.TimeoutExpired:  # A backend that ignores SIGTERM is killed, never left running.
+                backend.kill()
+                backend.wait()
 
 
 def check_handshake(ours: socket.socket, backend: subprocess.Popen) -> None:
@@ -238,7 +263,7 @@ def main(argv: list[str] | None = None) -> int:
             from . import update
             print(update.recover())
         else:
-            print(f"Installed {install(args.repo, args.ref, args.base, args.root)} and made it current.")
+            print(f"Installed {runtime(args.repo, args.ref, args.base, args.root)} and made it current.")
     except InstallError as exc:
         print(exc, file=sys.stderr)
         return 1
