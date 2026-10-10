@@ -15,6 +15,7 @@ from unittest import mock
 from hearth.cli import main
 from hearth.domain import ExtractedPage, SourceDocument
 from hearth.service import HearthService
+from hearth.runtime import RuntimeProfileError
 from hearth.store import current_database_problem
 
 
@@ -626,6 +627,28 @@ class DefaultProfileTests(ProfileTestCase):
         self.assertIn("already exists", errors)
         self.assertIsNone(current_database_problem(fresh))
         self.assertIn("never overwrites a profile", again_errors)
+
+
+    def test_a_knowledge_base_that_cannot_be_created_leaves_no_profile_so_another_location_works(self) -> None:
+        blocked = self.root / "a-file"
+        blocked.write_text("not a folder", encoding="utf-8")  # Nothing can be created under a file.
+
+        failed, _, errors = self.run_main("profile", "create", str(self.default), "--database", str(blocked / "hearth.sqlite"), "--create-database")
+        retried, _, _ = self.run_main("profile", "create", str(self.default), "--database", str(self.root / "kb/hearth.sqlite"), "--create-database")
+
+        self.assertEqual((failed, retried), (2, 0))
+        self.assertIn("could not create a knowledge base", errors)
+        self.assertIn("Next:", errors)
+        self.assertEqual(json.loads(self.default.read_text(encoding="utf-8"))["database"], str((self.root / "kb/hearth.sqlite").resolve()))
+
+    def test_a_profile_that_cannot_be_written_removes_the_database_it_just_created(self) -> None:
+        fresh = self.root / "kb/hearth.sqlite"
+        with mock.patch("hearth.cli.write_runtime_profile", side_effect=RuntimeProfileError("The runtime profile could not be created.")):
+            status, _, _ = self.run_main("profile", "create", str(self.default), "--database", str(fresh), "--create-database")
+
+        self.assertEqual(status, 2)
+        self.assertFalse(fresh.exists())
+        self.assertFalse(self.default.exists())
 
 
 class DesktopProfileTests(ProfileTestCase):

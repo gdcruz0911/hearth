@@ -6,6 +6,7 @@ import json
 import os
 import shlex
 import signal
+import sqlite3
 import socket
 import stat
 import sys
@@ -247,6 +248,15 @@ def _run(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
             parser.error("--embedding-model and --index-directory must be provided together.")
         if args.retain_ocr_output and args.ocr_output_directory is None:
             parser.error("--retain-ocr-output requires --ocr-output-directory.")
+        created = args.database.expanduser().resolve() if args.create_database else None
+        if created is not None:
+            # The knowledge base comes first, so a profile is only ever published once the database it names exists; a
+            # failure leaves no profile behind, and the same command can be run again with another location.
+            try:
+                SQLiteStore(created).close()
+            except (OSError, sqlite3.Error) as exc:
+                parser.error(f"Hearth could not create a knowledge base at {args.database}: {exc}.\n"
+                             "Next: choose a folder you can write to, and run the command again.")
         try:
             profile_path = write_runtime_profile(
                 args.path,
@@ -263,9 +273,9 @@ def _run(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
                 ),
             )
         except RuntimeProfileError as exc:
+            if created is not None:
+                created.unlink(missing_ok=True)  # Only the empty database this command just made, so it can be run again.
             parser.error(str(exc))
-        if args.create_database:
-            SQLiteStore(args.database.expanduser().resolve()).close()  # The explicit step that makes an empty knowledge base.
         print(f"Created private runtime profile: {profile_path}")
         return 0
     # <HEARTH_HOME>/profile.json is the default, so the app and every terminal use the same data; an explicit --profile wins,
