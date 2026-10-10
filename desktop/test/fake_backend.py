@@ -81,7 +81,7 @@ class Server(ThreadingHTTPServer):
 server = Server(("127.0.0.1", 0), Handler)
 PORT = server.server_port
 COOKIE, TOKEN = secrets.token_urlsafe(32), secrets.token_urlsafe(32)
-log({"pid": os.getpid(), "port": PORT, "cookie": COOKIE, "token": TOKEN})
+log({"pid": os.getpid(), "port": PORT, "cookie": COOKIE, "token": TOKEN, "argv": sys.argv[1:], "cwd": os.getcwd()})
 with os.fdopen(3, "w", encoding="utf-8") as pipe:
     pipe.write(json.dumps({"port": PORT, "cookie_name": f"hearth_{PORT}", "cookie": COOKIE, "token": TOKEN}) + "\n")
 print("fake backend running", flush=True)

@@ -55,7 +55,7 @@ test("a second launch focuses the running app instead of starting another backen
 
 test("quitting during a rebuild asks first, and exits only after the backend has released it", async (t) => {
   const home = scratch();
-  const { app } = await openApp(t, home, fakeBackend, { FAKE_BACKEND_MODE: "rebuilding" });
+  const { app } = await openApp(t, home, fakeBackend, { env: { FAKE_BACKEND_MODE: "rebuilding" } });
   await windowShowing(app, "fake dashboard");
   const answer = (response: number) => app.evaluate(({ dialog }, chosen) => {
     const asked = ((globalThis as unknown as { asked?: string[] }).asked ??= []);
@@ -90,7 +90,7 @@ test("quitting during a rebuild asks first, and exits only after the backend has
 
 test("when the app cannot tell whether a rebuild runs, quitting asks instead of cancelling it unseen", async (t) => {
   const home = scratch();
-  const { app } = await openApp(t, home, fakeBackend, { FAKE_BACKEND_MODE: "status-hangs" });
+  const { app } = await openApp(t, home, fakeBackend, { env: { FAKE_BACKEND_MODE: "status-hangs" } });
   await windowShowing(app, "fake dashboard");
   await app.evaluate(({ dialog }) => {
     const asked = ((globalThis as unknown as { asked?: string[] }).asked ??= []);
@@ -128,7 +128,7 @@ test("clicking Restart twice while a backend starts launches only one", async (t
 
 test("the stopped page follows Hearth's dark and light theme", async (t) => {
   const home = scratch();
-  const { app } = await openApp(t, home, fakeBackend, { FAKE_BACKEND_MODE: "wrong-answer" });
+  const { app } = await openApp(t, home, fakeBackend, { env: { FAKE_BACKEND_MODE: "wrong-answer" } });
   const page = await windowShowing(app, "could not prove");
   const colors = () => page.evaluate(() => [getComputedStyle(document.body).backgroundColor, getComputedStyle(document.body).color]);
 

@@ -6,7 +6,7 @@ import { backendLog, fakeBackend, openApp, opened, pause, realBackend, scratch, 
 
 test("a server that cannot answer the challenge is refused and receives no credential", async (t) => {
   const home = scratch();
-  const { app } = await openApp(t, home, fakeBackend, { FAKE_BACKEND_MODE: "wrong-answer" });
+  const { app } = await openApp(t, home, fakeBackend, { env: { FAKE_BACKEND_MODE: "wrong-answer" } });
 
   await windowShowing(app, "could not prove it is this launch's backend");
 
