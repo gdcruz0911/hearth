@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
+import os
+import stat
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -33,3 +35,30 @@ def writing(home: Path) -> Iterator[None]:
         except BlockingIOError:
             raise Held(REFUSAL) from None
         yield
+
+
+class NotHeld(Exception):
+    """Raised for an inherited descriptor that is not the maintenance lock, held exclusively, as an update holds it."""
+
+
+def adopt(fd: int, home: Path) -> None:
+    """ADR-0040: run inside an update under the updater's own lock, inherited as `fd`, instead of taking a shared one.
+
+    The descriptor must be the very file at <home>/maintenance.lock, and that file must be held exclusively. This never
+    calls flock on `fd`: a lock belongs to the open file description, so unlocking or downgrading it here would release or
+    weaken the updater's lock too. It is then made close-on-exec, so nothing this process starts, agents included, gets it.
+    """
+    path = home / "maintenance.lock"
+    try:
+        given, expected = os.fstat(fd), os.stat(path)
+    except OSError:
+        raise NotHeld(f"Descriptor {fd} is not Hearth's maintenance lock at {path}.") from None
+    if not stat.S_ISREG(given.st_mode) or (given.st_dev, given.st_ino) != (expected.st_dev, expected.st_ino):
+        raise NotHeld(f"Descriptor {fd} is not Hearth's maintenance lock at {path}.")
+    with path.open("a") as probe:  # A separate open file description, so asking here never touches the inherited lock.
+        try:
+            fcntl.flock(probe, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except BlockingIOError:
+            os.set_inheritable(fd, False)
+            return
+    raise NotHeld(f"{path} is not held exclusively, so no update is running to work inside.")

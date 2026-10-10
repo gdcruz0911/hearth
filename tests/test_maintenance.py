@@ -7,6 +7,8 @@ import io
 import json
 import os
 import shlex
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -124,3 +126,76 @@ class MaintenanceLockTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class InheritedLockTests(unittest.TestCase):
+    """ADR-0040: the update's own steps run inside its exclusive lock, inherited, and can neither release it nor pass it on."""
+
+    def setUp(self) -> None:
+        self.temporary_directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary_directory.cleanup)
+        self.home = Path(self.temporary_directory.name)
+        self.lock = self.home / ".hearth/maintenance.lock"
+        self.lock.parent.mkdir()
+        self.database = self.home / "hearth.sqlite"
+        cli.SQLiteStore(self.database).close()
+
+    def env(self, **extra: str) -> dict[str, str]:
+        return {"HOME": str(self.home), "PATH": "/usr/bin:/bin", "PYTHONPATH": str(Path(__file__).parents[1] / "src"), **extra}
+
+    def hold(self, path: Path | None = None, exclusive: bool = True) -> int:
+        fd = os.open(path or self.lock, os.O_RDWR | os.O_CREAT)
+        self.addCleanup(os.close, fd)
+        if exclusive:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return fd
+
+    def held_exclusively(self) -> bool:
+        with self.lock.open("a") as probe:
+            try:
+                fcntl.flock(probe, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return True
+            return False
+
+    def step(self, fd: int | None, **env: str) -> subprocess.CompletedProcess:
+        given = ["--maintenance-fd", str(fd)] if fd is not None else []
+        return subprocess.run([sys.executable, "-m", "hearth.cli", *given, "--database", str(self.database), "list"],
+                              pass_fds=(fd,) if fd is not None else (), env=self.env(**env), capture_output=True, text=True, timeout=60)
+
+    def test_a_step_given_the_held_lock_runs_inside_it_and_the_lock_stays_held(self) -> None:
+        fd = self.hold()
+
+        outside, inside = self.step(None), self.step(fd)
+
+        self.assertEqual(outside.returncode, 1)
+        self.assertIn("being updated", outside.stderr)
+        self.assertEqual(inside.returncode, 0, inside.stderr)
+        self.assertTrue(self.held_exclusively())  # Neither unlocked nor downgraded by the step.
+
+    def test_a_descriptor_that_is_not_the_held_maintenance_lock_is_refused(self) -> None:
+        other = self.hold(self.home / "other.lock")
+        unheld = self.hold(exclusive=False)
+
+        for fd, reason in ((other, "is not Hearth's maintenance lock"), (unheld, "is not held exclusively")):
+            with self.subTest(reason=reason):
+                result = self.step(fd)
+                self.assertEqual(result.returncode, 2)
+                self.assertIn(reason, result.stderr)
+
+    def test_an_agent_cannot_work_inside_an_update(self) -> None:
+        result = self.step(self.hold(), HEARTH_TASK="20260927-000000")
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("Agents cannot", result.stderr)
+
+    def test_the_adopted_lock_is_never_passed_to_anything_the_step_starts(self) -> None:
+        fd = self.hold()
+        os.set_inheritable(fd, True)  # As the updater hands it over.
+
+        maintenance.adopt(fd, self.home / ".hearth")
+        child = subprocess.run([sys.executable, "-c", f"import os, sys; os.fstat({fd})"], capture_output=True, close_fds=False)
+
+        self.assertFalse(os.get_inheritable(fd))
+        self.assertNotEqual(child.returncode, 0)  # The descriptor does not exist in the grandchild.
+        self.assertTrue(self.held_exclusively())
