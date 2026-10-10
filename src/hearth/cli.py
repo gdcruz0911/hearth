@@ -63,6 +63,8 @@ def main(argv: list[str] | None = None) -> int:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--profile", type=Path, help="Private JSON runtime profile. Explicit options override it.")
+    # ADR-0040: only for hearth.install's own update steps, which run inside the updater's lock instead of taking one.
+    parser.add_argument("--maintenance-fd", type=int, help=argparse.SUPPRESS)
     parser.add_argument("--database", type=Path, help="Private SQLite provenance database.")
     parser.add_argument(
         "--source-root",
@@ -175,6 +177,14 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("HEARTH_HOME must be an absolute path, so every Hearth process and agent uses the same folder.")
     args.launcher = os.getppid()  # Taken first, so an app that dies during startup is still noticed.
     command = " ".join(filter(None, (args.command, getattr(args, f"{args.command}_command", None))))
+    if args.maintenance_fd is not None:
+        if tasks.refused_inside_task("work inside a Hearth update"):
+            return 1
+        try:
+            maintenance.adopt(args.maintenance_fd, hearth_home())
+        except maintenance.NotHeld as exc:
+            parser.error(f"{exc}\nNext: --maintenance-fd is only for the update's own steps; run the command without it.")
+        return _run(parser, args)
     if not maintenance.writes(command):
         return _run(parser, args)
     try:
