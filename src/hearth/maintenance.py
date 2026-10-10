@@ -44,9 +44,11 @@ class NotHeld(Exception):
 def adopt(fd: int, home: Path) -> None:
     """ADR-0040: run inside an update under the updater's own lock, inherited as `fd`, instead of taking a shared one.
 
-    The descriptor must be the very file at <home>/maintenance.lock, and that file must be held exclusively. This never
-    calls flock on `fd`: a lock belongs to the open file description, so unlocking or downgrading it here would release or
-    weaken the updater's lock too. It is then made close-on-exec, so nothing this process starts, agents included, gets it.
+    The descriptor must be the very file at <home>/maintenance.lock and must itself own its exclusive lock. Ownership is
+    proven by asking for that same exclusive lock on `fd` without waiting: with another holder it fails, and on the owner
+    it changes nothing, since the lock's type stays the same. Nothing here ever unlocks `fd` or asks for a shared lock on
+    it: a lock belongs to the open file description, so that would release or weaken the updater's lock too. It is then
+    made close-on-exec, so nothing this process starts, agents included, gets it.
     """
     path = home / "maintenance.lock"
     try:
@@ -55,10 +57,15 @@ def adopt(fd: int, home: Path) -> None:
         raise NotHeld(f"Descriptor {fd} is not Hearth's maintenance lock at {path}.") from None
     if not stat.S_ISREG(given.st_mode) or (given.st_dev, given.st_ino) != (expected.st_dev, expected.st_ino):
         raise NotHeld(f"Descriptor {fd} is not Hearth's maintenance lock at {path}.")
-    with path.open("a") as probe:  # A separate open file description, so asking here never touches the inherited lock.
+    with path.open("a") as probe:  # Another open file description: first, someone must hold the lock exclusively.
         try:
             fcntl.flock(probe, fcntl.LOCK_SH | fcntl.LOCK_NB)
         except BlockingIOError:
-            os.set_inheritable(fd, False)
-            return
-    raise NotHeld(f"{path} is not held exclusively, so no update is running to work inside.")
+            pass
+        else:
+            raise NotHeld(f"{path} is not held exclusively, so no update is running to work inside.")
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)  # Succeeds only where this descriptor is that holder.
+    except BlockingIOError:
+        raise NotHeld(f"Descriptor {fd} does not hold the update's lock on {path}; another process does.") from None
+    os.set_inheritable(fd, False)

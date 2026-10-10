@@ -183,6 +183,19 @@ class InheritedLockTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 2)
                 self.assertIn(reason, result.stderr)
 
+    def test_an_unlocked_descriptor_for_the_lock_another_process_holds_is_refused_and_creates_nothing(self) -> None:
+        self.hold()  # The update's lock, held by another open file description.
+        unlocked = self.hold(exclusive=False)
+        fresh = self.home / "new.sqlite"
+
+        result = subprocess.run([sys.executable, "-m", "hearth.cli", "--maintenance-fd", str(unlocked), "--database", str(fresh), "list"],
+                                pass_fds=(unlocked,), env=self.env(), capture_output=True, text=True, timeout=60)
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("does not hold the update's lock", result.stderr)
+        self.assertFalse(fresh.exists())
+        self.assertTrue(self.held_exclusively())
+
     def test_an_agent_cannot_work_inside_an_update(self) -> None:
         result = self.step(self.hold(), HEARTH_TASK="20260927-000000")
 
