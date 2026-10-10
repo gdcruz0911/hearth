@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
+import json
 import os
 import stat
 from collections.abc import Iterator
@@ -27,6 +28,14 @@ def writes(command: str) -> bool:
 @contextlib.contextmanager
 def writing(home: Path) -> Iterator[None]:
     """Hold the lock shared for as long as a writer runs, so an update can neither start under it nor be started under."""
+    interrupted = home / "update.json"
+    if interrupted.exists():  # An update died after changing data may have begun: nothing writes until it is recovered.
+        try:
+            source = json.loads(interrupted.read_text(encoding="utf-8")).get("source")
+        except (OSError, ValueError):
+            source = None
+        where = f"cd {json.dumps(source)} && " if source else "in the Hearth checkout, run "
+        raise Held(f"A Hearth update was interrupted, and this command changes its data.\nNext: {where}.venv/bin/python -m hearth.install recover")
     path = home / "maintenance.lock"
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a") as handle:  # Not inherited by child processes, so an agent never holds an update off.
