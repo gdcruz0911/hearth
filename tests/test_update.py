@@ -92,6 +92,7 @@ class UpdateTests(unittest.TestCase):
         python = folder / "bin/python"
         python.write_text("#!/bin/sh\n"
                           f'case "$*" in *--maintenance-fd*" list"*) if [ -n "$FAKE_RUNTIME_CRASH" ]; then exec "{DEV_PYTHON}" -c \'{CRASH}\'; fi;; esac\n'
+                          'case "$*" in *"task resume"*) if [ -n "$FAKE_RUNTIME_RESUME_FAILS" ]; then exit 1; fi;; esac\n'
                           f'exec "{DEV_PYTHON}" "$@"\n', encoding="utf-8")
         python.chmod(0o755)
         (folder / "runtime.json").write_text(json.dumps({"format": "hearth-runtime-v1", "base": {"path": DEV_PYTHON, "version": "3"},
@@ -289,6 +290,52 @@ class UpdateTests(unittest.TestCase):
             except ProcessLookupError:
                 break
             time.sleep(0.05)
+
+    def test_a_backup_without_its_database_copy_is_refused_and_the_live_database_kept(self) -> None:
+        documents = self.documents()
+        self.updater_killed(FAKE_RUNTIME_CRASH="1", FAKE_RUNTIME_DATABASE=str(self.database))
+        backup = Path(update._marker(self.hearth)["backup"])
+        (backup / "hearth.sqlite").rename(self.root / "moved-aside.sqlite")
+
+        with self.assertRaisesRegex(install.InstallError, "has no copy of the database[\\s\\S]*changed nothing"):
+            update.recover()
+
+        self.assertFalse((backup / "hearth.sqlite").exists())  # Never created empty by opening it.
+        self.assertTrue((self.hearth / update.MARKER).exists())
+        connection = sqlite3.connect(self.database)
+        self.assertEqual(connection.execute("SELECT count(*) FROM documents").fetchone()[0], documents)
+        connection.close()
+
+    def test_a_failure_puts_settings_and_task_records_back_and_keeps_sign_ins_and_links(self) -> None:
+        settings, record = self.hearth / "projects.json", self.hearth / "tasks/20261010-090000/task.json"
+        before = (settings.read_text(encoding="utf-8"), record.read_text(encoding="utf-8"))
+
+        def changes_then_fails(*args, **kwargs):
+            settings.write_text('{"changed": true}', encoding="utf-8")
+            record.write_text("{}", encoding="utf-8")
+            (self.hearth / "made-during-update.json").write_text("{}", encoding="utf-8")
+            raise RuntimeError("migration failed")
+
+        with mock.patch.object(update, "_inside", side_effect=changes_then_fails):
+            with self.assertRaisesRegex(install.InstallError, "undone"):
+                self.run_update()
+
+        self.assertEqual((settings.read_text(encoding="utf-8"), record.read_text(encoding="utf-8")), before)
+        self.assertFalse((self.hearth / "made-during-update.json").exists())
+        self.assertTrue((self.hearth / "profile.json").is_symlink())
+        self.assertTrue((self.hearth / "tasks/20261010-090000/codex-home/auth.json").is_symlink())  # Never backed up, never removed.
+
+    def test_a_continuation_that_cannot_start_is_named_with_what_to_run(self) -> None:
+        folder = self.task("20261010-090400", "done")
+        gone = subprocess.Popen([DEV_PYTHON, "-c", "pass"])
+        gone.wait()
+        (folder / "resume.json").write_text(json.dumps({"pid": gone.pid, "identity": None, "command": "loop"}), encoding="utf-8")
+        (folder / f"refused-{gone.pid}.json").write_text(json.dumps({"command": "loop"}), encoding="utf-8")
+
+        with mock.patch.dict(os.environ, {"FAKE_RUNTIME_RESUME_FAILS": "1"}):
+            said = self.run_update()
+
+        self.assertIn("Task 20261010-090400 could not be continued. Next: hearth task resume 20261010-090400", said)
 
     def test_one_update_at_a_time(self) -> None:
         self.hearth.mkdir(exist_ok=True)

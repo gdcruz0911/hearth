@@ -22,7 +22,7 @@ import sys
 from collections.abc import Iterator
 from pathlib import Path
 
-from . import install
+from . import install, maintenance
 from .install import InstallError, clean_environment
 from .runtime import RuntimeProfileError, hearth_home, load_runtime_profile
 
@@ -40,7 +40,7 @@ def update(repo: Path, ref: str, base: str | None, root: Path = install.ROOT, ru
     home = hearth_home()
     with only_update(home):
         if (home / MARKER).exists():
-            raise InstallError(f"An earlier update was interrupted.\nNext: {_recover_command(_marker(home).get('source'))}")
+            raise InstallError(f"An earlier update was interrupted.\nNext: {maintenance.recover_command(_marker(home).get('source'))}")
         new = runtime or _built(repo, ref, base or _current_base(root), root)  # No live data is touched before this is done.
         busy = _busy(home)
         if busy:
@@ -72,9 +72,10 @@ def update(repo: Path, ref: str, base: str | None, root: Path = install.ROOT, ru
             _discard_marker(home)
         finally:
             os.close(lock)  # Released only now: every child given it has been reaped.
-    continued = _continue_refused(new)
+    continued, failed = _continue_refused(new)
     lines = [f"Updated to {ref}: {new}.", f"The backup is in {backup}."]
     lines += [f"Continued task {task}." for task in continued]
+    lines += [f"Task {task} could not be continued. Next: hearth task resume {task}" for task in failed]
     return "\n".join(lines + ["Next: reopen the Hearth app."])
 
 
@@ -174,7 +175,7 @@ def _backup(home: Path, database: Path | None, ref: str) -> Path:
     final = home / BACKUPS / f"{stamp}-{''.join(c if c.isalnum() or c in '.-_' else '-' for c in ref)}"
     partial = home / BACKUPS / f".partial-{final.name}"
     partial.mkdir(parents=True)
-    shutil.copytree(home, partial / "home", symlinks=True, ignore=lambda folder, names: [name for name in names if name in SKIPPED])
+    shutil.copytree(home, partial / "home", symlinks=True, ignore=lambda folder, names: [name for name in names if _skipped(Path(folder) / name, database)])
     if database is not None:
         source, copy = sqlite3.connect(database), sqlite3.connect(partial / "hearth.sqlite")
         try:
@@ -188,18 +189,28 @@ def _backup(home: Path, database: Path | None, ref: str) -> Path:
     return final
 
 
+def _skipped(path: Path, database: Path | None) -> bool:
+    """Left out of the home copy and of its restore: SKIPPED names, and the database itself, which goes only through SQLite."""
+    if path.name in SKIPPED:
+        return True
+    return database is not None and str(path) in {str(database), *(f"{database}{suffix}" for suffix in ("-journal", "-wal", "-shm"))}
+
+
 def _restore(home: Path) -> None:
-    """Put the database and the runtime back as they were before the update; safe to run again if it is interrupted."""
+    """Put Hearth's home, the database, and the runtime back as they were before the update; safe to run again if interrupted."""
     previous = signal.signal(signal.SIGINT, signal.SIG_IGN)  # A second Ctrl+C must not cut a restore short.
     try:
         marker = _marker(home)
         backup = Path(marker.get("backup") or "")
-        if not (backup / "complete").is_file():
-            raise InstallError(f"The update's backup at {backup} is missing or incomplete, so Hearth will not restore from it and has deleted nothing.\n"
+        database = Path(marker["database"]) if marker.get("database") else None
+        problem = _unusable(backup, database)
+        if problem:
+            raise InstallError(f"The update's backup at {backup} {problem}, so Hearth will not restore from it and has changed nothing.\n"
                                f"Next: keep {home} as it is and ask for help before running Hearth.")
-        if marker.get("database"):
+        _sync(backup / "home", home, database)  # Settings and task records, as they were.
+        if database is not None:
             # Through SQLite, not by copying the file: opening the live database first rolls back any journal a crash left.
-            source, live = sqlite3.connect(backup / "hearth.sqlite"), sqlite3.connect(marker["database"])
+            source, live = sqlite3.connect(f"{(backup / 'hearth.sqlite').as_uri()}?mode=ro", uri=True), sqlite3.connect(database)
             try:
                 source.backup(live)
             finally:
@@ -211,6 +222,55 @@ def _restore(home: Path) -> None:
         _discard_marker(home, keep_backup=True)
     finally:
         signal.signal(signal.SIGINT, previous)
+
+
+def _unusable(backup: Path, database: Path | None) -> str | None:
+    """Why a backup cannot be restored from, checked before anything is changed; a missing file is never opened, which
+    would create an empty one and restore that."""
+    if not (backup / "complete").is_file():
+        return "is missing or incomplete"
+    if not (backup / "home").is_dir():
+        return "has no copy of Hearth's home"
+    if database is None:
+        return None
+    copy = backup / "hearth.sqlite"
+    if not copy.is_file():
+        return "has no copy of the database"
+    try:
+        connection = sqlite3.connect(f"{copy.as_uri()}?mode=ro", uri=True)
+        try:
+            if connection.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+                return "holds a damaged copy of the database"
+            if connection.execute("SELECT 1 FROM sqlite_master WHERE name = 'documents'").fetchone() is None:
+                return "holds a copy of the database without Hearth's tables"
+        finally:
+            connection.close()
+    except sqlite3.DatabaseError:
+        return "holds a copy of the database that SQLite cannot read"
+    return None
+
+
+def _sync(source: Path, live: Path, database: Path | None) -> None:
+    """Make `live` match `source`, Hearth's home as it was backed up, leaving alone what the backup never held: the locks,
+    backups, app data, worktrees, Codex homes, and the database. Links are copied as links. Safe to run again."""
+    for entry in live.iterdir():
+        if not _skipped(entry, database) and not (source / entry.name).exists() and not (source / entry.name).is_symlink():
+            shutil.rmtree(entry) if entry.is_dir() and not entry.is_symlink() else entry.unlink()  # Made during the update.
+    for entry in source.iterdir():
+        target = live / entry.name
+        if _skipped(target, database):
+            continue
+        if entry.is_dir() and not entry.is_symlink():
+            if target.is_symlink() or (target.exists() and not target.is_dir()):
+                target.unlink()
+            target.mkdir(exist_ok=True)
+            _sync(entry, target, database)
+            continue
+        if target.is_dir() and not target.is_symlink():
+            shutil.rmtree(target)
+        elif target.exists() or target.is_symlink():
+            target.unlink()
+        shutil.copy2(entry, target, follow_symlinks=False)
 
 
 def _inside(runtime: Path, lock: int, argv: list[str]) -> None:
@@ -246,16 +306,18 @@ def _stop(process: subprocess.Popen) -> None:
         process.communicate()
 
 
-def _continue_refused(runtime: Path) -> list[str]:
+def _continue_refused(runtime: Path) -> tuple[list[str], list[str]]:
     """After the update, continue each dashboard answer or approval it refused, through the new runtime (ADR-0040);
-    `task resume` continues only those, and refuses every other task that has a resume record."""
-    continued = []
+    returns the tasks continued and those that still need `hearth task resume`."""
+    continued, failed = [], []
     for record in sorted(hearth_home().glob("tasks/*/resume.json")):
+        pid = json.loads(record.read_text(encoding="utf-8")).get("pid")
+        if _alive(pid) or not (record.parent / f"refused-{pid}.json").exists():
+            continue  # Not a continuation an update refused.
         result = subprocess.run([str(runtime / "bin/python"), "-I", "-m", "hearth.cli", "task", "resume", record.parent.name],
                                 capture_output=True, text=True, env=clean_environment(), cwd=Path.home(), timeout=120)
-        if result.returncode == 0:
-            continued.append(record.parent.name)
-    return continued
+        (continued if result.returncode == 0 else failed).append(record.parent.name)
+    return continued, failed
 
 
 def _built(repo: Path, ref: str, base: str, root: Path) -> Path:
@@ -298,7 +360,3 @@ def _discard_marker(home: Path, keep_backup: bool = False) -> None:
         for partial in (home / BACKUPS).glob(".partial-*"):
             shutil.rmtree(partial, ignore_errors=True)
     (home / MARKER).unlink(missing_ok=True)
-
-
-def _recover_command(source: str | None) -> str:
-    return f'{f"cd {json.dumps(source)} && " if source else "in the Hearth checkout, run "}.venv/bin/python -m hearth.install recover'
