@@ -656,7 +656,7 @@ class DefaultProfileTests(ProfileTestCase):
 
         status, _, errors = self.run_main("--database", str(self.database), "list")
 
-        self.assertEqual(status, 2)
+        self.assertEqual(status, 1)  # CLI-2: the command is valid; it cannot run on this database.
         self.assertIn("migrated by a newer Hearth", errors)
         self.assertIn("Next:", errors)
 

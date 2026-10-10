@@ -443,11 +443,13 @@ def _run(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
         EvaluationCorpusError,
         ImportError,
         IndexError,
-        NewerDatabaseError,
         RerankerError,
         RuntimeProfileError,
     ) as exc:
         parser.error(str(exc))
+    except NewerDatabaseError as exc:  # A valid command that cannot run on this data (CLI-2), not invalid usage.
+        print(exc, file=sys.stderr)
+        return 1
     finally:
         if service is not None:
             service.close()
