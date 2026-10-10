@@ -651,6 +651,16 @@ class DefaultProfileTests(ProfileTestCase):
         self.assertFalse(self.default.exists())
 
 
+    def test_a_database_a_newer_hearth_migrated_is_refused_with_what_to_do(self) -> None:
+        sqlite3.connect(self.database).execute("PRAGMA user_version = 99").connection.close()
+
+        status, _, errors = self.run_main("--database", str(self.database), "list")
+
+        self.assertEqual(status, 2)
+        self.assertIn("migrated by a newer Hearth", errors)
+        self.assertIn("Next:", errors)
+
+
 class DesktopProfileTests(ProfileTestCase):
     """The app's backend opens only the database its profile names, and never creates one."""
 

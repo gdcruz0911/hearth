@@ -17,6 +17,21 @@ from .domain import (
 )
 
 
+# Stamped in SQLite's user_version when this code creates or migrates a database, so an older Hearth, such as one a rollback
+# returned to, refuses a database a newer one changed instead of guessing at it (ADR-0038). An unstamped database is one no
+# release has migrated yet; it is opened as it is and stamped only by a migration.
+SCHEMA_VERSION = 1
+
+
+class NewerDatabaseError(ValueError):
+    """Raised for a database a newer Hearth has migrated; nothing is read from or written to it."""
+
+
+def _newer(path: Path, found: int) -> str:
+    return (f"{path} was migrated by a newer Hearth (schema {found}; this one understands {SCHEMA_VERSION}), so this Hearth will not open it.\n"
+            "Next: use the newer Hearth, or restore the backup the update made before migrating")
+
+
 def current_database_problem(path: Path) -> str | None:
     """Why opening `path` would not use it as it is, or None when it is a Hearth database that needs no change.
 
@@ -33,10 +48,13 @@ def current_database_problem(path: Path) -> str | None:
         connection = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
         try:
             found = _schema(connection)
+            version = connection.execute("PRAGMA user_version").fetchone()[0]
         finally:
             connection.close()
     except sqlite3.DatabaseError:
         return f"{path} is not an SQLite database."
+    if version > SCHEMA_VERSION:
+        return _newer(path, version).split("\n")[0]
     missing = sorted(f"{table}.{column}" if column else table for table, column in expected - found)
     if missing:
         return f"{path} is not a current Hearth database; it lacks {', '.join(missing[:5])}{' and more' if len(missing) > 5 else ''}."
@@ -59,6 +77,10 @@ class SQLiteStore:
         self._connection = sqlite3.connect(database_path, check_same_thread=False)
         self._connection.row_factory = sqlite3.Row
         self._connection.execute("PRAGMA foreign_keys = ON")
+        version = self._connection.execute("PRAGMA user_version").fetchone()[0]
+        if version > SCHEMA_VERSION:
+            self._connection.close()
+            raise NewerDatabaseError(_newer(database_path, version))
         self._create_schema()
 
     def close(self) -> None:
@@ -291,6 +313,8 @@ class SQLiteStore:
         keyword_index_exists = self._connection.execute(
             "SELECT 1 FROM sqlite_master WHERE name = 'chunks_fts'"
         ).fetchone() is not None
+        created = self._connection.execute("SELECT 1 FROM sqlite_master WHERE name = 'documents'").fetchone() is None
+        migrated = False
         with self._connection:
             self._connection.executescript(
                 """CREATE TABLE IF NOT EXISTS documents (
@@ -330,6 +354,7 @@ class SQLiteStore:
             )
             if not keyword_index_exists:  # Collections imported before the keyword index existed.
                 self._connection.execute("INSERT INTO chunks_fts(chunks_fts) VALUES ('rebuild')")
+                migrated = True
             document_columns = {row["name"] for row in self._connection.execute("PRAGMA table_info(documents)")}
             for column, definition in (
                 ("source_fingerprint", "TEXT"),
@@ -339,3 +364,6 @@ class SQLiteStore:
             ):
                 if column not in document_columns:
                     self._connection.execute(f"ALTER TABLE documents ADD COLUMN {column} {definition}")
+                    migrated = True
+            if created or migrated:
+                self._connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")

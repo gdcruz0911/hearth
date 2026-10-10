@@ -201,6 +201,21 @@ class TaskTests(TaskTestCase):
         self.assertEqual(git(worktree, "show", "--name-only", "--format=", "HEAD"), "hello.txt\n")
         self.assertEqual(list(worktree.rglob("__pycache__")), [])
 
+    def test_a_task_record_carries_its_format_and_one_from_a_newer_hearth_is_refused(self) -> None:
+        self.cli("task", "new", "demo", "Add hello.txt", "--model", "fake-model")
+        task = self.only_task()
+        path = self.home / ".hearth/tasks" / task["id"] / "task.json"
+        self.assertEqual(task["format"], tasks.TASK_FORMAT)
+        path.write_text(json.dumps({**task, "format": tasks.TASK_FORMAT + 1}), encoding="utf-8")
+        output, errors = io.StringIO(), io.StringIO()
+
+        with contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
+            status = main(["task", "show", task["id"]])
+
+        self.assertEqual(status, 1)
+        self.assertIn("written by a newer Hearth", errors.getvalue())
+        self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["format"], tasks.TASK_FORMAT + 1)  # Left as it is.
+
     def test_hearth_home_keeps_every_record_out_of_the_home_folder(self) -> None:
         elsewhere = self.home / "smoke"
         (elsewhere).mkdir()

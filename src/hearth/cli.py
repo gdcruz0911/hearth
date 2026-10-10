@@ -44,7 +44,7 @@ from .runtime import (
     write_runtime_profile,
 )
 from .service import HearthService
-from .store import SQLiteStore, current_database_problem
+from .store import NewerDatabaseError, SQLiteStore, current_database_problem
 from .web import HearthWebServer, _document_payload
 from .workbench import ask, evals, google, stats, tasks, transcript, usage
 
@@ -443,6 +443,7 @@ def _run(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
         EvaluationCorpusError,
         ImportError,
         IndexError,
+        NewerDatabaseError,
         RerankerError,
         RuntimeProfileError,
     ) as exc:
