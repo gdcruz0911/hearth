@@ -2974,6 +2974,21 @@ class DetachedResumeTests(VerifyTestCase):
         self.assertEqual([run["role"] for run in finished["runs"]], ["test", "implement"])
         self.assertEqual(finished["tests_approved"], approval)  # The person's approval, recorded once, is what continued.
 
+    def test_a_continuation_that_cannot_start_stays_resumable(self) -> None:
+        task = self.waiting_on_a_question()
+        task_dir = self.home / ".hearth/tasks" / task["id"]
+        os.environ["FAKE_REVIEWS"] = "approve"
+        with self.update_holds_the_lock():
+            self.finished(tasks.dashboard_action(task["id"], "answer", {"text": "Say hello."}, tasks.dashboard_task_state(task["id"], "answer"))["loop"])
+
+        with mock.patch.object(tasks, "resume_detached", side_effect=OSError("no process could start")):
+            failed, _ = self.cli("task", "resume", task["id"])
+
+        self.assertEqual(failed, 1)
+        self.assertEqual(tasks.refused_resume(task_dir), "loop")
+        self.assertEqual(self.cli("task", "resume", task["id"])[0], 0)
+        self.assertEqual(self.wait_until(lambda task: "review" in task or task["status"] == "failed")["status"], "done")
+
     def test_only_a_dashboard_resume_an_update_refused_can_be_resumed(self) -> None:
         task = self.waiting_on_a_question()
         self.cli("task", "answer", task["id"], "Say hello.")

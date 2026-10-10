@@ -1209,9 +1209,14 @@ def _resume(task_id: str, task_dir: Path) -> int:
         if command is None:
             print(f"Task {task_id} has no continuation an update refused.\nNext: hearth task show {task_id}", file=sys.stderr)
             return 1
-        for path in task_dir.glob("refused-*.json"):
+        refused = list(task_dir.glob("refused-*.json"))
+        try:
+            pid = resume_detached(task_id, command)
+        except OSError as exc:  # No process started, so the refusal record stays and this can be run again.
+            print(f"Task {task_id} could not be continued: {exc}.\nNext: fix that, then hearth task resume {task_id}", file=sys.stderr)
+            return 1
+        for path in refused:  # Only now, with the new process started and recorded in resume.json.
             path.unlink()
-        pid = resume_detached(task_id, command)
     print(f"Continuing {task_id} ({' '.join(RESUME[command])}) in process {pid}; its log is {task_dir / 'resume.log'}.")
     return 0
 
