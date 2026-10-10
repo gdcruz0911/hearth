@@ -295,6 +295,9 @@ def run(args: argparse.Namespace) -> int:
     except Cancelled as exc:
         print(f"{exc} was cancelled; its worktree and receipts are kept.\nNext: hearth task show {exc}", file=sys.stderr)
         return 1
+    except NewerTaskError as exc:
+        print(exc, file=sys.stderr)
+        return 1
 
 
 def _command(args: argparse.Namespace) -> int:
@@ -2090,8 +2093,19 @@ def _repo(task: dict) -> Path:
     return Path(_projects()[task["project"]]["path"]).expanduser()
 
 
+# The task record's format, written into every record; a record from a newer Hearth is refused, never guessed at (ADR-0038).
+TASK_FORMAT = 1
+
+
+class NewerTaskError(ValueError):
+    """Raised for a task record a newer Hearth wrote."""
+
+
 def _read(task_dir: Path) -> dict:
     task = json.loads((task_dir / "task.json").read_text(encoding="utf-8"))
+    if task.get("format", 0) > TASK_FORMAT:
+        raise NewerTaskError(f"Task {task_dir.name} was written by a newer Hearth (format {task['format']}; this one understands {TASK_FORMAT}).\n"
+                             "Next: use the newer Hearth, or restore the backup the update made")
     pid = task["runs"][-1]["pid"] if task["runs"] else None
     if task["status"] == "running" and not _alive(pid):
         task["status"] = "interrupted"  # Displayed only; the record is not rewritten.
@@ -2114,6 +2128,7 @@ def _write(task_dir: Path, task: dict) -> None:
     if (task_dir / "cancel").exists():
         # A loop process holds this task in memory; whatever it writes after a cancel still records the cancel.
         task.update(status="cancelled", stop_reason="cancelled", cancelled=task.get("cancelled") or _now())
+    task["format"] = TASK_FORMAT
     temporary = task_dir / "task.json.tmp"
     temporary.write_text(json.dumps(task, indent=2) + "\n", encoding="utf-8")
     temporary.replace(task_dir / "task.json")

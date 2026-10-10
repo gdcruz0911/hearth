@@ -106,7 +106,7 @@ export async function opened(app: ElectronApplication): Promise<string[]> {
 }
 
 export async function windowShowing(app: ElectronApplication, text: string): Promise<Page> {
-  for (let tries = 0; tries < 100; tries++) {
+  for (let tries = 0; tries < 200; tries++) {  // Up to 20 s: setup runs a cold CLI and then starts a backend.
     for (const page of app.windows()) {
       const body = await page.evaluate(() => document.body?.innerText ?? "").catch(() => "");
       if (body.includes(text)) return page;

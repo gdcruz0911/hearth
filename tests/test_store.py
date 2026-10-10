@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 import tempfile
@@ -7,7 +8,7 @@ import unittest
 from pathlib import Path
 
 from hearth.service import HearthService
-from hearth.store import SQLiteStore
+from hearth.store import SCHEMA_VERSION, NewerDatabaseError, SQLiteStore, current_database_problem
 
 
 class SQLiteStoreMigrationTests(unittest.TestCase):
@@ -237,3 +238,53 @@ class KeywordIndexTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SchemaVersionTests(unittest.TestCase):
+    """ADR-0038: a database a newer Hearth migrated is refused; opening an unmigrated current one leaves it byte for byte."""
+
+    def setUp(self) -> None:
+        self.temporary_directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary_directory.cleanup)
+        self.path = Path(self.temporary_directory.name) / "hearth.sqlite"
+
+    def version(self) -> int:
+        connection = sqlite3.connect(self.path)
+        try:
+            return connection.execute("PRAGMA user_version").fetchone()[0]
+        finally:
+            connection.close()
+
+    def test_a_new_database_is_stamped(self) -> None:
+        SQLiteStore(self.path).close()
+
+        self.assertEqual(self.version(), SCHEMA_VERSION)
+
+    def test_a_current_unstamped_database_opens_unchanged(self) -> None:
+        SQLiteStore(self.path).close()
+        sqlite3.connect(self.path).execute("PRAGMA user_version = 0").connection.close()  # As databases made before versions were.
+        before = hashlib.sha256(self.path.read_bytes()).hexdigest()
+
+        SQLiteStore(self.path).close()
+
+        self.assertEqual((self.version(), hashlib.sha256(self.path.read_bytes()).hexdigest()), (0, before))
+
+    def test_an_older_database_is_migrated_and_stamped(self) -> None:
+        connection = sqlite3.connect(self.path)
+        connection.executescript("CREATE TABLE documents (id INTEGER PRIMARY KEY, canonical_path TEXT NOT NULL UNIQUE, display_name TEXT NOT NULL);")
+        connection.close()
+
+        SQLiteStore(self.path).close()
+
+        self.assertEqual(self.version(), SCHEMA_VERSION)
+
+    def test_a_database_a_newer_hearth_migrated_is_refused_and_left_as_it_is(self) -> None:
+        SQLiteStore(self.path).close()
+        sqlite3.connect(self.path).execute(f"PRAGMA user_version = {SCHEMA_VERSION + 1}").connection.close()
+        before = hashlib.sha256(self.path.read_bytes()).hexdigest()
+
+        with self.assertRaisesRegex(NewerDatabaseError, "newer Hearth"):
+            SQLiteStore(self.path)
+
+        self.assertIn("newer Hearth", current_database_problem(self.path))
+        self.assertEqual(hashlib.sha256(self.path.read_bytes()).hexdigest(), before)

@@ -44,7 +44,7 @@ from .runtime import (
     write_runtime_profile,
 )
 from .service import HearthService
-from .store import SQLiteStore, current_database_problem
+from .store import NewerDatabaseError, SQLiteStore, current_database_problem
 from .web import HearthWebServer, _document_payload
 from .workbench import ask, evals, google, stats, tasks, transcript, usage
 
@@ -447,6 +447,9 @@ def _run(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
         RuntimeProfileError,
     ) as exc:
         parser.error(str(exc))
+    except NewerDatabaseError as exc:  # A valid command that cannot run on this data (CLI-2), not invalid usage.
+        print(exc, file=sys.stderr)
+        return 1
     finally:
         if service is not None:
             service.close()
