@@ -242,6 +242,8 @@ def add_parser(subcommands: argparse._SubParsersAction) -> None:
     approve = actions.add_parser("approve-tests", help="Approve a tests-first task's tests, then start implementing.")
     approve.add_argument("id")
     approve.add_argument("--resume", action="store_true", help=argparse.SUPPRESS)  # The dashboard's resumed process: checks its recorded approval.
+    resume = actions.add_parser("resume", help="Continue a task whose answer or approval an update stopped from continuing.")
+    resume.add_argument("id")
     answer = actions.add_parser("answer", help="Answer the question an agent left for you, so the task can continue.")
     answer.add_argument("id")
     answer.add_argument("text")
@@ -305,7 +307,7 @@ def _command(args: argparse.Namespace) -> int:
         return 1
     if getattr(args, "task_command", None) == "promote" and refused_inside_task("promote reports into the person's notes"):
         return 1
-    if getattr(args, "task_command", None) in ("cancel", "answer", "approve-tests") and refused_inside_task("act for the person"):
+    if getattr(args, "task_command", None) in ("cancel", "answer", "approve-tests", "resume") and refused_inside_task("act for the person"):
         return 1  # ADR-0033: cancelling, answering, and approving tests are the person's alone.
     if args.command == "loop":
         return _loop(args)
@@ -394,6 +396,8 @@ def _command(args: argparse.Namespace) -> int:
             return _answer(_read(task_dir), task_dir, args.text)
     if args.task_command == "cancel":
         return _cancel(task, task_dir)
+    if args.task_command == "resume":
+        return _resume(task["id"], task_dir)
     return _discard(task, task_dir, args.apply, args.discard_uncommitted)
 
 
@@ -1177,6 +1181,47 @@ def resume_detached(task_id: str, command: str) -> int | None:
     with contextlib.suppress(RuntimeError):
         threading.Thread(target=process.wait, daemon=True).start()  # Reaped when it ends, so a long-lived backend gathers no zombies.
     return pid
+
+
+def record_refused_resume(argv: list[str]) -> None:
+    """ADR-0040: a resumed command an update refused records that in a file of its own, keyed by its process ID, so
+    `task resume` can continue it later without the person answering or approving again. The refused process writes it
+    itself, since it can exit before resume_detached has recorded its ID in resume.json."""
+    for command, prefix in RESUME.items():
+        if argv[:-1] == prefix and TASK_ID.match(argv[-1]) and (_home() / "tasks" / argv[-1]).is_dir():
+            (_home() / "tasks" / argv[-1] / f"refused-{os.getpid()}.json").write_text(json.dumps({"command": command}), encoding="utf-8")
+
+
+def refused_resume(task_dir: Path) -> str | None:
+    """The recorded command of a dashboard resume an update refused, once that process has ended; None otherwise."""
+    path = task_dir / "resume.json"
+    if not path.exists() or _resuming(task_dir):
+        return None
+    refused = task_dir / f"refused-{json.loads(path.read_text(encoding='utf-8'))['pid']}.json"
+    return json.loads(refused.read_text(encoding="utf-8"))["command"] if refused.exists() else None
+
+
+def refused_resumes() -> list[str]:
+    """Every task whose dashboard resume an update refused, for the updater to continue afterwards."""
+    return [path.parent.name for path in sorted(_home().glob("tasks/*/resume.json")) if refused_resume(path.parent)]
+
+
+def _resume(task_id: str, task_dir: Path) -> int:
+    with _task_lock(task_dir):  # As answering and approving do, so two continuations never start together.
+        command = refused_resume(task_dir)
+        if command is None:
+            print(f"Task {task_id} has no continuation an update refused.\nNext: hearth task show {task_id}", file=sys.stderr)
+            return 1
+        refused = list(task_dir.glob("refused-*.json"))
+        try:
+            pid = resume_detached(task_id, command)
+        except OSError as exc:  # No process started, so the refusal record stays and this can be run again.
+            print(f"Task {task_id} could not be continued: {exc}.\nNext: fix that, then hearth task resume {task_id}", file=sys.stderr)
+            return 1
+        for path in refused:  # Only now, with the new process started and recorded in resume.json.
+            path.unlink()
+    print(f"Continuing {task_id} ({' '.join(RESUME[command])}) in process {pid}; its log is {task_dir / 'resume.log'}.")
+    return 0
 
 
 def _resuming(task_dir: Path) -> bool:

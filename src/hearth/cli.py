@@ -181,7 +181,9 @@ def main(argv: list[str] | None = None) -> int:
         with maintenance.writing(hearth_home()):  # ADR-0038: held for the whole command, so no update starts under it.
             return _run(parser, args)
     except maintenance.Held as exc:
-        print(f"{exc}\nNext: once the update finishes, hearth {shlex.join(sys.argv[1:] if argv is None else argv)}", file=sys.stderr)
+        given = sys.argv[1:] if argv is None else argv
+        tasks.record_refused_resume(given)  # A dashboard resume is continued after the update, without the person's action again.
+        print(f"{exc}\nNext: once the update finishes, hearth {shlex.join(given)}", file=sys.stderr)
         return 1
 
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import contextlib
+import fcntl
 import io
 import json
 import os
@@ -2939,6 +2940,82 @@ class DetachedResumeTests(VerifyTestCase):
         self.assertEqual(self.only_task()["tests_approved"]["via"], "dashboard")
         finished = self.wait_until(lambda task: task["status"] != "waiting" and task["runs"][-1]["finished"])
         self.assertEqual([run["role"] for run in finished["runs"]], ["test", "implement"])
+
+    @contextlib.contextmanager
+    def update_holds_the_lock(self):
+        """Hold the maintenance lock as an update does, so every writer, a resumed one included, refuses."""
+        (self.home / ".hearth").mkdir(exist_ok=True)
+        with (self.home / ".hearth/maintenance.lock").open("a") as handle:
+            fcntl.flock(handle, fcntl.LOCK_EX)
+            yield
+
+    def answers(self, task: dict) -> list[dict]:
+        return [message for message in tasks._board(self.home / ".hearth/tasks" / task["id"]) if message["kind"] == "answer"]
+
+    def test_an_answer_an_update_stopped_from_continuing_continues_later_without_answering_again(self) -> None:
+        task = self.waiting_on_a_question()
+        task_dir = self.home / ".hearth/tasks" / task["id"]
+        os.environ["FAKE_REVIEWS"] = "approve"
+
+        with self.update_holds_the_lock():
+            pid = tasks.dashboard_action(task["id"], "answer", {"text": "Say hello."}, tasks.dashboard_task_state(task["id"], "answer"))["loop"]
+            self.finished(pid)
+            refused = [tasks.refused_resume(task_dir)]
+            for _ in range(5):  # The resumed process refuses at once, often before its ID is recorded: every time must count.
+                self.finished(tasks.resume_detached(task["id"], "loop"))
+                refused.append(tasks.refused_resume(task_dir))
+
+        self.assertEqual(refused, ["loop"] * 6)
+        self.assertNotIn("review", self.only_task())
+        self.assertEqual(tasks.refused_resumes(), [task["id"]])
+        self.assertEqual(self.cli("task", "resume", task["id"])[0], 0)
+        finished = self.wait_until(lambda task: "review" in task or task["status"] == "failed")
+        self.assertEqual([run["role"] for run in finished["runs"]], ["implement", "verify", "review"])
+        self.assertEqual([answer["body"] for answer in self.answers(task)], ["Say hello."])  # Answered once, by the person.
+        self.assertEqual(list(task_dir.glob("refused-*.json")), [])
+
+    def test_an_approval_an_update_stopped_from_continuing_continues_later_without_approving_again(self) -> None:
+        task = self.waiting_for_test_approval()
+        task_dir = self.home / ".hearth/tasks" / task["id"]
+
+        with self.update_holds_the_lock():
+            pid = tasks.dashboard_action(task["id"], "approve-tests", {}, tasks.dashboard_task_state(task["id"], "approve-tests"))["loop"]
+            self.finished(pid)
+
+        self.assertEqual(tasks.refused_resume(task_dir), "approve-tests")
+        approval = self.only_task()["tests_approved"]
+        self.assertEqual(self.cli("task", "resume", task["id"])[0], 0)
+        finished = self.wait_until(lambda task: task["status"] != "waiting" and task["runs"][-1]["finished"])
+        self.assertEqual([run["role"] for run in finished["runs"]], ["test", "implement"])
+        self.assertEqual(finished["tests_approved"], approval)  # The person's approval, recorded once, is what continued.
+
+    def test_a_continuation_that_cannot_start_stays_resumable(self) -> None:
+        task = self.waiting_on_a_question()
+        task_dir = self.home / ".hearth/tasks" / task["id"]
+        os.environ["FAKE_REVIEWS"] = "approve"
+        with self.update_holds_the_lock():
+            self.finished(tasks.dashboard_action(task["id"], "answer", {"text": "Say hello."}, tasks.dashboard_task_state(task["id"], "answer"))["loop"])
+
+        with mock.patch.object(tasks, "resume_detached", side_effect=OSError("no process could start")):
+            failed, _ = self.cli("task", "resume", task["id"])
+
+        self.assertEqual(failed, 1)
+        self.assertEqual(tasks.refused_resume(task_dir), "loop")
+        self.assertEqual(self.cli("task", "resume", task["id"])[0], 0)
+        self.assertEqual(self.wait_until(lambda task: "review" in task or task["status"] == "failed")["status"], "done")
+
+    def test_only_a_dashboard_resume_an_update_refused_can_be_resumed(self) -> None:
+        task = self.waiting_on_a_question()
+        self.cli("task", "answer", task["id"], "Say hello.")
+
+        nothing, _ = self.cli("task", "resume", task["id"])
+        with self.update_holds_the_lock():  # A loop started from a terminal is refused too, but it was not the dashboard's.
+            subprocess.run([sys.executable, "-m", "hearth.cli", "loop", task["id"]], capture_output=True, timeout=60)
+        terminal, _ = self.cli("task", "resume", task["id"])
+        with mock.patch.dict(os.environ, {"HEARTH_TASK": "20260927-000000"}):
+            agent, _ = self.cli("task", "resume", task["id"])
+
+        self.assertEqual((nothing, terminal, agent), (1, 1, 1))
 
     def test_no_second_resume_starts_while_one_is_alive(self) -> None:
         task = self.waiting_for_test_approval()
