@@ -7,6 +7,7 @@ import io
 import json
 import os
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -148,12 +149,13 @@ class InterruptedUpdateTests(unittest.TestCase):
                 with maintenance.writing(self.home):
                     self.fail("the writer ran")
 
+    @unittest.skipUnless(shutil.which("zsh"), "zsh runs the printed command where it is installed, as on the person's Mac (TEST-4).")
     def test_the_recovery_command_survives_any_checkout_path_in_zsh(self) -> None:
         source = str(self.home / "a $HOME `date` 'quoted' folder")
         Path(source).mkdir()
         command = maintenance.recover_command(source).replace(".venv/bin/python -m hearth.install recover", "pwd -P")
 
-        shown = subprocess.run(["/bin/zsh", "-f", "-c", command], capture_output=True, text=True, check=True).stdout.strip()
+        shown = subprocess.run([shutil.which("zsh"), "-f", "-c", command], capture_output=True, text=True, check=True).stdout.strip()
 
         self.assertEqual(shown, str(Path(source).resolve()))
 
