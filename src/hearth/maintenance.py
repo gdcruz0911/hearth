@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
+import json
 import os
+import shlex
 import stat
 from collections.abc import Iterator
 from pathlib import Path
@@ -34,7 +36,28 @@ def writing(home: Path) -> Iterator[None]:
             fcntl.flock(handle, fcntl.LOCK_SH | fcntl.LOCK_NB)
         except BlockingIOError:
             raise Held(REFUSAL) from None
+        # Checked only once the lock is held: a writer that looked earlier could have paused while an update began and died,
+        # and would otherwise write over data that update may have changed.
+        interrupted(home)
         yield
+
+
+def interrupted(home: Path) -> None:
+    """Refuse while an update that died after changing data may have begun is not recovered; nothing writes until it is."""
+    marker = home / "update.json"
+    if not marker.exists():
+        return
+    try:
+        source = json.loads(marker.read_text(encoding="utf-8")).get("source")
+    except (OSError, ValueError):
+        source = None
+    raise Held(f"A Hearth update was interrupted, and this command changes its data.\nNext: {recover_command(source)}")
+
+
+def recover_command(source: str | None) -> str:
+    """Runnable as printed in zsh, whatever the checkout's path holds, such as spaces, `$`, or backticks."""
+    return f"cd {shlex.quote(source)} && .venv/bin/python -m hearth.install recover" if source else \
+        "in the Hearth checkout, run .venv/bin/python -m hearth.install recover"
 
 
 class NotHeld(Exception):
