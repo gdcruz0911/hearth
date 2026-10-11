@@ -11,6 +11,7 @@ from __future__ import annotations
 import contextlib
 import datetime
 import fcntl
+import filecmp
 import json
 import os
 import shutil
@@ -55,7 +56,7 @@ def update(repo: Path, ref: str, base: str | None, root: Path = install.ROOT, ru
             _write_marker(home, {"step": "backing-up", "ref": ref, "source": str(repo.resolve()), "root": str(root),
                                  "current_before": before, "database": str(database) if database else None})
             try:
-                backup = _backup(home, database, ref)
+                backup = _backup(home, database, ref, before, "update")
             except BaseException:
                 _discard_marker(home)  # Live data was never changed, so there is nothing to restore.
                 raise
@@ -91,11 +92,141 @@ def recover() -> str:
             marker = _marker(home)
             if marker["step"] != "changing":
                 _discard_marker(home)
-                return "The interrupted update had not changed anything yet; its partial backup was removed. Your data is as it was."
+                return f"The interrupted {marker.get('action', 'update')} had not changed anything yet; its partial backup was removed. Your data is as it was."
             _restore(home)
         finally:
             os.close(lock)
-    return f"The interrupted update was undone from {marker['backup']}; your data and runtime are as they were before it."
+    return f"The interrupted {marker.get('action', 'update')} was undone from {marker['backup']}; your data and runtime are as they were before it."
+
+
+def rollback(repo: Path, root: Path = install.ROOT, name: str | None = None, confirm: bool = False) -> str:
+    """Go back to the runtime and data an earlier backup holds (ADR-0038): a preview unless `confirm`, and the current data
+    saved as a backup first. Runs nothing from the older runtime, which may predate the commands an update relies on."""
+    home = hearth_home()
+    with only_update(home):
+        if (home / MARKER).exists():
+            raise InstallError(f"An earlier update or rollback was interrupted.\nNext: {maintenance.recover_command(_marker(home).get('source'))}")
+        target = _chosen(home, name)
+        record = _complete(target)
+        database = Path(record["database"]) if record.get("database") else None
+        if database != _database(home):
+            raise InstallError(f"The backup {target.name} holds the database {database}, but your profile now names {_database(home)}, "
+                               f"so Hearth will not roll back to it and has changed nothing.\n"
+                               f"Next: point {home / 'profile.json'} back at {database}, or choose another backup with --backup")
+        problem = _unusable(target, database)
+        if problem:
+            raise InstallError(f"The backup at {target} {problem}, so Hearth will not roll back to it and has changed nothing.\n"
+                               f"Next: choose another backup in {home / BACKUPS} with --backup")
+        runtime = record.get("current")
+        if not runtime or not (root / runtime).is_dir():
+            raise InstallError(f"The runtime the backup {target.name} ran on, {runtime}, is not in {root}, so Hearth will not roll back to it.\n"
+                               f"Next: choose another backup in {home / BACKUPS} with --backup")
+        before = os.readlink(root / "current") if (root / "current").is_symlink() else None
+        if before == runtime:
+            raise InstallError(f"Hearth already runs {runtime}, the runtime of the backup {target.name}; rolling back to it again would only "
+                               f"erase what changed since.\nNext: choose another backup in {home / BACKUPS} with --backup")
+        if not confirm:
+            return "\n".join([f"Rolling back to the backup {target.name} would switch the app from {before} to {runtime}.",
+                              *_erased(home, target, database),
+                              "Your current data would be saved as a new backup first.",
+                              f"Next: quit the Hearth app, then run .venv/bin/python -m hearth.install rollback --backup {target.name} --confirm"])
+        erased = _erased(home, target, database)  # Named before anything changes, for the record a confirmed rollback leaves.
+        busy = _busy(home)
+        if busy:
+            raise InstallError("Hearth will not roll back while work is under way:\n" + "\n".join(busy))
+        lock = _exclusive(home)
+        try:
+            busy = _busy(home)
+            if busy:
+                raise InstallError("Work started while the rollback was getting ready, so nothing was changed:\n" + "\n".join(busy))
+            _write_marker(home, {"action": "rollback", "step": "backing-up", "source": str(repo.resolve()), "root": str(root),
+                                 "current_before": before, "database": str(database) if database else None})
+            try:
+                saved = _backup(home, database, "before-rollback", before, "before-rollback")
+            except BaseException:
+                _discard_marker(home)
+                raise
+            _write_marker(home, {**_marker(home), "step": "changing", "backup": str(saved)})
+            try:
+                _restore_from(home, target, database, root, runtime)
+            except BaseException as exc:
+                _restore(home)  # Back to the data just saved, which the marker names.
+                raise InstallError(f"The rollback failed and was undone, with your data as it was before it:\n{exc}") from None
+            _discard_marker(home)
+        finally:
+            os.close(lock)
+    return (f"Rolled back to {runtime}, with the data from {target.name}.\n" + "\n".join(erased) +
+            f"\nYour data from just before is in {saved}.\nTo return to it: .venv/bin/python -m hearth.install rollback --backup {saved.name} --confirm\nNext: reopen the Hearth app.")
+
+
+def _chosen(home: Path, name: str | None) -> Path:
+    """The backup named, or else the newest an update made; a save made before a rollback is chosen only by name."""
+    if name:
+        target = home / BACKUPS / name
+        if Path(name).name != name or _complete(target) is None:
+            raise InstallError(f"There is no complete, readable backup named {name} in {home / BACKUPS}.\n"
+                               f"Next: choose another one listed there with --backup")
+        return target
+    made = [complete.parent for complete in (home / BACKUPS).glob("*/complete") if (_complete(complete.parent) or {}).get("kind") == "update"]
+    if not made:
+        raise InstallError(f"No update has left a backup in {home / BACKUPS} to roll back to.\n"
+                           f"Next: name one with --backup, or run .venv/bin/python -m hearth.install update --ref <tag> first")
+    return max(made, key=lambda folder: folder.name)  # Named by time first, so the newest sorts last.
+
+
+def _erased(home: Path, backup: Path, database: Path | None) -> list[str]:
+    """What restoring `backup` would erase or put back, in words, for the preview; reads the live data only."""
+    then, now = _held(backup / "home"), _held(home, database)
+    tasks: dict[str, str] = {}
+    files = []
+    for name in sorted(now.keys() | then.keys()):
+        if name not in then:
+            change = "made since"
+        elif name not in now:
+            change = "removed since"
+        elif now[name] != then[name] or (now[name][0] == "file" and not filecmp.cmp(home / name, backup / "home" / name, shallow=False)):
+            change = "changed since"
+        else:
+            continue
+        parts = Path(name).parts
+        if parts[0] == "tasks" and len(parts) > 1:
+            tasks.setdefault(parts[1], change if len(parts) == 2 else "changed since")
+        elif (now.get(name) or then[name])[0] != "folder":
+            files.append(f"  {name} ({change})")
+    lines = [f"  task {task} ({change})" for task, change in sorted(tasks.items())]
+    if lines:
+        lines = ["Task records it would put back as they were (made since: removed):", *lines]
+        if any(change == "made since" for change in tasks.values()):
+            lines.append("  Their worktrees, branches and Codex sessions stay; remove them by hand if you no longer want them.")
+    if files:
+        lines += ["Settings and other files it would put back as they were:", *files]
+    if database is not None:
+        imported, reimported, removed = _documents(database, backup / "hearth.sqlite")
+        if imported:
+            lines += ["Documents imported since, which it would remove from the knowledge base:", *(f"  {title}" for title in imported)]
+        if reimported:
+            lines += ["Documents re-imported since, which it would put back as they were:", *(f"  {title}" for title in reimported)]
+        if removed:
+            lines.append(f"{removed} document(s) removed since would come back.")
+        if imported or reimported or removed:
+            lines.append("The semantic index would then not match the documents until it is rebuilt.\n"
+                         "Next, afterwards: hearth health, then rebuild the index from the Knowledge tab")
+    return lines or ["Nothing has changed in your data since that backup."]
+
+
+def _documents(live: Path, copy: Path) -> tuple[list[str], list[str], int]:
+    """Documents only in `live` and those re-imported since, by name, and how many are only in `copy`; both opened read-only."""
+    held = []
+    for path in (live, copy):
+        connection = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)
+        try:
+            held.append({path: (name, fingerprint) for path, name, fingerprint in
+                         connection.execute("SELECT canonical_path, display_name, source_fingerprint FROM documents")})
+        finally:
+            connection.close()
+    now, then = held
+    return (sorted(now[path][0] for path in now.keys() - then.keys()),
+            sorted(now[path][0] for path in now.keys() & then.keys() if now[path][1] != then[path][1]), len(then.keys() - now.keys()))
 
 
 @contextlib.contextmanager
@@ -170,7 +301,7 @@ def _database(home: Path) -> Path | None:
     return database if database is not None and database.is_file() else None
 
 
-def _backup(home: Path, database: Path | None, ref: str) -> Path:
+def _backup(home: Path, database: Path | None, ref: str, current: str | None, kind: str) -> Path:
     """A consistent copy of the database and Hearth's home, put in place only once complete; links are kept, never followed."""
     stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")  # Unique, even for two updates a second apart.
     final = home / BACKUPS / f"{stamp}-{''.join(c if c.isalnum() or c in '.-_' else '-' for c in ref)}"
@@ -185,7 +316,8 @@ def _backup(home: Path, database: Path | None, ref: str) -> Path:
             source.close()
             copy.close()
     # What the home copy holds, made durable with the flag that it is complete, so a restore can prove nothing went missing.
-    (partial / "complete").write_text(json.dumps({"database": str(database) if database else None,
+    # Also the runtime that was current and why the backup was made, so a rollback knows what to go back to.
+    (partial / "complete").write_text(json.dumps({"database": str(database) if database else None, "current": current, "kind": kind,
                                                   "home": _held(partial / "home")}), encoding="utf-8")
     os.sync()
     partial.rename(final)
@@ -200,12 +332,17 @@ def _skipped(path: Path, database: Path | None) -> bool:
 
 
 def _restore(home: Path) -> None:
-    """Put Hearth's home, the database, and the runtime back as they were before the update; safe to run again if interrupted."""
+    """Put Hearth's home, the database, and the runtime back as the marker's backup holds them; safe to run again if interrupted."""
+    marker = _marker(home)
+    _restore_from(home, Path(marker.get("backup") or ""), Path(marker["database"]) if marker.get("database") else None,
+                  Path(marker["root"]), marker.get("current_before"))
+    _discard_marker(home, keep_backup=True)
+
+
+def _restore_from(home: Path, backup: Path, database: Path | None, root: Path, runtime: str | None) -> None:
+    """Make Hearth's home, the database, and `current` match `backup` and `runtime`, after checking the backup is whole."""
     previous = signal.signal(signal.SIGINT, signal.SIG_IGN)  # A second Ctrl+C must not cut a restore short.
     try:
-        marker = _marker(home)
-        backup = Path(marker.get("backup") or "")
-        database = Path(marker["database"]) if marker.get("database") else None
         problem = _unusable(backup, database)
         if problem:
             raise InstallError(f"The update's backup at {backup} {problem}, so Hearth will not restore from it and has changed nothing.\n"
@@ -219,10 +356,9 @@ def _restore(home: Path) -> None:
             finally:
                 source.close()
                 live.close()
-        current = Path(marker["root"]) / "current"
-        if marker.get("current_before") and (not current.is_symlink() or os.readlink(current) != marker["current_before"]):
-            install.switch(current, Path(marker["root"]) / marker["current_before"])
-        _discard_marker(home, keep_backup=True)
+        current = root / "current"
+        if runtime and (not current.is_symlink() or os.readlink(current) != runtime):
+            install.switch(current, root / runtime)
     finally:
         signal.signal(signal.SIGINT, previous)
 
@@ -234,10 +370,10 @@ def _unusable(backup: Path, database: Path | None) -> str | None:
         return "is missing or incomplete"
     if not (backup / "home").is_dir():
         return "has no copy of Hearth's home"
-    try:
-        recorded = json.loads((backup / "complete").read_text(encoding="utf-8"))["home"]
-    except (ValueError, KeyError, TypeError):
+    record = _complete(backup)
+    if record is None:
         return "does not record what its copy of Hearth's home holds"
+    recorded = record["home"]
     held = _held(backup / "home")
     for name, kind in recorded.items():
         if held.get(name) != kind:
@@ -261,11 +397,27 @@ def _unusable(backup: Path, database: Path | None) -> str | None:
     return None
 
 
-def _held(folder: Path) -> dict[str, list]:
-    """Every entry under `folder` by relative path, as a folder, a link and its target, or a file and its size."""
+def _complete(backup: Path) -> dict | None:
+    """The backup's `complete` record, or None when it is missing or not the shape `_backup` writes."""
+    try:
+        record = json.loads((backup / "complete").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    shape = {"database": (str, type(None)), "current": (str, type(None)), "kind": (str,), "home": (dict,)}
+    if not isinstance(record, dict) or any(not isinstance(record.get(key, ...), types) for key, types in shape.items()):
+        return None
+    if record["kind"] not in ("update", "before-rollback") or (record["current"] is not None and Path(record["current"]).name != record["current"]):
+        return None  # `current` names a folder beside the others, never a path out of them.
+    return record
+
+
+def _held(folder: Path, database: Path | None = None) -> dict[str, list]:
+    """Every entry under `folder` by relative path, as a folder, a link and its target, or a file and its size; what a
+    backup leaves out is left out here too, so the live home and its copy compare."""
     held = {}
     for parent, folders, files in os.walk(folder):
-        for name in folders + files:
+        folders[:] = [name for name in folders if not _skipped(Path(parent, name), database)]
+        for name in folders + [name for name in files if not _skipped(Path(parent, name), database)]:
             path = Path(parent, name)
             name = str(path.relative_to(folder))
             if path.is_symlink():
@@ -280,7 +432,7 @@ def _sync(source: Path, live: Path, database: Path | None) -> None:
     backups, app data, worktrees, Codex homes, and the database. Links are copied as links. Safe to run again."""
     for entry in live.iterdir():
         if not _skipped(entry, database) and not (source / entry.name).exists() and not (source / entry.name).is_symlink():
-            shutil.rmtree(entry) if entry.is_dir() and not entry.is_symlink() else entry.unlink()  # Made during the update.
+            _remove(entry, database)  # Made since the backup.
     for entry in source.iterdir():
         target = live / entry.name
         if _skipped(target, database):
@@ -292,10 +444,23 @@ def _sync(source: Path, live: Path, database: Path | None) -> None:
             _sync(entry, target, database)
             continue
         if target.is_dir() and not target.is_symlink():
-            shutil.rmtree(target)
+            _remove(target, database)
         elif target.exists() or target.is_symlink():
             target.unlink()
         shutil.copy2(entry, target, follow_symlinks=False)
+
+
+def _remove(path: Path, database: Path | None) -> None:
+    """Remove what a backup holds at `path`, keeping what it never holds, such as a task's Codex home and its sessions,
+    which no restore could bring back; a folder that keeps any of it stays."""
+    if not path.is_dir() or path.is_symlink():
+        path.unlink()
+        return
+    for entry in path.iterdir():
+        if not _skipped(entry, database):
+            _remove(entry, database)
+    if not any(path.iterdir()):
+        path.rmdir()
 
 
 def _inside(runtime: Path, lock: int, argv: list[str]) -> None:
