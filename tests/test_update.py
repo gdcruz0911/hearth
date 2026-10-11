@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import contextlib
 import fcntl
 import hashlib
+import io
 import json
 import os
 import signal
@@ -306,6 +308,28 @@ class UpdateTests(unittest.TestCase):
         self.assertEqual(connection.execute("SELECT count(*) FROM documents").fetchone()[0], documents)
         connection.close()
 
+    def refused_with_live_kept(self, damage) -> None:
+        """Damage the backup after an interrupted update; recover must refuse, keep the marker, and delete nothing live."""
+        settings, record = self.hearth / "projects.json", self.hearth / "tasks/20261010-090000/task.json"
+        self.updater_killed(FAKE_RUNTIME_CRASH="1", FAKE_RUNTIME_DATABASE=str(self.database))
+        before = (settings.read_text(encoding="utf-8"), record.read_text(encoding="utf-8"))
+        damage(Path(update._marker(self.hearth)["backup"]))
+
+        with self.assertRaisesRegex(install.InstallError, "changed nothing"):
+            update.recover()
+
+        self.assertEqual((settings.read_text(encoding="utf-8"), record.read_text(encoding="utf-8")), before)
+        self.assertTrue((self.hearth / update.MARKER).exists())
+
+    def test_a_backup_missing_its_task_records_is_refused_and_the_live_ones_kept(self) -> None:
+        self.refused_with_live_kept(lambda backup: (backup / "home/tasks").rename(self.root / "moved-aside-tasks"))
+
+    def test_a_backup_missing_its_settings_is_refused_and_the_live_ones_kept(self) -> None:
+        self.refused_with_live_kept(lambda backup: (backup / "home/projects.json").unlink())
+
+    def test_a_backup_that_does_not_record_what_it_holds_is_refused(self) -> None:
+        self.refused_with_live_kept(lambda backup: (backup / "complete").write_text("{}", encoding="utf-8"))
+
     def test_a_failure_puts_settings_and_task_records_back_and_keeps_sign_ins_and_links(self) -> None:
         settings, record = self.hearth / "projects.json", self.hearth / "tasks/20261010-090000/task.json"
         before = (settings.read_text(encoding="utf-8"), record.read_text(encoding="utf-8"))
@@ -332,10 +356,12 @@ class UpdateTests(unittest.TestCase):
         (folder / "resume.json").write_text(json.dumps({"pid": gone.pid, "identity": None, "command": "loop"}), encoding="utf-8")
         (folder / f"refused-{gone.pid}.json").write_text(json.dumps({"command": "loop"}), encoding="utf-8")
 
-        with mock.patch.dict(os.environ, {"FAKE_RUNTIME_RESUME_FAILS": "1"}):
+        warned = io.StringIO()
+        with mock.patch.dict(os.environ, {"FAKE_RUNTIME_RESUME_FAILS": "1"}), contextlib.redirect_stderr(warned):
             said = self.run_update()
 
-        self.assertIn("Task 20261010-090400 could not be continued. Next: hearth task resume 20261010-090400", said)
+        self.assertIn("Task 20261010-090400 could not be continued. Next: hearth task resume 20261010-090400", warned.getvalue())
+        self.assertNotIn("could not be continued", said)
 
     def test_one_update_at_a_time(self) -> None:
         self.hearth.mkdir(exist_ok=True)

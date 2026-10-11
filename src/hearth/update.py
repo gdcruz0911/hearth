@@ -75,7 +75,8 @@ def update(repo: Path, ref: str, base: str | None, root: Path = install.ROOT, ru
     continued, failed = _continue_refused(new)
     lines = [f"Updated to {ref}: {new}.", f"The backup is in {backup}."]
     lines += [f"Continued task {task}." for task in continued]
-    lines += [f"Task {task} could not be continued. Next: hearth task resume {task}" for task in failed]
+    for task in failed:
+        print(f"Task {task} could not be continued. Next: hearth task resume {task}", file=sys.stderr)  # A warning (CLI-1).
     return "\n".join(lines + ["Next: reopen the Hearth app."])
 
 
@@ -183,7 +184,9 @@ def _backup(home: Path, database: Path | None, ref: str) -> Path:
         finally:
             source.close()
             copy.close()
-    (partial / "complete").write_text(json.dumps({"database": str(database) if database else None}), encoding="utf-8")
+    # What the home copy holds, made durable with the flag that it is complete, so a restore can prove nothing went missing.
+    (partial / "complete").write_text(json.dumps({"database": str(database) if database else None,
+                                                  "home": _held(partial / "home")}), encoding="utf-8")
     os.sync()
     partial.rename(final)
     return final
@@ -231,6 +234,14 @@ def _unusable(backup: Path, database: Path | None) -> str | None:
         return "is missing or incomplete"
     if not (backup / "home").is_dir():
         return "has no copy of Hearth's home"
+    try:
+        recorded = json.loads((backup / "complete").read_text(encoding="utf-8"))["home"]
+    except (ValueError, KeyError, TypeError):
+        return "does not record what its copy of Hearth's home holds"
+    held = _held(backup / "home")
+    for name, kind in recorded.items():
+        if held.get(name) != kind:
+            return f"is missing or has changed {name} in its copy of Hearth's home"
     if database is None:
         return None
     copy = backup / "hearth.sqlite"
@@ -248,6 +259,20 @@ def _unusable(backup: Path, database: Path | None) -> str | None:
     except sqlite3.DatabaseError:
         return "holds a copy of the database that SQLite cannot read"
     return None
+
+
+def _held(folder: Path) -> dict[str, list]:
+    """Every entry under `folder` by relative path, as a folder, a link and its target, or a file and its size."""
+    held = {}
+    for parent, folders, files in os.walk(folder):
+        for name in folders + files:
+            path = Path(parent, name)
+            name = str(path.relative_to(folder))
+            if path.is_symlink():
+                held[name] = ["link", os.readlink(path)]
+            else:
+                held[name] = ["folder"] if path.is_dir() else ["file", path.stat().st_size]
+    return held
 
 
 def _sync(source: Path, live: Path, database: Path | None) -> None:
