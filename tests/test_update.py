@@ -6,6 +6,7 @@ import hashlib
 import io
 import json
 import os
+import shutil
 import signal
 import sqlite3
 import subprocess
@@ -371,6 +372,194 @@ class UpdateTests(unittest.TestCase):
                 self.run_update()
             with self.assertRaisesRegex(install.InstallError, "Another Hearth update is running"):
                 update.recover()
+
+    def updated_then_changed(self) -> Path:
+        """An update to v2, then work done on it: a new task, a changed setting, and an imported note; returns the backup."""
+        self.run_update()
+        (backup,) = (self.hearth / update.BACKUPS).iterdir()
+        self.task("20261011-100000", "done")
+        (self.hearth / "projects.json").write_text('{"demo": {}}', encoding="utf-8")
+        note = self.root / "later.md"
+        note.write_text("# Later\n\nAdded after the update.\n", encoding="utf-8")
+        service = HearthService(self.database)
+        service.import_document(str(note))
+        service.close()
+        return backup
+
+    def after_update(self) -> tuple:
+        return (self.digest(self.database), (self.hearth / "projects.json").read_text(encoding="utf-8"),
+                (self.hearth / "tasks/20261011-100000/task.json").exists(), os.readlink(self.runtimes / "current"))
+
+    def rollback(self, **options) -> str:
+        return update.rollback(REPO, self.runtimes, **options)
+
+    def test_a_rollback_preview_names_what_it_would_erase_and_changes_nothing(self) -> None:
+        backup = self.updated_then_changed()
+        before = self.after_update()
+
+        said = self.rollback()
+
+        self.assertIn(f"backup {backup.name} would switch the app from v2 to v1", said)
+        self.assertIn("task 20261011-100000 (made since)", said)
+        self.assertIn("worktrees, branches and Codex sessions stay", said)
+        self.assertIn("projects.json (changed since)", said)
+        self.assertIn("Documents imported since", said)
+        self.assertIn("later.md", said)
+        self.assertIn("semantic index", said)
+        self.assertNotIn("re-imported", said)
+        self.assertIn(f"rollback --backup {backup.name} --confirm", said)
+        self.assertNotIn("backups/", said)  # What a backup leaves out, such as earlier backups, is never named.
+        self.assertEqual(self.after_update(), before)
+        self.assertEqual(len(list((self.hearth / update.BACKUPS).iterdir())), 1)
+
+    def test_a_rollback_preview_names_a_document_re_imported_since(self) -> None:
+        self.run_update()
+        note = self.root / "note.md"
+        note.write_text("# Note\n\nThe owner is Grace now.\n", encoding="utf-8")
+        service = HearthService(self.database)
+        service.import_document(str(note))
+        service.close()
+
+        said = self.rollback()
+
+        self.assertIn("Documents re-imported since, which it would put back as they were:\n  note.md", said)
+        self.assertNotIn("imported since, which it would remove", said)
+
+    def test_a_confirmed_rollback_restores_the_backup_and_saves_the_current_data_first(self) -> None:
+        backup = self.updated_then_changed()
+        after = self.after_update()
+
+        said = self.rollback(name=backup.name, confirm=True)
+
+        self.assertIn("Rolled back to v1", said)
+        self.assertIn("task 20261011-100000 (made since)", said)  # What went is named even without a preview.
+        self.assertEqual(os.readlink(self.runtimes / "current"), "v1")
+        self.assertEqual(self.digest(self.database), self.digest(backup / "hearth.sqlite"))
+        self.assertEqual((self.hearth / "projects.json").read_text(encoding="utf-8"), "{}")
+        self.assertFalse((self.hearth / "tasks/20261011-100000").exists())
+        self.assertFalse((self.hearth / update.MARKER).exists())
+        (saved,) = [folder for folder in (self.hearth / update.BACKUPS).iterdir() if folder != backup]
+        self.assertEqual(json.loads((saved / "complete").read_text(encoding="utf-8"))["current"], "v2")
+        self.assertEqual(self.digest(saved / "hearth.sqlite"), after[0])
+        self.assertEqual((saved / "home/projects.json").read_text(encoding="utf-8"), after[1])
+        self.assertTrue((saved / "home/tasks/20261011-100000/task.json").is_file())
+
+        with self.assertRaisesRegex(install.InstallError, "already runs v1"):  # The default never picks the save it just made.
+            self.rollback(confirm=True)
+        self.rollback(name=saved.name, confirm=True)  # And the save undoes the rollback.
+        self.assertEqual(self.after_update(), after)
+
+    def test_a_rollback_that_fails_is_undone_to_the_data_it_saved(self) -> None:
+        backup = self.updated_then_changed()
+        after = self.after_update()
+        real, calls = update._sync, []
+
+        def fails_first(*args):
+            calls.append(args)
+            if len(calls) == 1:
+                real(*args)
+                raise RuntimeError("restore failed")
+            real(*args)
+
+        with mock.patch.object(update, "_sync", side_effect=fails_first):
+            with self.assertRaisesRegex(install.InstallError, "rollback failed and was undone[\\s\\S]*restore failed"):
+                self.rollback(name=backup.name, confirm=True)
+
+        self.assertEqual(self.after_update(), after)
+        self.assertFalse((self.hearth / update.MARKER).exists())
+
+    def test_a_rollback_killed_mid_restore_is_undone_by_recover(self) -> None:
+        backup = self.updated_then_changed()
+        after = self.after_update()
+        program = (f"import os, signal\nfrom pathlib import Path\nfrom hearth import update\nreal = update._sync\n"
+                   f"def dies(*args):\n    real(*args)\n    os.kill(os.getpid(), signal.SIGKILL)\n"
+                   f"update._sync = dies\n"
+                   f"update.rollback(Path({str(REPO)!r}), Path({str(self.runtimes)!r}), {backup.name!r}, True)")
+        died = subprocess.run([DEV_PYTHON, "-c", program], capture_output=True, text=True, timeout=120)
+        self.assertEqual(died.returncode, -signal.SIGKILL, died.stderr)
+        self.assertNotEqual(self.after_update(), after)  # Killed partway: the home was already put back.
+
+        said = update.recover()
+
+        self.assertIn("interrupted rollback was undone", said)
+        self.assertEqual(self.after_update(), after)
+
+    def test_a_rollback_refuses_while_the_app_is_open_or_work_starts_as_it_takes_the_lock(self) -> None:
+        backup = self.updated_then_changed()
+        after = self.after_update()
+        with maintenance.writing(self.hearth):
+            with self.assertRaisesRegex(install.InstallError, "quit the Hearth app"):
+                self.rollback(name=backup.name, confirm=True)
+        late = ["- task 20261011-100200 is running. Next: let it finish"]
+        with mock.patch.object(update, "_busy", side_effect=[[], late]):
+            with self.assertRaisesRegex(install.InstallError, "started while the rollback was getting ready[\\s\\S]*20261011-100200"):
+                self.rollback(name=backup.name, confirm=True)
+
+        self.assertEqual(self.after_update(), after)
+        self.assertEqual(list((self.hearth / update.BACKUPS).iterdir()), [backup])
+
+    def test_a_rollback_refuses_when_the_profile_names_another_database(self) -> None:
+        backup = self.updated_then_changed()
+        moved = self.root / "data/moved.sqlite"
+        shutil.copy(self.database, moved)
+        (self.root / "data/hearth.json").write_text(json.dumps({"format": "hearth-runtime-profile-v1", "database": str(moved)}), encoding="utf-8")
+        after = self.digest(moved)
+
+        with self.assertRaisesRegex(install.InstallError, "profile now names[\\s\\S]*changed nothing[\\s\\S]*Next:"):
+            self.rollback(name=backup.name, confirm=True)
+
+        self.assertEqual(self.digest(moved), after)
+        self.assertEqual(os.readlink(self.runtimes / "current"), "v2")
+
+    def test_a_rollback_keeps_the_codex_session_of_a_task_made_since_and_its_undo_brings_the_task_back_whole(self) -> None:
+        backup = self.updated_then_changed()
+        session = self.hearth / "tasks/20261011-100000/codex-home/sessions/rollout.jsonl"
+        session.parent.mkdir(parents=True)
+        session.write_text('{"turn": 1}', encoding="utf-8")
+
+        self.rollback(name=backup.name, confirm=True)
+
+        self.assertFalse((self.hearth / "tasks/20261011-100000/task.json").exists())
+        self.assertEqual(session.read_text(encoding="utf-8"), '{"turn": 1}')  # Never backed up, so never removed.
+        (saved,) = [folder for folder in (self.hearth / update.BACKUPS).iterdir() if folder != backup]
+        self.rollback(name=saved.name, confirm=True)
+        self.assertTrue((self.hearth / "tasks/20261011-100000/task.json").is_file())
+        self.assertEqual(session.read_text(encoding="utf-8"), '{"turn": 1}')
+
+    def test_a_backup_with_malformed_metadata_is_refused_with_what_to_do(self) -> None:
+        backup = self.updated_then_changed()
+        after = self.after_update()
+        for malformed in ("[]", '{"database": 1, "current": "v1", "kind": "update", "home": {}}', "not json",
+                          json.dumps({"database": str(self.database), "current": "../elsewhere", "kind": "update", "home": {}})):
+            with self.subTest(complete=malformed):
+                (backup / "complete").write_text(malformed, encoding="utf-8")
+                with self.assertRaisesRegex(install.InstallError, "Next:"):
+                    self.rollback(name=backup.name, confirm=True)
+                with self.assertRaisesRegex(install.InstallError, "No update has left a backup"):
+                    self.rollback()  # Not chosen by default either.
+
+        self.assertEqual(self.after_update(), after)
+
+    def test_a_rollback_refuses_busy_work_a_missing_runtime_a_damaged_backup_and_agents(self) -> None:
+        backup = self.updated_then_changed()
+        after = self.after_update()
+        self.task("20261011-100100", "waiting", stop_reason="question")
+        with self.assertRaisesRegex(install.InstallError, "20261011-100100 is waiting"):
+            self.rollback(name=backup.name, confirm=True)
+        shutil.rmtree(self.hearth / "tasks/20261011-100100")
+        (backup / "home/projects.json").rename(self.root / "moved-aside.json")
+        with self.assertRaisesRegex(install.InstallError, "missing or has changed projects.json[\\s\\S]*changed nothing"):
+            self.rollback(name=backup.name, confirm=True)
+        (self.root / "moved-aside.json").rename(backup / "home/projects.json")
+        self.old.rename(self.root / "v1-gone")
+        with self.assertRaisesRegex(install.InstallError, "v1, is not in"):
+            self.rollback(name=backup.name, confirm=True)
+        (self.root / "v1-gone").rename(self.old)
+        with mock.patch.dict(os.environ, {"HEARTH_TASK": "20261011-100000"}), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(install.main(["rollback", "--root", str(self.runtimes), "--confirm"]), 1)
+
+        self.assertEqual(self.after_update(), after)
+        self.assertEqual(len(list((self.hearth / update.BACKUPS).iterdir())), 1)
 
 
 if __name__ == "__main__":

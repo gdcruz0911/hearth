@@ -248,9 +248,13 @@ def main(argv: list[str] | None = None) -> int:
     updater.add_argument("--ref", required=True, help="The release tag to update to.")
     updater.add_argument("--base", help="The base Python; by default, the one the current runtime was built on.")
     updater.add_argument("--root", type=Path, default=ROOT, help=f"Where runtimes live (default: {ROOT}).")
-    commands.add_parser("recover", help="Finish an interrupted update: undo it if it had changed your data, otherwise only clear it.")
+    commands.add_parser("recover", help="Finish an interrupted update or rollback: undo it if it had changed your data, otherwise only clear it.")
+    roller = commands.add_parser("rollback", help="Preview going back to an update's backup; --confirm does it, saving your current data first.")
+    roller.add_argument("--backup", help="The backup folder's name; by default, the newest an update made.")
+    roller.add_argument("--confirm", action="store_true", help="Roll back, instead of only saying what it would erase.")
+    roller.add_argument("--root", type=Path, default=ROOT, help=f"Where runtimes live (default: {ROOT}).")
     args = parser.parse_args(argv)
-    if args.command in ("update", "recover") and os.environ.get("HEARTH_TASK"):
+    if args.command in ("update", "recover", "rollback") and os.environ.get("HEARTH_TASK"):
         print("Agents cannot update Hearth; this shell belongs to a task.\nNext: ask the person, through the task board or your final report", file=sys.stderr)
         return 1
     try:
@@ -262,6 +266,9 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "recover":
             from . import update
             print(update.recover())
+        elif args.command == "rollback":
+            from . import update
+            print(update.rollback(args.repo, args.root, args.backup, args.confirm))
         else:
             print(f"Installed {runtime(args.repo, args.ref, args.base, args.root)} and made it current.")
     except InstallError as exc:
