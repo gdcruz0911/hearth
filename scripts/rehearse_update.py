@@ -147,7 +147,12 @@ class Rehearsal:
     def refused_while_busy(self) -> None:
         busy = [json.loads(path.read_text(encoding="utf-8"))["id"] for path in self.home.glob("tasks/*/task.json")
                 if json.loads(path.read_text(encoding="utf-8"))["status"] in ("running", "queued", "waiting")]
-        check(bool(busy), "no copied task is busy, so the refusal cannot be rehearsed on real records")
+        if not busy:  # Nothing real is waiting: a copied record made waiting, in the scratch copy only, stands in.
+            donor = next(self.home.glob("tasks/*/task.json"))
+            busy = ["20991231-235800"]
+            (self.home / "tasks" / busy[0]).mkdir()
+            (self.home / "tasks" / busy[0] / "task.json").write_text(
+                json.dumps({**json.loads(donor.read_text(encoding="utf-8")), "id": busy[0], "status": "waiting", "stop_reason": "question"}), encoding="utf-8")
         before, current = self.digest(), self.current()
         self.memory_is_free()  # Building the new runtime starts its backend to check its handshake.
         result = self.install("update", "--ref", self.ref, "--root", str(self.root))
