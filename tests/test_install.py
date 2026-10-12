@@ -225,5 +225,15 @@ class RuntimeInstallTests(unittest.TestCase):
         self.assertEqual(cleaned["PYTHONNOUSERSITE"], "1")
 
 
+class CommandLineTests(unittest.TestCase):
+    def test_the_runtime_command_reaches_the_installer(self) -> None:
+        with unittest.mock.patch.object(install, "runtime", return_value=Path("/runtimes/v1")) as runtime, \
+                unittest.mock.patch("sys.stdout"):
+            code = install.main(["--repo", "/repo", "runtime", "--base", "/python", "--ref", "v1", "--root", "/runtimes"])
+
+        self.assertEqual(code, 0)
+        runtime.assert_called_once_with(Path("/repo"), "v1", "/python", Path("/runtimes"))
+
+
 if __name__ == "__main__":
     unittest.main()
