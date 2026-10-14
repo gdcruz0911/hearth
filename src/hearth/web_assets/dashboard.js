@@ -8,7 +8,7 @@ const sessionToken = window.location.hash.startsWith("#session=") ? window.locat
 if (sessionToken) history.replaceState(null, "", window.location.pathname);
 const SESSION_LOST = "This dashboard session ended. Quit and reopen the Hearth app, or run hearth web in your terminal.";
 const KNOWN = new Set(["running", "queued", "waiting", "done", "failed", "cancelled", "interrupted"]);
-const VIEWS = ["hub", "tasks", "knowledge"];
+const VIEWS = ["sessions", "hub", "tasks", "knowledge"];
 const DOTS = 8; // Run dots on a task card.
 const seen = new Map(); // Task id to its last status, so only real arrivals and changes move.
 let firstRender = true;
@@ -671,7 +671,10 @@ function store(key, value) {
 function route() {
   // UI-6: one shell; the hash names the view, and an empty hash opens the person's default view.
   const [asked, task, run] = window.location.hash.replace(/^#\//, "").split("/").map(decodeURIComponent);
-  const view = VIEWS.includes(asked) ? asked : stored("hearth-default-view", "hub");
+  // ADR-0041: the first launch opens on Sessions; later ones on the chosen view, or by default the last one used.
+  const opening = stored("hearth-default-view", "last");
+  const view = VIEWS.includes(asked) ? asked : VIEWS.includes(opening) ? opening : stored("hearth-last-view", "sessions");
+  store("hearth-last-view", view);
   selected.task = view === "tasks" && task ? task : null;
   selected.run = view === "tasks" && run ? run : null;
   if (window.Hearth && window.Hearth.latest) render(window.Hearth.latest);
@@ -695,7 +698,7 @@ function route() {
 
 function defaultView() {
   const select = document.getElementById("default-view");
-  select.value = stored("hearth-default-view", "hub");
+  select.value = stored("hearth-default-view", "last");
   select.addEventListener("change", () => store("hearth-default-view", select.value));
 }
 
@@ -716,7 +719,7 @@ function theme() {
 }
 
 // Shared with hub.js, which draws the same tasks as a graph.
-window.Hearth = { el, shown, badge, reason, command, api, session, root, loadKnowledge, latest: null };
+window.Hearth = { el, shown, badge, reason, command, api, session, root, loadKnowledge, ago, latest: null };
 
 theme();
 defaultView();

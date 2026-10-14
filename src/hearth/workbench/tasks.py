@@ -316,7 +316,8 @@ def _command(args: argparse.Namespace) -> int:
     if args.task_command == "new":
         return _new(args)
     if args.task_command == "list":
-        tasks = [_read(path.parent) for path in sorted(_home().glob("tasks/*/task.json"), reverse=True)]
+        tasks = [task for task in (_read(path.parent) for path in sorted(_home().glob("tasks/*/task.json"), reverse=True))
+                 if task.get("kind") != "session"]
         if args.json:
             print(json.dumps(dashboard_tasks()))
         for task in [] if args.json else tasks:
@@ -506,18 +507,7 @@ def _new(args: argparse.Namespace) -> int:
     worktree = _home() / "worktrees" / args.project / task_id
     task_dir.mkdir(parents=True)
     _git(repo, "worktree", "add", "-q", "-b", f"hearth/{task_id}", str(worktree), base)
-    copied = []  # Untracked files the agent needs; kept out of checkpoint commits.
-    for name in GUIDANCE + [".venv"]:
-        source = repo / name
-        if source.exists() and not (worktree / name).exists():
-            copied.append(name)
-            if name == ".venv":
-                (worktree / name).symlink_to(source)  # ponytail: shared virtualenv; a per-task one if runs install packages.
-            elif source.is_dir():
-                shutil.copytree(source, worktree / name)
-            else:
-                (worktree / name).parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(source, worktree / name)
+    copied = _copy_local(repo, worktree)
     attached = []
     for path in map(Path, args.attach):
         (worktree / ".hearth/attachments").mkdir(parents=True, exist_ok=True)
@@ -1309,7 +1299,8 @@ def _approve_proposal(task: dict, task_dir: Path, number: int) -> int:
 
 def _resolve(name: str) -> Path | None:
     """A task directory from "last", a full task ID, or a unique ending of one, the way gh accepts short references."""
-    tasks = sorted(path.parent for path in _home().glob("tasks/*/task.json"))
+    tasks = sorted(path.parent for path in _home().glob("tasks/*/task.json")
+                   if json.loads(path.read_text(encoding="utf-8")).get("kind") != "session")  # Sessions are the app's (ADR-0041).
     if name == "last":
         return tasks[-1] if tasks else None
     matches = [path for path in tasks if path.name == name] or [path for path in tasks if path.name.endswith(name)]
@@ -1724,7 +1715,8 @@ def _busy(kind: str) -> int:
     count = 0
     for path in _home().glob("tasks/*/task.json"):
         other = _read(path.parent)
-        if other["status"] == "running" and other["runs"] and (other["runs"][-1]["role"] in IMPLEMENT_ROLES) == (kind == "implement"):
+        implementing = other["runs"] and (other["runs"][-1]["role"] in IMPLEMENT_ROLES or other.get("session", {}).get("mode") == "edit")
+        if other["status"] == "running" and other["runs"] and bool(implementing) == (kind == "implement"):
             count += 1
     return count
 
@@ -1903,7 +1895,7 @@ def dashboard_task_state(task_id: str, action: str) -> str | None:
     if action not in ("cancel", "answer", "approve-tests") or not TASK_ID.match(task_id) or not (task_dir / "task.json").exists():
         return None
     task = _read(task_dir)
-    if task["status"] in FINISHED:
+    if task["status"] in FINISHED or task.get("kind") == "session":
         return None
     state = f"{task['status']}:{len(task['runs'])}"
     if action == "cancel":
@@ -2017,8 +2009,11 @@ def _stop_pid(pid: int, identity: str | None) -> bool:
 
 def dashboard_tasks() -> dict:
     """Every task's summary, newest first, and slot use: what `task list --json` prints and the dashboard reads."""
-    tasks = [_read(path.parent) for path in sorted(_home().glob("tasks/*/task.json"), reverse=True)]
+    every = [_read(path.parent) for path in sorted(_home().glob("tasks/*/task.json"), reverse=True)]
+    tasks = [task for task in every if task.get("kind") != "session"]  # Sessions have their own view; their turns still count in the slots.
     return {"tasks": [_summary(task, _home() / "tasks" / task["id"]) for task in tasks],
+            # A reply in progress, even one a crashed backend left running, so an update refuses to start under it.
+            "sessions": [{"id": task["id"], "status": task["status"]} for task in every if task.get("kind") == "session" and task["status"] == "running"],
             "slots": {kind: {"limit": limit, "busy": _busy(kind)} for kind, limit in SLOTS.items()}}
 
 
@@ -2134,12 +2129,32 @@ def _discard(task: dict, task_dir: Path, apply: bool, discard_uncommitted: bool)
     return 0
 
 
+def _copy_local(repo: Path, worktree: Path) -> list[str]:
+    """Untracked files the agent needs, copied into a new worktree; kept out of checkpoint commits."""
+    copied = []
+    for name in GUIDANCE + [".venv"]:
+        source = repo / name
+        if source.exists() and not (worktree / name).exists():
+            copied.append(name)
+            if name == ".venv":
+                (worktree / name).symlink_to(source)  # ponytail: shared virtualenv; a per-task one if runs install packages.
+            elif source.is_dir():
+                shutil.copytree(source, worktree / name)
+            else:
+                (worktree / name).parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, worktree / name)
+    return copied
+
+
 def _repo(task: dict) -> Path:
     return Path(_projects()[task["project"]]["path"]).expanduser()
 
 
 # The task record's format, written into every record; a record from a newer Hearth is refused, never guessed at (ADR-0038).
-TASK_FORMAT = 1
+# Tasks are still written as format 1, which every earlier Hearth reads; sessions (ADR-0041) as format 2, so a Hearth from
+# before them refuses them instead of treating them as tasks.
+TASK_FORMAT = 2
+FORMATS = {"task": 1, "session": 2}
 
 
 class NewerTaskError(ValueError):
@@ -2173,7 +2188,7 @@ def _write(task_dir: Path, task: dict) -> None:
     if (task_dir / "cancel").exists():
         # A loop process holds this task in memory; whatever it writes after a cancel still records the cancel.
         task.update(status="cancelled", stop_reason="cancelled", cancelled=task.get("cancelled") or _now())
-    task["format"] = TASK_FORMAT
+    task["format"] = FORMATS[task.get("kind", "task")]
     temporary = task_dir / "task.json.tmp"
     temporary.write_text(json.dumps(task, indent=2) + "\n", encoding="utf-8")
     temporary.replace(task_dir / "task.json")

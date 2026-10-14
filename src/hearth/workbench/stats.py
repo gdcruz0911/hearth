@@ -19,7 +19,8 @@ def add_parser(subcommands: argparse._SubParsersAction) -> None:
 
 
 def run(args: argparse.Namespace) -> int:
-    tasks = [json.loads(path.read_text(encoding="utf-8")) for path in sorted((hearth_home() / "tasks").glob("*/task.json"))]
+    tasks = [task for task in (json.loads(path.read_text(encoding="utf-8")) for path in sorted((hearth_home() / "tasks").glob("*/task.json")))
+             if task.get("kind") != "session"]  # Conversation turns are not task runs.
     report = {"rows": rows(tasks), "summary": summary(tasks), "usage": _usage()}
     if args.json:
         print(json.dumps(report))

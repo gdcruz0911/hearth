@@ -564,3 +564,12 @@ class UpdateTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BusyTests(unittest.TestCase):
+    def test_a_reply_in_progress_refuses_the_update(self) -> None:
+        listed = subprocess.CompletedProcess([], 0, json.dumps({"tasks": [], "sessions": [{"id": "20261013-194251", "status": "running"}]}), "")
+        with tempfile.TemporaryDirectory() as folder, mock.patch.object(update.subprocess, "run", return_value=listed):
+            (found,) = update._busy(Path(folder))
+        self.assertIn("conversation 20261013-194251 has a reply in progress", found)
+

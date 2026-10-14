@@ -265,6 +265,9 @@ def _busy(home: Path) -> list[str]:
         if task["status"] in ("running", "queued", "waiting"):
             reason = f" ({task['stop_reason']})" if task.get("stop_reason") else ""
             found.append(f"- task {task['id']} is {task['status']}{reason}. Next: let it finish, answer it, or hearth task cancel {task['id']}")
+    for session in json.loads(listed.stdout).get("sessions", []):
+        found.append(f"- conversation {session['id']} has a reply in progress. Next: stop it in Hearth's Sessions view, "
+                     "or open and quit Hearth, which stops a reply a crash left running")
     for record in sorted(home.glob("tasks/*/resume.json")):
         if _alive(json.loads(record.read_text(encoding="utf-8")).get("pid")):  # A reused ID refuses more, never less.
             found.append(f"- task {record.parent.name} is being continued in its own process. Next: let it finish")

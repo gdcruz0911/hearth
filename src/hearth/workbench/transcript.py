@@ -74,6 +74,9 @@ def _claude(event: dict) -> list[dict]:
         return [{"kind": "start", "text": f"Session started on {event.get('model') or 'an unreported model'}."}]
     if kind == "result":
         return [{"kind": "result", "text": event.get("result"), "error": bool(event.get("is_error"))}]
+    if kind == "stream_event":  # --include-partial-messages: text as it arrives, replaced by the whole message when it lands.
+        delta = (event.get("event") or {}).get("delta") or {}
+        return [{"kind": "delta", "text": delta["text"]}] if delta.get("type") == "text_delta" and delta.get("text") else []
     items = []
     for part in ((event.get("message") or {}).get("content") or []) if kind in ("assistant", "user") else []:
         if not isinstance(part, dict):

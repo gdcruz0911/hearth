@@ -206,7 +206,7 @@ class TaskTests(TaskTestCase):
         self.cli("task", "new", "demo", "Add hello.txt", "--model", "fake-model")
         task = self.only_task()
         path = self.home / ".hearth/tasks" / task["id"] / "task.json"
-        self.assertEqual(task["format"], tasks.TASK_FORMAT)
+        self.assertEqual(task["format"], 1)  # Tasks stay readable by every earlier Hearth.
         path.write_text(json.dumps({**task, "format": tasks.TASK_FORMAT + 1}), encoding="utf-8")
         output, errors = io.StringIO(), io.StringIO()
 
