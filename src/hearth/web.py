@@ -119,9 +119,12 @@ class HearthWebApplication:
         workbench_diff: Callable[[str], Mapping[str, Any] | None] | None = None,
         workbench_task_state: Callable[[str, str], str | None] | None = None,
         workbench_task_action: Callable[[str, str, Mapping[str, str], str], Mapping[str, Any] | None] | None = None,
+        workbench_sessions: Any = None,
         rebuild_state: Path | None = None,
     ):
         self._service = service
+        # ADR-0041: direct sessions (listing, detail, create, send, stop, SessionError); sends and stops need no preview.
+        self._workbench_sessions = workbench_sessions
         self._rebuild_state = rebuild_state  # ~/.hearth/rebuild.json, so a crash mid-rebuild is reported (ADR-0038); None in tests.
         self._semantic_index_thread: threading.Thread | None = None
         self._rebuild_claim = None  # rebuild.lock, held exclusively while this backend's rebuild owns the record.
@@ -172,6 +175,8 @@ class HearthWebApplication:
             # A missing or null Origin is refused too, so another site cannot make the person's browser post here.
             return self._json_error(HTTPStatus.FORBIDDEN, "Hearth accepts changes only from its own page.")
         try:
+            if relative_path == "api/sessions" or relative_path.startswith("api/sessions/"):
+                return self._conversation(method, relative_path, body)
             if method == "GET":
                 return self._get(relative_path)
             if method == "POST" and relative_path.startswith("api/tasks/"):
@@ -237,6 +242,8 @@ class HearthWebApplication:
             return self._asset("dashboard.js", "application/javascript; charset=utf-8")
         if relative_path == "assets/hub.js":
             return self._asset("hub.js", "application/javascript; charset=utf-8")
+        if relative_path == "assets/sessions.js":
+            return self._asset("sessions.js", "application/javascript; charset=utf-8")
         if relative_path == "assets/knowledge.js":
             return self._asset("knowledge.js", "application/javascript; charset=utf-8")
         if relative_path == "api/health":
@@ -330,6 +337,29 @@ class HearthWebApplication:
             if not preview_id or "/" in preview_id:
                 return self._not_found()
             return self._apply(preview_id)
+        return self._not_found()
+
+    def _conversation(self, method: str, relative_path: str, body: bytes) -> _WebResponse:
+        sessions = self._workbench_sessions
+        if sessions is None:
+            return self._json_error(HTTPStatus.NOT_FOUND, "The workbench is not connected to this interface.")
+        parts = relative_path.split("/")[2:]
+        payload = _json_body(body) if method == "POST" else {}
+        text = lambda key: payload.get(key) if isinstance(payload.get(key), str) else None  # noqa: E731
+        try:
+            if method == "GET" and not parts:
+                return self._json_response(sessions.listing())
+            if method == "GET" and len(parts) == 1:
+                return self._json_response({"session": sessions.detail(parts[0])})
+            if method == "POST" and not parts:
+                return self._json_response({"session": sessions.create(text("project"), text("provider"), text("mode"), text("model"),
+                                                                       text("effort"), text("request"))})
+            if method == "POST" and len(parts) == 2 and parts[1] == "send":
+                return self._json_response({"session": sessions.send(parts[0], text("message"), text("send"))})
+            if method == "POST" and len(parts) == 2 and parts[1] == "stop":
+                return self._json_response({"session": sessions.stop(parts[0], text("run"))})
+        except sessions.SessionError as exc:
+            return self._json_error(HTTPStatus(exc.status), str(exc))
         return self._not_found()
 
     def _task_action(self, relative_path: str, body: bytes, session: str) -> _WebResponse:

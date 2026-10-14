@@ -1,0 +1,346 @@
+"""Direct sessions (ADR-0041): create, send, resume, stop, recover, and the guards that keep them out of task commands."""
+
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
+from unittest import mock
+
+from hearth.workbench import sessions, stats, tasks, transcript
+from test_tasks import TaskTestCase
+
+# A stand-in for both CLIs: it logs how it was called, then prints that CLI's events. FAKE_SESSION picks the
+# scenario: reply (default), hang (some partial text, then waits to be stopped), or fail.
+FAKE = r'''
+import json, os, re, sys, time
+from pathlib import Path
+codex = Path(sys.argv[0]).name == "codex"
+prompt = sys.stdin.read()
+scenario = os.environ.get("FAKE_SESSION", "reply")
+with open(Path.home() / ".fake-session-calls.jsonl", "a") as log:
+    log.write(json.dumps({"argv": sys.argv[1:], "cwd": os.getcwd(), "prompt": prompt, "codex_home": os.environ.get("CODEX_HOME")}) + "\n")
+def emit(event):
+    print(json.dumps(event), flush=True)
+args = sys.argv[1:]
+model = args[args.index("-m" if codex else "--model") + 1] if ("-m" if codex else "--model") in args else None
+if scenario == "fail":
+    print("Not logged in. Run login.", file=sys.stderr)
+    sys.exit(1)
+if codex:
+    thread = args[args.index("resume") + 1] if "resume" in args else "thread-0001"
+    sandbox = args[args.index("--sandbox") + 1] if "--sandbox" in args else next(
+        (re.match(r'sandbox_mode="(.*)"', value).group(1) for value in args if value.startswith("sandbox_mode=")), None)
+    emit({"type": "thread.started", "thread_id": thread})
+    rollout = Path(os.environ["CODEX_HOME"]) / "sessions/2026/10/13" / f"rollout-2026-10-13T00-00-00-{thread}.jsonl"
+    rollout.parent.mkdir(parents=True, exist_ok=True)
+    with rollout.open("a") as file:
+        file.write(json.dumps({"type": "turn_context", "payload": {"model": model or "gpt-default", "sandbox_policy": {"type": sandbox}}}) + "\n")
+    if scenario == "hang":
+        time.sleep(60)
+    emit({"type": "item.completed", "item": {"type": "agent_message", "text": "Hello from codex"}})
+    emit({"type": "turn.completed", "usage": {}})
+else:
+    session = args[args.index("--resume") + 1] if "--resume" in args else "claude-session-1"
+    print('[claude-code:unrecognized_model] {"model":"%s"}' % model, file=sys.stderr, flush=True)
+    emit({"type": "system", "subtype": "init", "model": model, "session_id": session})
+    emit({"type": "stream_event", "event": {"type": "content_block_delta", "delta": {"type": "text_delta", "text": "Hel"}}, "session_id": session})
+    if scenario == "hang":
+        time.sleep(60)
+    emit({"type": "stream_event", "event": {"type": "content_block_delta", "delta": {"type": "text_delta", "text": "lo"}}, "session_id": session})
+    emit({"type": "assistant", "message": {"content": [{"type": "text", "text": "Hello"}]}, "session_id": session})
+    emit({"type": "result", "result": "Hello", "is_error": False, "session_id": session})
+'''
+
+
+class SessionTestCase(TaskTestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        bin_dir = self.home / "bin"
+        bin_dir.mkdir()
+        for name in ("claude", "codex"):
+            (bin_dir / name).write_text(f"#!{sys.executable}\n{FAKE}", encoding="utf-8")
+            (bin_dir / name).chmod(0o755)
+        # The real templates with only the program replaced, so the resume and partial-message edits act on the real flags.
+        # The tables are restored by the parent's patches.
+        for table, real in ((tasks.PROVIDERS, PROVIDERS), (tasks.REVIEWERS, REVIEWERS)):
+            for name in ("claude", "codex"):
+                table[name] = [str(bin_dir / name), *real[name][1:]]
+        self.write_projects(check="true", providers=("claude", "codex", "antigravity"))
+
+    def tearDown(self) -> None:
+        sessions.stop_all()  # Before the folder goes, so every turn records its end in it.
+        super().tearDown()
+
+    def calls(self) -> list[dict]:
+        path = self.home / ".fake-session-calls.jsonl"
+        return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()] if path.exists() else []
+
+    def new(self, provider: str = "claude", mode: str = "edit", model: str | None = "fake-model") -> str:
+        return sessions.create("demo", provider, mode, model, "medium", f"request-{provider}-{mode}-{time.time_ns()}")["id"]
+
+    def settled(self, session_id: str) -> dict:
+        for _ in range(200):
+            detail = sessions.detail(session_id)
+            if detail["turns"] and detail["turns"][-1]["finished"]:
+                return detail
+            time.sleep(0.05)
+        self.fail("The turn did not finish.")
+
+    def started(self, session_id: str) -> None:
+        events = lambda: sorted((self.home / ".hearth/tasks" / session_id / "runs").glob("*/events.jsonl"))[-1]  # noqa: E731
+        for _ in range(200):
+            if events().stat().st_size:
+                return
+            time.sleep(0.05)
+        self.fail("The turn wrote nothing.")
+
+
+PROVIDERS, REVIEWERS = dict(tasks.PROVIDERS), dict(tasks.REVIEWERS)  # Taken at import, before any test patches the tables.
+
+
+class SessionTests(SessionTestCase):
+    def test_starting_a_conversation_runs_nothing_and_the_same_request_makes_one(self) -> None:
+        first = sessions.create("demo", "claude", "edit", None, "medium", "request-0001")
+        again = sessions.create("demo", "claude", "edit", None, "medium", "request-0001")
+
+        self.assertEqual(first["id"], again["id"])
+        self.assertEqual(self.calls(), [])
+        self.assertIsNone(first["status"])
+        record = self.only_task()
+        self.assertEqual((record["kind"], record["runs"], record["session"]["model"]), ("session", [], "claude-sonnet-5-5"))
+        self.assertTrue(Path(record["worktree"], "README.md").exists())
+
+    def test_a_turn_streams_partial_text_and_records_the_reported_model_and_warning(self) -> None:
+        session_id = self.new()
+        sessions.send(session_id, "Say hello", "send-0001")
+        turn = self.settled(session_id)["turns"][0]
+
+        (call,) = self.calls()
+        self.assertIn("--include-partial-messages", call["argv"])
+        self.assertEqual(call["prompt"], "Say hello")  # On stdin, never in the argument list.
+        self.assertNotIn("Say hello", call["argv"])
+        self.assertEqual((turn["outcome"], turn["model"], turn["model_used"]), ("done", "fake-model", "fake-model"))
+        self.assertIn("unrecognized_model", turn["warnings"][0])
+        items = transcript.read(session_id, turn["dir"], 0)["items"]
+        self.assertEqual([item["text"] for item in items if item["kind"] in ("delta", "message")], ["Hel", "lo", "Hello"])
+        self.assertEqual(sessions.detail(session_id)["status"], "done")
+
+    def test_the_second_turn_resumes_claude_with_the_same_restrictions(self) -> None:
+        session_id = self.new(mode="read")
+        sessions.send(session_id, "One", "send-0001")
+        self.settled(session_id)
+        sessions.send(session_id, "Two", "send-0002")
+        self.settled(session_id)
+
+        first, second = self.calls()
+        self.assertEqual(second["argv"][:2], ["--resume", "claude-session-1"])
+        self.assertEqual(second["argv"][2:], first["argv"])  # Same tools, settings, and model; only the resume is added.
+        self.assertIn("Read,Grep,Glob", second["argv"])
+
+    def test_codex_resumes_with_the_sandbox_through_config_and_reports_its_recorded_model(self) -> None:
+        session_id = self.new("codex", "read", model=None)
+        sessions.send(session_id, "One", "send-0001")
+        self.settled(session_id)
+        sessions.send(session_id, "Two", "send-0002")
+        turns = self.settled(session_id)["turns"]
+
+        first, second = self.calls()
+        self.assertEqual(first["argv"][first["argv"].index("--sandbox") + 1], "read-only")
+        self.assertEqual(second["argv"][:3], ["exec", "resume", "thread-0001"])
+        self.assertNotIn("--sandbox", second["argv"])
+        self.assertIn('sandbox_mode="read-only"', second["argv"])
+        self.assertEqual(second["codex_home"], str(self.home / ".hearth/tasks" / session_id / "codex-home"))
+        self.assertEqual([(turn["model"], turn["model_used"], turn["sandbox_used"]) for turn in turns],
+                         [("gpt-6-sol", "gpt-6-sol", "read-only")] * 2)
+
+    def test_codex_says_not_reported_when_its_session_record_is_missing(self) -> None:
+        self.assertEqual(sessions._codex_context(self.home, "thread-none"), (None, None))
+        self.assertEqual(sessions._codex_context(self.home, None), (None, None))
+
+    def test_a_retried_send_starts_the_turn_once(self) -> None:
+        session_id = self.new()
+        sessions.send(session_id, "Say hello", "send-0001")
+        sessions.send(session_id, "Say hello", "send-0001")
+        self.settled(session_id)
+        sessions.send(session_id, "Say hello", "send-0001")
+
+        self.assertEqual(len(self.calls()), 1)
+        self.assertEqual(len(sessions.detail(session_id)["turns"]), 1)
+
+    def test_a_new_message_while_a_turn_runs_is_refused(self) -> None:
+        os.environ["FAKE_SESSION"] = "hang"
+        session_id = self.new()
+        sessions.send(session_id, "Wait", "send-0001")
+
+        with self.assertRaises(sessions.SessionError) as refused:
+            sessions.send(session_id, "Another", "send-0002")
+        self.assertEqual(refused.exception.status, 409)
+
+    def test_stop_keeps_the_partial_reply_and_leaves_no_process(self) -> None:
+        os.environ["FAKE_SESSION"] = "hang"
+        session_id = self.new()
+        sessions.send(session_id, "Wait", "send-0001")
+        self.started(session_id)
+        pid = tasks._read(self.home / ".hearth/tasks" / session_id)["runs"][-1]["pid"]
+
+        sessions.stop(session_id, "01-session-claude")
+        again = sessions.stop(session_id, "01-session-claude")  # Stopping twice is harmless.
+
+        turn = sessions.detail(session_id)["turns"][0]
+        self.assertEqual((turn["outcome"], turn["stopped_by"], again["status"]), ("cancelled", "keeper", "cancelled"))
+        self.assertFalse(tasks._alive(pid))
+        items = transcript.read(session_id, turn["dir"], 0)["items"]
+        self.assertIn({"kind": "delta", "text": "Hel"}, items)
+        self.assertEqual(self.only_task()["status"], "done")  # Ready for the next message, and never blocks an update.
+
+    def test_quitting_stops_the_active_turn(self) -> None:
+        os.environ["FAKE_SESSION"] = "hang"
+        session_id = self.new()
+        sessions.send(session_id, "Wait", "send-0001")
+        self.started(session_id)
+
+        sessions.stop_all()
+
+        turn = sessions.detail(session_id)["turns"][0]
+        self.assertEqual((turn["outcome"], turn["stopped_by"]), ("cancelled", "quit"))
+        self.assertEqual(sessions._active, {})
+
+    def test_recovery_stops_a_turn_left_by_a_crashed_backend_and_never_resends(self) -> None:
+        session_id = self.new()
+        task_dir = self.home / ".hearth/tasks" / session_id
+        orphan = self.orphan()
+        task = tasks._read(task_dir)
+        task["status"] = "running"
+        task["runs"].append({"dir": "01-session-claude", "role": "session", "provider": "claude", "model": "fake-model", "started": tasks._now(),
+                             "finished": None, "pid": orphan, "pid_identity": tasks._identity(orphan), "send_id": "send-0001", "message": "Hi"})
+        (task_dir / "runs/01-session-claude").mkdir(parents=True)
+        tasks._write(task_dir, task)
+
+        sessions.recover()
+
+        self.assertEqual(sessions.detail(session_id)["turns"][0]["outcome"], "interrupted")
+        self.assertFalse(tasks._alive(orphan))
+        self.assertEqual(self.calls(), [])
+        sessions.send(session_id, "Hi", "send-0001")  # A retry of the interrupted send returns it, and is not run again.
+        self.assertEqual(self.calls(), [])
+
+    def orphan(self) -> int:
+        """A process whose parent has already exited, as a crashed backend's turn is, so the system reaps it."""
+        launcher = subprocess.run([sys.executable, "-c", "import subprocess, sys; print(subprocess.Popen([sys.executable, '-c', "
+                                   "'import time; time.sleep(60)'], start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).pid)"],
+                                  capture_output=True, text=True, check=True)
+        pid = int(launcher.stdout)
+        self.addCleanup(lambda: tasks._alive(pid) and os.kill(pid, 9))
+        return pid
+
+    def test_recovery_leaves_a_turn_another_running_backend_owns(self) -> None:
+        session_id, turn, owner = self.new(), self.orphan(), self.orphan()
+        task_dir = self.home / ".hearth/tasks" / session_id
+        task = tasks._read(task_dir)
+        task["status"] = "running"
+        task["runs"].append({"dir": "01-session-claude", "role": "session", "provider": "claude", "model": "fake-model", "started": tasks._now(),
+                             "finished": None, "pid": turn, "pid_identity": tasks._identity(turn), "owner": owner,
+                             "owner_identity": tasks._identity(owner), "send_id": "send-0001", "message": "Hi"})
+        (task_dir / "runs/01-session-claude").mkdir(parents=True)
+        tasks._write(task_dir, task)
+
+        sessions.recover()
+        self.assertTrue(tasks._alive(turn))
+        self.assertEqual(tasks.dashboard_tasks()["sessions"], [{"id": session_id, "status": "running"}])  # An update sees it.
+
+        os.kill(owner, 9)
+        for _ in range(50):
+            if not tasks._alive(owner):
+                break
+            time.sleep(0.1)
+        sessions.recover()
+        self.assertFalse(tasks._alive(turn))
+        self.assertEqual(sessions.detail(session_id)["turns"][0]["outcome"], "interrupted")
+        self.assertEqual(tasks.dashboard_tasks()["sessions"], [])
+
+    def test_a_failed_turn_keeps_the_cli_error(self) -> None:
+        os.environ["FAKE_SESSION"] = "fail"
+        session_id = self.new()
+        sessions.send(session_id, "Hi", "send-0001")
+        turn = self.settled(session_id)["turns"][0]
+
+        self.assertEqual((turn["outcome"], turn["error"]), ("failed", "Not logged in. Run login."))
+
+    def test_requests_are_refused_with_what_to_do(self) -> None:
+        for arguments in (("elsewhere", "claude", "edit"), ("demo", "antigravity", "edit"), ("demo", "claude", "write")):
+            with self.subTest(arguments=arguments), self.assertRaises(sessions.SessionError):
+                sessions.create(*arguments, None, "medium", "request-0002")
+        session_id = self.new()
+        for message, send_id in (("", "send-0001"), ("Hi", "short"), ("x" * (sessions.MESSAGE_LIMIT + 1), "send-0001")):
+            with self.subTest(message=message[:10], send_id=send_id), self.assertRaises(sessions.SessionError):
+                sessions.send(session_id, message, send_id)
+        with self.assertRaises(sessions.SessionError) as missing:
+            sessions.detail("20260101-000000")
+        self.assertEqual(missing.exception.status, 404)
+
+    def test_an_editing_turn_takes_an_implement_slot_and_a_full_slot_refuses_the_send(self) -> None:
+        os.environ["FAKE_SESSION"] = "hang"
+        editing, reading = self.new(), self.new("codex", "read")
+        sessions.send(editing, "Wait", "send-0001")
+        sessions.send(reading, "Wait", "send-0001")
+
+        self.assertEqual((tasks._busy("implement"), tasks._busy("support")), (1, 1))
+        with mock.patch.dict(tasks.SLOTS, {"implement": 1}), self.assertRaises(sessions.SessionError) as full:
+            sessions.send(self.new(), "Wait", "send-0001")
+        self.assertIn("slots", str(full.exception))
+
+
+class ReleasedReaderTests(SessionTestCase):
+    RELEASE = "9372332"  # v0.3.0, the installed runtime before slice 1 and the version a rollback returns to.
+
+    def test_the_released_reader_refuses_a_session_without_changing_it_or_launching_anything(self) -> None:
+        session_id = self.new()
+        record = self.home / ".hearth/tasks" / session_id / "task.json"
+        before = record.read_bytes()
+        self.assertEqual(json.loads(before)["format"], 2)
+        released = self.home / "released"
+        released.mkdir()
+        archive = subprocess.run(["git", "-C", str(Path(__file__).parents[1]), "archive", self.RELEASE, "src"], capture_output=True)
+        self.assertEqual(archive.returncode, 0, f"commit {self.RELEASE} is needed; fetch the full history: {archive.stderr.decode()}")
+        subprocess.run(["tar", "-x", "-C", str(released)], input=archive.stdout, check=True)
+        environment = {**os.environ, "PYTHONPATH": str(released / "src"), "HOME": str(self.home), "PATH": f"{self.home / 'bin'}:/usr/bin:/bin"}
+
+        for command in (["task", "list"], ["task", "show", session_id], ["task", "cancel", session_id], ["loop", session_id]):
+            with self.subTest(command=command):
+                ran = subprocess.run([sys.executable, "-m", "hearth.cli", *command], capture_output=True, text=True, env=environment, timeout=120)
+                self.assertEqual(ran.returncode, 1, ran.stdout + ran.stderr)
+                self.assertIn("written by a newer Hearth", ran.stderr)
+        self.assertEqual(record.read_bytes(), before)
+        self.assertFalse((record.parent / "cancel").exists())
+        self.assertEqual(self.calls(), [])  # The fake CLIs on PATH were never started.
+
+
+class SessionGuardTests(SessionTestCase):
+    def test_task_commands_dashboard_tasks_and_stats_leave_sessions_alone(self) -> None:
+        session_id = self.new()
+
+        self.assertIsNone(tasks._resolve(session_id))
+        self.assertIsNone(tasks._resolve("last"))
+        self.assertEqual(self.cli("task", "list")[1], "")
+        self.assertEqual(tasks.dashboard_tasks()["tasks"], [])
+        self.assertIsNone(tasks.dashboard_task_state(session_id, "cancel"))
+        self.assertEqual(json.loads(self.cli("stats", "--json")[1])["summary"]["tasks"], 0)
+        with self.assertRaises(sessions.SessionError):
+            sessions.send(self.cli_task(), "Hi", "send-0001")
+
+    def cli_task(self) -> str:
+        os.environ["FAKE_AGENT_SCENARIO"] = "edit"
+        with mock.patch.dict(tasks.PROVIDERS, {"claude": __import__("test_tasks").FAKE_AGENT}):
+            self.cli("task", "new", "demo", "Add hello.txt", "--model", "fake-model")
+        return next(task["id"] for task in tasks.dashboard_tasks()["tasks"])
+
+
+class TranscriptDeltaTests(SessionTestCase):
+    def test_only_text_deltas_become_items(self) -> None:
+        self.assertEqual(transcript._claude({"type": "stream_event", "event": {"delta": {"type": "text_delta", "text": "Hi"}}}),
+                         [{"kind": "delta", "text": "Hi"}])
+        self.assertEqual(transcript._claude({"type": "stream_event", "event": {"delta": {"type": "input_json_delta", "partial_json": "{"}}}), [])

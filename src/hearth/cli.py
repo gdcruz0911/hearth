@@ -46,7 +46,7 @@ from .runtime import (
 from .service import HearthService
 from .store import NewerDatabaseError, SQLiteStore, current_database_problem
 from .web import HearthWebServer, _document_payload
-from .workbench import ask, evals, google, stats, tasks, transcript, usage
+from .workbench import ask, evals, google, sessions, stats, tasks, transcript, usage
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -403,7 +403,7 @@ def _run(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
                                      workbench_tasks=tasks.dashboard_tasks,
                                      workbench_transcript=transcript.read, workbench_diff=transcript.diff,
                                      workbench_task_state=tasks.dashboard_task_state, workbench_task_action=tasks.dashboard_action,
-                                     rebuild_state=hearth_home() / "rebuild.json")
+                                     workbench_sessions=sessions, rebuild_state=hearth_home() / "rebuild.json")
             # A desktop shell stops its backend with SIGTERM: finish the current request, then shut down as Ctrl+C does.
             signal.signal(signal.SIGTERM, lambda signum, frame: server.request_stop())
             if args.desktop:
@@ -422,12 +422,16 @@ def _run(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
                 print("It is bound to 127.0.0.1 only. Press Ctrl+C to stop it.", flush=True)
                 if not args.no_open:
                     server.open_browser()
+            # A turn a crashed backend left running is stopped and marked interrupted, never resent; in the background, since
+            # stopping one can take seconds and the app is waiting for this backend.
+            threading.Thread(target=sessions.recover, daemon=True).start()
             try:
                 server.serve_forever()
             except KeyboardInterrupt:
                 pass
             finally:
                 signal.signal(signal.SIGTERM, signal.SIG_IGN)  # A second SIGTERM must not cut short the wait for a rebuild.
+                sessions.stop_all()  # ADR-0041: quitting stops the app's direct turns; delegated tasks carry on.
                 print("\nHearth web interface stopped.", flush=True)
                 server.close()
         elif args.command == "evaluate":

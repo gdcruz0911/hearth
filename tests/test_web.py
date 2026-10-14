@@ -15,6 +15,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import types
 import threading
 import time
 import unittest
@@ -496,6 +497,43 @@ class WorkbenchTasksEndpointTests(unittest.TestCase):
 
         self.assertEqual((ok.status, calls), (200, ["20260930-120000"]))
         self.assertEqual((bad.status, unknown.status), (400, 404))
+
+
+class SessionEndpointTests(unittest.TestCase):
+    """ADR-0041: sends and stops go straight to the sessions module, behind the same session, token, and Origin checks."""
+
+    def setUp(self) -> None:
+        self.temporary_directory = tempfile.TemporaryDirectory()
+        self.service = HearthService(Path(self.temporary_directory.name) / "hearth.sqlite")
+        self.addCleanup(self.temporary_directory.cleanup)
+        self.addCleanup(self.service.close)
+
+    def test_routes_reach_the_sessions_module_and_refusals_keep_their_status(self) -> None:
+        class Refused(Exception):
+            def __init__(self, message: str, status: int) -> None:
+                super().__init__(message)
+                self.status = status
+
+        calls = []
+        def send(*args):
+            calls.append(("send", *args))
+            raise Refused("A turn is still running.", 409)
+        fake = types.SimpleNamespace(SessionError=Refused, listing=lambda: {"sessions": []}, detail=lambda id: {"id": id},
+                                     create=lambda *args: calls.append(("create", *args)) or {"id": "s"}, send=send,
+                                     stop=lambda *args: calls.append(("stop", *args)) or {"id": "s"})
+        app = HearthWebApplication(self.service, "token", workbench_sessions=fake)
+        ask = signed_in(app)
+
+        listed = ask("GET", "/api/sessions")
+        created = ask("POST", "/api/sessions", b'{"project": "demo", "provider": "claude", "mode": "edit", "request": "r1234567"}')
+        busy = ask("POST", "/api/sessions/s/send", b'{"message": "Hi", "send": "send-0001"}')
+        stopped = ask("POST", "/api/sessions/s/stop", b'{"run": "01-session-claude"}')
+        elsewhere = app.respond("POST", "/api/sessions/s/stop", b"{}", {**ask.headers, "Origin": "http://example.test"})
+
+        self.assertEqual([listed.status, created.status, busy.status, stopped.status, elsewhere.status], [200, 200, 409, 200, 403])
+        self.assertEqual(json.loads(busy.body)["error"], "A turn is still running.")
+        self.assertEqual(calls, [("create", "demo", "claude", "edit", None, None, "r1234567"), ("send", "s", "Hi", "send-0001"),
+                                 ("stop", "s", "01-session-claude")])
 
 
 class SlowCleanupIndex(BlockingRelationshipIndex):

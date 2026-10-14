@@ -9,12 +9,14 @@
     <script defer src="assets/dashboard.js"></script>
     <script defer src="assets/hub.js"></script>
     <script defer src="assets/knowledge.js"></script>
+    <script defer src="assets/sessions.js"></script>
   </head>
   <body>
     <div class="app">
       <aside class="side">
         <h1 class="brand"><span class="ember-dot" aria-hidden="true"></span>Hearth</h1>
         <nav aria-label="Views">
+          <a class="nav-item" href="#/sessions" data-view="sessions">Sessions</a>
           <a class="nav-item" href="#/hub" data-view="hub">Hub</a>
           <a class="nav-item" href="#/tasks" data-view="tasks">Tasks</a>
           <a class="nav-item" href="#/knowledge" data-view="knowledge">Knowledge</a>
@@ -25,6 +27,8 @@
         <div class="settings">
           <label class="setting">Open on
             <select id="default-view">
+              <option value="last">Last view</option>
+              <option value="sessions">Sessions</option>
               <option value="hub">Hub</option>
               <option value="tasks">Tasks</option>
               <option value="knowledge">Knowledge</option>
@@ -35,6 +39,69 @@
       </aside>
       <main class="main">
         <p id="status" class="status" role="status" aria-live="polite" hidden></p>
+
+        <div id="convo-view" class="view sessions-view" data-view="sessions" hidden>
+          <div class="sessions-layout">
+            <nav class="task-list" aria-label="Conversations">
+              <div class="section-head">
+                <h2>Sessions</h2>
+                <a id="convo-new" class="btn primary small" href="#/sessions/new">New</a>
+              </div>
+              <ul id="convo-cards" class="cards"></ul>
+            </nav>
+            <article class="convo-main">
+              <form id="convo-form" class="convo-form" aria-labelledby="convo-form-heading" hidden>
+                <h2 id="convo-form-heading">New conversation</h2>
+                <p class="meta">Starting a conversation runs nothing; your first message starts the agent. Quitting Hearth stops a reply in progress and keeps the conversation.</p>
+                <label class="form-row">Project <select id="convo-project"></select></label>
+                <fieldset class="form-row">
+                  <legend>Agent</legend>
+                  <div id="convo-agents" class="choices"></div>
+                </fieldset>
+                <fieldset class="form-row">
+                  <legend>What it may do</legend>
+                  <div class="choices">
+                    <label class="choice"><input type="radio" name="convo-mode" value="edit" checked><span>Edit files in its own worktree</span></label>
+                    <label class="choice"><input type="radio" name="convo-mode" value="read"><span>Read only</span></label>
+                  </div>
+                </fieldset>
+                <div class="form-pair">
+                  <label class="form-row">Model <input id="convo-model" type="text" autocomplete="off" spellcheck="false" aria-describedby="convo-model-help"></label>
+                  <label class="form-row">Effort
+                    <select id="convo-effort"><option value="low">low</option><option value="medium" selected>medium</option><option value="high">high</option></select>
+                  </label>
+                </div>
+                <p id="convo-model-help" class="meta">Hearth asks the CLI for this model and shows what the CLI reports for each reply. Model and effort stay fixed for the conversation.</p>
+                <p id="convo-form-error" class="status error" role="alert" hidden></p>
+                <div class="form-actions">
+                  <button id="convo-start" class="btn primary" type="submit">Start conversation</button>
+                  <button id="convo-cancel" class="btn" type="button">Cancel</button>
+                </div>
+              </form>
+              <div id="convo-pane" class="convo-pane" hidden>
+                <header class="convo-head">
+                  <div class="row-top"><h2 id="convo-title" class="task-goal"></h2><span id="convo-badge"></span></div>
+                  <p id="convo-meta" class="convo-meta"></p>
+                  <p class="convo-fixed meta">Model and effort are fixed for this conversation. For others, <a href="#/sessions/new">start a new conversation</a>; it begins without this one's context.</p>
+                </header>
+                <div id="convo-scroll" class="convo-scroll">
+                  <ol id="convo-log" class="convo-log" aria-label="Conversation"></ol>
+                </div>
+                <form id="convo-composer" class="composer">
+                  <label for="convo-message" class="visually-hidden">Message</label>
+                  <textarea id="convo-message" rows="3"></textarea>
+                  <p id="convo-send-error" class="status error" role="alert" hidden></p>
+                  <div class="composer-bar">
+                    <span id="convo-hint" class="meta"></span>
+                    <button id="convo-stop" class="btn stop" type="button" hidden>Stop</button>
+                    <button id="convo-send" class="btn primary" type="submit" disabled>Send</button>
+                  </div>
+                </form>
+                <p id="convo-status" class="visually-hidden" role="status" aria-live="polite"></p>
+              </div>
+            </article>
+          </div>
+        </div>
 
         <div class="view hub-view" data-view="hub" hidden>
           <div id="hub-stage" class="hub-stage" aria-label="How projects, tasks, agents, and knowledge connect">
