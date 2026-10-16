@@ -45,7 +45,7 @@ def check(condition: bool, what: str) -> None:
 
 class Rehearsal:
     def __init__(self, ref: str) -> None:
-        self.ref = subprocess.run(["git", "-C", str(REPO), "rev-parse", ref], capture_output=True, text=True, check=True).stdout.strip()
+        self.ref = subprocess.run(["git", "-C", str(REPO), "rev-parse", "--verify", f"{ref}^{{commit}}"], capture_output=True, text=True, check=True).stdout.strip()
         stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
         self.scratch = Path.home() / f"hearth-rehearsal-{stamp}"
         self.home, self.data, self.root = self.scratch / "hearth", self.scratch / "data", self.scratch / "runtime"

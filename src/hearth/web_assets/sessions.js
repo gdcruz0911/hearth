@@ -163,6 +163,10 @@
       el("span", "", `${agent(session.provider)} · ${session.model || "CLI default"} · ${session.effort} effort`),
       el("span", "", session.mode === "edit" ? "Edits its own worktree" : "Read only"),
       el("span", "id", session.worktree));
+    const commands = $("convo-commands");
+    commands.replaceChildren(el("span", "", session.commands?.description || "Command permissions not reported."));
+    if (session.commands?.check) commands.append(" ", el("code", "", session.commands.check), " may run.");
+    commands.append(" Hearth cannot approve extra commands here.");
     $("convo-badge").replaceChildren(session.status ? badge(session.status) : el("span", "badge other", "new"));
     const log = $("convo-log");
     if (!session.turns.length && !log.children.length) {
