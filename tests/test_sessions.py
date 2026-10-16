@@ -103,6 +103,27 @@ PROVIDERS, REVIEWERS = dict(tasks.PROVIDERS), dict(tasks.REVIEWERS)  # Taken at 
 
 
 class SessionTests(SessionTestCase):
+    def test_command_guidance_matches_the_cli_and_mode_before_the_first_turn(self) -> None:
+        check = "python -m unittest discover -s tests"
+        self.write_projects(check=check, providers=("claude", "codex"))
+        for provider, mode in (("claude", "edit"), ("claude", "read"), ("codex", "edit"), ("codex", "read")):
+            with self.subTest(provider=provider, mode=mode):
+                commands = sessions.detail(self.new(provider, mode))["commands"]
+                self.assertEqual(commands["check"], check if (provider, mode) == ("claude", "edit") else None)
+                if provider == "codex":
+                    self.assertIn("workspace-write" if mode == "edit" else "read-only", commands["description"])
+                elif mode == "read":
+                    self.assertIn("Shell commands are unavailable", commands["description"])
+        self.assertEqual(self.calls(), [])
+
+    def test_command_guidance_uses_the_same_fallback_check_as_launch(self) -> None:
+        self.write_projects(check="")
+        session_id = self.new()
+        self.assertEqual(sessions.detail(session_id)["commands"]["check"], "true")
+        sessions.send(session_id, "Say hello", "send-0001")
+        self.settled(session_id)
+        self.assertIn("Bash(true *)", self.calls()[0]["argv"])
+
     def test_starting_a_conversation_runs_nothing_and_the_same_request_makes_one(self) -> None:
         first = sessions.create("demo", "claude", "edit", None, "medium", "request-0001")
         again = sessions.create("demo", "claude", "edit", None, "medium", "request-0001")

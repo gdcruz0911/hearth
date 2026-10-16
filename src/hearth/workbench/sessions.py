@@ -210,6 +210,14 @@ def summary(task: dict, turns: bool = False) -> dict:
              "effort": task["session"]["effort"], "resumable": bool(task["session"]["cli_session"]), "turn_count": len(task["runs"]),
              "updated": (last or {}).get("finished") or (last or {}).get("started") or task["created"], "worktree": task["worktree"]}
     if turns:
+        if found["provider"] == "claude":
+            check = (tasks._projects().get(task["project"], {}).get("check") or "true") if found["mode"] == "edit" else None
+            description = "Only shell commands starting with" if check else "Read and search files only. Shell commands are unavailable."
+        else:
+            check = None
+            sandbox = "workspace-write" if found["mode"] == "edit" else "read-only"
+            description = f"Shell commands run within Codex's {sandbox} sandbox."
+        found["commands"] = {"description": description, "check": check}
         found["turns"] = [{key: run.get(key) for key in ("dir", "message", "model", "effort", "started", "finished", "outcome", "exit_code",
                                                           "model_used", "sandbox_used", "warnings", "error", "session_id", "resumed", "stopped_by")}
                           for run in task["runs"]]
