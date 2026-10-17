@@ -124,6 +124,10 @@ class SessionTests(SessionTestCase):
         self.settled(session_id)
         self.assertIn("Bash(true *)", self.calls()[0]["argv"])
 
+    def test_the_list_works_before_any_project_is_added(self) -> None:
+        (self.home / ".hearth/projects.json").unlink()
+        self.assertEqual(sessions.listing()["options"]["projects"], {})
+
     def test_starting_a_conversation_runs_nothing_and_the_same_request_makes_one(self) -> None:
         first = sessions.create("demo", "claude", "edit", None, "medium", "request-0001")
         again = sessions.create("demo", "claude", "edit", None, "medium", "request-0001")
@@ -425,10 +429,17 @@ class SessionWorkTests(SessionTestCase):
     def test_opening_the_work_folder_opens_only_the_folder_hearth_made(self) -> None:
         session_id = self.new()
         record = self.only_task()
-        with mock.patch.object(sessions.subprocess, "run") as run:
+        with mock.patch.object(sessions.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "", "")) as run:
             self.assertEqual(sessions.open_folder(session_id), {"opened": record["worktree"]})
         run.assert_called_once()
         self.assertEqual(run.call_args.args[0], ["open", record["worktree"]])
+
+        failed = subprocess.CompletedProcess([], 1, "", "LSOpenURLsWithRole() failed with error -10814.\n")
+        with mock.patch.object(sessions.subprocess, "run", return_value=failed), self.assertRaises(sessions.SessionError) as refused:
+            sessions.open_folder(session_id)
+        self.assertIn("could not open the work folder: LSOpenURLsWithRole() failed", str(refused.exception))
+        with mock.patch.object(sessions.subprocess, "run", side_effect=FileNotFoundError("open")), self.assertRaises(sessions.SessionError):
+            sessions.open_folder(session_id)
 
         task_dir = self.home / ".hearth/tasks" / session_id
         changed = json.loads((task_dir / "task.json").read_text(encoding="utf-8"))

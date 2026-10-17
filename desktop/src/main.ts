@@ -182,14 +182,14 @@ async function rebuildState(backend: Running): Promise<"running" | "idle" | "unk
   }
 }
 
-// ADR-0044: drafts typed just before quitting are saved before the backend stops. A page that never answers is waited on
-// for a few seconds, not forever, so a hung page cannot keep Hearth from quitting.
-async function flushDrafts(): Promise<void> {
+// ADR-0044: drafts typed just before quitting are saved before the backend stops. Whether they all were is the page's answer;
+// a failed save, or no answer within five seconds, counts as not saved, so the keeper is asked rather than losing the text.
+async function draftsSaved(): Promise<boolean> {
   const contents = window && !window.isDestroyed() ? window.webContents : null;
-  if (!contents) return;
+  if (!contents) return true;  // No page, so no text typed in one waits to be saved.
   const flushed = contents.executeJavaScript("window.Hearth && window.Hearth.flushDrafts ? window.Hearth.flushDrafts() : true", true)
-    .catch(() => undefined);
-  await Promise.race([flushed, new Promise((resolve) => setTimeout(resolve, 5000))]);
+    .then((saved) => saved === true, () => false);
+  return Promise.race([flushed, new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 5000))]);
 }
 
 // Quitting stops only the backend's own process, never its group, so resumed task loops keep running (ADR-0038).
@@ -204,8 +204,15 @@ async function quit(): Promise<void> {
     });
     if (response === 0) return;
   }
+  if (!(await draftsSaved())) {
+    const { response } = await dialog.showMessageBox({
+      type: "warning", buttons: ["Keep Hearth Open", "Quit Without Saving"], defaultId: 0, cancelId: 0,
+      message: "Hearth could not save every draft.",
+      detail: "Text you typed in a conversation was not saved within five seconds. Keep Hearth open to copy it or let it save again; quitting now loses it.",
+    });
+    if (response === 0) return;
+  }
   quitting = true;
-  await flushDrafts();
   if (backend && backend.child.exitCode === null && backend.child.signalCode === null) {
     const exited = new Promise((resolve) => backend.child.once("exit", resolve));
     backend.child.kill("SIGTERM");

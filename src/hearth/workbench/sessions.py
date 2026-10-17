@@ -42,7 +42,8 @@ class SessionError(Exception):
 
 def options() -> dict:
     """What the new-conversation form offers: each project's allowed session CLIs and their default models."""
-    projects = tasks._projects()
+    # Before any project is added the form says how to add one, rather than the whole view failing.
+    projects = tasks._projects() if (tasks._home() / "projects.json").exists() else {}
     found = {}
     for name, project in projects.items():
         allowed = [provider for provider in project.get("providers", []) if provider in PROVIDERS]
@@ -257,7 +258,13 @@ def open_folder(session_id: str) -> dict:
     worktree = Path(task["worktree"])
     if worktree != expected or worktree.is_symlink() or not worktree.is_dir():
         raise SessionError("This conversation's work folder is missing or not the one Hearth made, so Hearth will not open it.", 409)
-    subprocess.run(["open", str(worktree)], check=False, capture_output=True, timeout=30)
+    try:
+        opened = subprocess.run(["open", str(worktree)], capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise SessionError(f"Hearth could not open the work folder: {exc}. It is {worktree}.", 500) from None
+    if opened.returncode:
+        reason = (opened.stderr or "").strip().splitlines()[-1:] or [f"open exited with {opened.returncode}"]
+        raise SessionError(f"Hearth could not open the work folder: {reason[0]} It is {worktree}.", 500)
     return {"opened": str(worktree)}
 
 

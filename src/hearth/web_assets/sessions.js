@@ -181,10 +181,11 @@
     return saving;
   }
 
-  function flushDrafts() {
-    // The app calls this before it stops the backend, so text typed just before quitting is kept.
+  async function flushDrafts() {
+    // The app calls this before it stops the backend: true only once every draft is saved, so a failed save is never quit past unseen.
     for (const id of state.drafts.keys()) saveDraft(id);
-    return Promise.allSettled([...state.saving]).then(() => true);
+    await Promise.allSettled([...state.saving]);
+    return [...state.drafts.values()].every((draft) => draft.at <= draft.saved);
   }
   window.Hearth.flushDrafts = flushDrafts;
 
@@ -482,7 +483,9 @@
       state.options = listing.options;
       renderList();
       if (changed && !$("convo-form").hidden) fillForm(); // Never rebuilt under the keeper's pointer for nothing.
-      if (!state.selected && $("convo-form").hidden) {
+      // Read from the address, not state.visible: the keeper may have just left, and the page hears of it only after this runs.
+      const [view, id] = window.location.hash.replace(/^#\//, "").split("/");
+      if (!state.selected && $("convo-form").hidden && !id && (view === "sessions" || (view === "" && !$("convo-view").hidden))) {
         // Sessions alone opens the latest conversation, or the form when there is none yet.
         window.location.replace(state.sessions.length ? `#/sessions/${encodeURIComponent(state.sessions[0].id)}` : "#/sessions/new");
       }
