@@ -14,8 +14,10 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from typing import Protocol
 from uuid import uuid4
 
@@ -23,6 +25,7 @@ import numpy as np
 
 from .chunking import CHUNKING_VERSION
 from .domain import Chunk, DocumentRelationship, Evidence
+from .runtime import hearth_home
 
 
 class EmbeddingError(RuntimeError):
@@ -62,7 +65,7 @@ class Embedder(Protocol):
     @property
     def spec(self) -> EmbeddingSpec: ...
 
-    def embed(self, texts: list[str]) -> list[list[float]]: ...
+    def embed(self, texts: list[str], purpose: str = "unnamed") -> list[list[float]]: ...
 
 
 _MAX_EMBEDDING_TOKENS = 2048
@@ -111,7 +114,8 @@ class MLXEmbedder:
     def spec(self) -> EmbeddingSpec:
         return self._spec
 
-    def embed(self, texts: list[str]) -> list[list[float]]:
+    def embed(self, texts: list[str], purpose: str = "unnamed") -> list[list[float]]:
+        """Embed texts, loading the model on first use; `purpose` names the operation in the model-load log."""
         if any(not isinstance(text, str) or not text.strip() for text in texts):
             raise EmbeddingError("Embedding input must contain non-empty text.")
         os.environ["HF_HUB_OFFLINE"] = "1"
@@ -125,7 +129,9 @@ class MLXEmbedder:
                 if self._model is None or self._tokenizer is None:
                     # MLX keeps freed GPU buffers for reuse; with chunks of every length that cache grew past 10 GB.
                     mx.set_cache_limit(256 * 1024 * 1024)
+                    started = time.monotonic()
                     self._model, self._tokenizer = load(str(self._model_directory))
+                    _log_model_load(purpose, time.monotonic() - started)
             hidden_model = getattr(self._model, "model", None)
             if hidden_model is None:
                 raise EmbeddingError("The local MLX model does not expose embedding hidden states.")
@@ -218,7 +224,7 @@ class FlatVectorIndex:
                         on_warning(MEMORY_MONITORING_UNAVAILABLE)
                         warned = True
                     batch = ordered_chunks[start : start + self._BUILD_BATCH_SIZE]
-                    batch_vectors = self._embedder.embed([chunk.text for chunk in batch])
+                    batch_vectors = self._embedder.embed([chunk.text for chunk in batch], purpose="rebuild")
                     if len(batch_vectors) != len(batch):
                         raise IndexError("Embedding output count did not match the chunk count.")
                     for vector in batch_vectors:
@@ -266,7 +272,7 @@ class FlatVectorIndex:
         if not question.strip():
             return []
         manifest, vectors_path = self._load_manifest(chunks)
-        query_vector = self._embedder.embed([question])[0]
+        query_vector = self._embedder.embed([question], purpose="search")[0]
         query_vector = _normalize_vector(query_vector, self._embedder.spec.dimension)
         vectors = _read_vectors(vectors_path, len(manifest["chunk_ids"]), self._embedder.spec.dimension)
         chunks_by_id = {chunk.id: chunk for chunk in chunks}
@@ -431,6 +437,23 @@ def _build_lock() -> Iterator[None]:
         except BlockingIOError as exc:
             raise IndexBusy("Another Hearth semantic-index build is running. Try again after it finishes.") from exc
         yield
+
+
+def _model_load_log() -> Path:
+    return hearth_home() / "logs/model-loads.jsonl"
+
+
+def _log_model_load(purpose: str, seconds: float) -> None:
+    """Append when, why, in which process, and how long the model took to load, and macOS memory after; never the embedded text."""
+    signals = _memory_signals()
+    row = {"at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "purpose": purpose, "pid": os.getpid(), "seconds": round(seconds, 2),
+           "pressure_level": signals[0] if signals else None, "swap_used_mb": signals[1] if signals else None}
+    try:
+        _model_load_log().parent.mkdir(parents=True, exist_ok=True)
+        with _model_load_log().open("a", encoding="utf-8") as log:
+            log.write(json.dumps(row) + "\n")
+    except OSError:
+        pass  # The log explains memory use later; a search or rebuild must not fail over it.
 
 
 def _memory_signals() -> tuple[int, float] | None:

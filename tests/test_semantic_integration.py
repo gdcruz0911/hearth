@@ -5,6 +5,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from hearth.embedding import FlatVectorIndex, IndexCompatibilityError, MLXEmbedder
 from hearth.service import HearthService
@@ -28,6 +29,9 @@ class SemanticIntegrationTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary_directory = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary_directory.name)
+        patch = mock.patch.dict(os.environ, {"HEARTH_HOME": str(self.root / "hearth")})  # The model-load log stays here.
+        patch.start()
+        self.addCleanup(patch.stop)
         self.document = self.root / "operations.md"
         self.model_directory = Path(os.environ.get("HEARTH_EMBEDDING_MODEL_DIRECTORY", DEFAULT_MODEL_DIRECTORY))
         if not (self.model_directory / "model.safetensors").is_file():
