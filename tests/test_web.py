@@ -520,7 +520,10 @@ class SessionEndpointTests(unittest.TestCase):
             raise Refused("A turn is still running.", 409)
         fake = types.SimpleNamespace(SessionError=Refused, listing=lambda: {"sessions": []}, detail=lambda id: {"id": id},
                                      create=lambda *args: calls.append(("create", *args)) or {"id": "s"}, send=send,
-                                     stop=lambda *args: calls.append(("stop", *args)) or {"id": "s"})
+                                     stop=lambda *args: calls.append(("stop", *args)) or {"id": "s"},
+                                     save_draft=lambda *args: calls.append(("draft", *args)) or {"text": "Hi", "at": 5},
+                                     changes=lambda *args: calls.append(("changes", *args)) or {"files": []},
+                                     open_folder=lambda *args: calls.append(("open", *args)) or {"opened": "/w"})
         app = HearthWebApplication(self.service, "token", workbench_sessions=fake)
         ask = signed_in(app)
 
@@ -529,11 +532,18 @@ class SessionEndpointTests(unittest.TestCase):
         busy = ask("POST", "/api/sessions/s/send", b'{"message": "Hi", "send": "send-0001"}')
         stopped = ask("POST", "/api/sessions/s/stop", b'{"run": "01-session-claude"}')
         elsewhere = app.respond("POST", "/api/sessions/s/stop", b"{}", {**ask.headers, "Origin": "http://example.test"})
+        drafted = ask("POST", "/api/sessions/s/draft", b'{"text": "Hi", "at": 5}')
+        changed = ask("GET", "/api/sessions/s/changes")
+        opened = ask("POST", "/api/sessions/s/open", b"{}")
+        open_elsewhere = app.respond("POST", "/api/sessions/s/open", b"{}", {**ask.headers, "Origin": "http://example.test"})
+        sent = ask("POST", "/api/sessions/s/send", b'{"message": "Hi", "send": "send-0002", "draft_at": 5}')
 
         self.assertEqual([listed.status, created.status, busy.status, stopped.status, elsewhere.status], [200, 200, 409, 200, 403])
+        self.assertEqual([drafted.status, changed.status, opened.status, open_elsewhere.status, sent.status], [200, 200, 200, 403, 409])
         self.assertEqual(json.loads(busy.body)["error"], "A turn is still running.")
-        self.assertEqual(calls, [("create", "demo", "claude", "edit", None, None, "r1234567"), ("send", "s", "Hi", "send-0001"),
-                                 ("stop", "s", "01-session-claude")])
+        self.assertEqual(calls, [("create", "demo", "claude", "edit", None, None, "r1234567"), ("send", "s", "Hi", "send-0001", None),
+                                 ("stop", "s", "01-session-claude"), ("draft", "s", "Hi", 5), ("changes", "s"), ("open", "s"),
+                                 ("send", "s", "Hi", "send-0002", 5)])
 
 
 class SlowCleanupIndex(BlockingRelationshipIndex):

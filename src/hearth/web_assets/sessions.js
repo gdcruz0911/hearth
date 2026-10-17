@@ -4,7 +4,8 @@
   const { el, shown, badge, api } = window.Hearth;
   const $ = (id) => document.getElementById(id);
   const AGENTS = { claude: "Claude Code", codex: "Codex" };
-  const state = { visible: false, selected: null, options: null, sessions: [], detail: null, turns: new Map(), sending: null, timer: 0, said: "" };
+  const state = { visible: false, selected: null, options: null, sessions: [], detail: null, turns: new Map(), sending: null, timer: 0, said: "",
+                  drafts: new Map(), saving: new Set(), seq: 0, places: new Map(), place: null, changesKey: "" };
 
   function say(text) {
     // One polite live region for the conversation's state, announced only when it changes.
@@ -126,26 +127,74 @@
 
   function select(id) {
     if (id === state.selected) return;
+    if (state.selected) {
+      saveDraft(state.selected); // Saved on every switch, not only after the pause.
+      const scroller = $("convo-scroll");
+      state.places.set(state.selected, { top: scroller.scrollTop, bottom: scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 80 });
+    }
     state.selected = id;
+    state.place = id ? state.places.get(id) || { bottom: true } : null;
+    state.changesKey = "";
+    $("convo-changes").open = false;
+    $("convo-changes-count").textContent = "";
+    $("convo-changes-body").replaceChildren();
     state.detail = null;
     state.turns = new Map();
     state.sending = null;
     $("convo-log").replaceChildren();
     $("convo-form").hidden = true;
     $("convo-pane").hidden = !id;
-    $("convo-message").value = draft(id);
+    $("convo-message").value = (state.drafts.get(id) || {}).text || "";
     $("convo-send-error").hidden = true;
     renderList();
   }
 
-  function draft(id, value) {
-    // The keeper's unsent text survives navigation and a reload; a per-viewer convenience only.
-    const key = `hearth-draft-${id}`;
-    try {
-      if (value === undefined) return localStorage.getItem(key) || "";
-      if (value) localStorage.setItem(key, value); else localStorage.removeItem(key);
-    } catch { /* storage may be blocked */ }
-    return "";
+  // ---------- drafts (ADR-0044) ----------
+  // Each draft has a version that only grows. The server keeps the newest it has seen, so a save that arrives late,
+  // or after its text was sent, changes nothing. The shell's storage is in memory, so drafts live in the session's folder.
+
+  function version() {
+    state.seq = Math.max(Date.now(), state.seq + 1);
+    return state.seq;
+  }
+
+  function typed(id, text) {
+    const draft = state.drafts.get(id) || { saved: 0, timer: 0 };
+    Object.assign(draft, { text, at: version() });
+    state.drafts.set(id, draft);
+    clearTimeout(draft.timer);
+    draft.timer = setTimeout(() => saveDraft(id), 400);
+  }
+
+  function saveDraft(id) {
+    const draft = state.drafts.get(id);
+    if (!draft) return Promise.resolve();
+    clearTimeout(draft.timer);
+    if (draft.at <= draft.saved) return Promise.resolve();
+    const { text, at } = draft;
+    const saving = api(`sessions/${encodeURIComponent(id)}/draft`, { text, at })
+      .then(() => { draft.saved = Math.max(draft.saved, at); draft.failed = false; })
+      .catch(() => { draft.failed = true; }) // Kept in the page; the next keystroke, switch, or quit tries again.
+      .then(() => { if (id === state.selected) composer(); })
+      .finally(() => state.saving.delete(saving));
+    state.saving.add(saving);
+    return saving;
+  }
+
+  function flushDrafts() {
+    // The app calls this before it stops the backend, so text typed just before quitting is kept.
+    for (const id of state.drafts.keys()) saveDraft(id);
+    return Promise.allSettled([...state.saving]).then(() => true);
+  }
+  window.Hearth.flushDrafts = flushDrafts;
+
+  function adoptDraft(session) {
+    // The saved draft fills the composer only when this page has nothing newer for the conversation.
+    const local = state.drafts.get(session.id);
+    if (local && local.at >= session.draft.at) return;
+    state.drafts.set(session.id, { text: session.draft.text, at: session.draft.at, saved: session.draft.at, timer: 0 });
+    state.seq = Math.max(state.seq, session.draft.at);
+    if (session.id === state.selected) $("convo-message").value = session.draft.text;
   }
 
   function running() {
@@ -168,6 +217,12 @@
     if (session.commands?.check) commands.append(" ", el("code", "", session.commands.check), " may run.");
     commands.append(" Hearth cannot approve extra commands here.");
     $("convo-badge").replaceChildren(session.status ? badge(session.status) : el("span", "badge other", "new"));
+    const finished = session.turns.filter((turn) => turn.finished).length;
+    const key = `${session.id}:${finished}`;
+    if (key !== state.changesKey) {
+      state.changesKey = key;
+      loadChanges(session.id, key);
+    }
     const log = $("convo-log");
     if (!session.turns.length && !log.children.length) {
       log.append(el("li", "empty convo-empty", "Starting a conversation runs nothing. Your first message starts the agent; Hearth shows what it does as it happens."));
@@ -290,6 +345,54 @@
     }
   }
 
+  function restorePlace() {
+    // Back where the keeper left this conversation, once its turns are shown; at the bottom if they were there.
+    if (!state.place || state.turns.size === 0 || [...state.turns.values()].some((view) => view.reading)) return;
+    const scroller = $("convo-scroll");
+    scroller.scrollTop = state.place.bottom ? scroller.scrollHeight : state.place.top;
+    state.place = null;
+  }
+
+  // ---------- changes and the work folder ----------
+
+  async function loadChanges(id, key) {
+    try {
+      const { changes } = await api(`sessions/${encodeURIComponent(id)}/changes`);
+      if (key !== state.changesKey) return;
+      const count = changes.files.length + changes.untracked_hidden;
+      $("convo-changes-count").textContent = count ? `${count} file${count === 1 ? "" : "s"} · +${changes.added} −${changes.removed}` : "none yet";
+      const parts = [];
+      if (changes.files.length) {
+        const list = el("ul", "changed-files");
+        const names = { M: "changed", A: "added", D: "deleted", T: "type changed", "?": "new, not committed" };
+        changes.files.forEach((file) => {
+          const row = el("li");
+          row.append(el("span", "id", file.path), el("span", "meta", names[file.status] || file.status));
+          list.append(row);
+        });
+        parts.push(list);
+      }
+      if (changes.untracked_hidden) parts.push(el("p", "meta", `${changes.untracked_hidden} more new files are not listed. Open the work folder to see them.`));
+      if (changes.diff) parts.push(...window.Hearth.files(changes.diff));
+      else parts.push(el("p", "empty", "No changes in this conversation's worktree yet."));
+      if (changes.truncated) parts.push(el("p", "meta", "This diff is long, so only its beginning is shown. Open the work folder for the rest."));
+      $("convo-changes-body").replaceChildren(...parts);
+    } catch (failure) {
+      if (key !== state.changesKey) return;
+      $("convo-changes-count").textContent = "unavailable";
+      $("convo-changes-body").replaceChildren(el("p", "status error", failure.message));
+    }
+  }
+
+  async function openFolder() {
+    try {
+      await api(`sessions/${encodeURIComponent(state.selected)}/open`, {});
+    } catch (failure) {
+      $("convo-send-error").hidden = false;
+      $("convo-send-error").textContent = failure.message;
+    }
+  }
+
   function stick(change) {
     // Follow new output only while the keeper is at the bottom; reading further up is never interrupted.
     const scroller = $("convo-scroll");
@@ -302,10 +405,15 @@
     const turn = running();
     const busy = Boolean(turn) || Boolean(state.sending);
     $("convo-send").disabled = busy || !$("convo-message").value.trim();
-    $("convo-send").textContent = state.sending ? "Sending…" : "Send";
+    $("convo-send").textContent = state.sending ? "Sending…" : state.detail ? `Send to ${agent(state.detail.provider)}` : "Send";
     $("convo-stop").hidden = !turn;
     $("convo-message").placeholder = state.detail ? `Message ${agent(state.detail.provider)}` : "";
-    $("convo-hint").textContent = turn ? "Esc stops the reply · its output so far is kept" : "⌘↩ sends";
+    // Without a queue, text written during a reply waits here: say so, so it is never taken for sent.
+    const unsaved = (state.drafts.get(state.selected) || {}).failed;
+    $("convo-hint").textContent = unsaved ? "Draft not saved: Hearth did not answer. It stays here and is saved again as you type."
+      : turn && $("convo-message").value.trim()
+      ? "Not sent: Hearth does not queue messages. Send it when this reply finishes · Esc stops the reply"
+      : turn ? "Esc stops the reply · its output so far is kept" : "⌘↩ sends";
     if (turn) say(`${agent(state.detail.provider)} is replying.`);
     else if (state.detail && state.detail.status === "done") say("Reply finished.");
     else if (state.detail && state.detail.status === "cancelled") say("Stopped. What arrived before Stop is kept here.");
@@ -317,17 +425,22 @@
     const message = $("convo-message").value.trim();
     if (!message || running() || state.sending) return;
     // The same ID goes with every retry of this message, so Hearth starts it once however often it arrives.
-    state.sending = state.sending || { id: requestId(), message };
+    state.sending = state.sending || { id: requestId(), message, at: (state.drafts.get(state.selected) || {}).at || 0 };
     composer();
     say(`Sending to ${agent(state.detail.provider)}.`);
     const error = $("convo-send-error");
     try {
       const sent = state.sending;
-      const { session } = await api(`sessions/${encodeURIComponent(state.selected)}/send`, { message: sent.message, send: sent.id });
+      const { session } = await api(`sessions/${encodeURIComponent(state.selected)}/send`,
+                                    { message: sent.message, send: sent.id, draft_at: sent.at });
       state.sending = null;
       error.hidden = true;
-      $("convo-message").value = "";
-      draft(session.id, "");
+      // A turn that could not start keeps the text; text typed after pressing Send is newer and is kept too.
+      if (session.status !== "failed" && $("convo-message").value.trim() === sent.message) {
+        $("convo-message").value = "";
+        const draft = state.drafts.get(session.id);
+        if (draft && draft.at === sent.at) Object.assign(draft, { text: "", saved: sent.at });
+      }
       await tick();
     } catch (failure) {
       const offline = failure instanceof TypeError; // The request may or may not have arrived: retry with the same ID.
@@ -363,6 +476,7 @@
     if (!state.visible) return;
     try {
       const listing = await api("sessions");
+      if (!state.visible) return; // The keeper left Sessions while this was loading: never pull them back.
       state.sessions = listing.sessions;
       const changed = JSON.stringify(listing.options) !== JSON.stringify(state.options);
       state.options = listing.options;
@@ -377,8 +491,10 @@
         const { session } = await api(`sessions/${encodeURIComponent(id)}`);
         if (id === state.selected) {
           state.detail = session;
+          adoptDraft(session);
           renderDetail();
           for (const view of state.turns.values()) if (!view.done) await readTurn(view);
+          restorePlace();
         }
       }
     } catch (failure) {
@@ -406,10 +522,12 @@
   $("convo-form").addEventListener("submit", start);
   $("convo-composer").addEventListener("submit", send);
   $("convo-stop").addEventListener("click", stop);
+  $("convo-open").addEventListener("click", openFolder);
   $("convo-message").addEventListener("input", () => {
-    draft(state.selected, $("convo-message").value);
+    if (state.selected) typed(state.selected, $("convo-message").value);
     composer();
   });
+  window.addEventListener("pagehide", flushDrafts);
   $("convo-message").addEventListener("keydown", (event) => {
     if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) $("convo-composer").requestSubmit();
   });

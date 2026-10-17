@@ -182,6 +182,16 @@ async function rebuildState(backend: Running): Promise<"running" | "idle" | "unk
   }
 }
 
+// ADR-0044: drafts typed just before quitting are saved before the backend stops. A page that never answers is waited on
+// for a few seconds, not forever, so a hung page cannot keep Hearth from quitting.
+async function flushDrafts(): Promise<void> {
+  const contents = window && !window.isDestroyed() ? window.webContents : null;
+  if (!contents) return;
+  const flushed = contents.executeJavaScript("window.Hearth && window.Hearth.flushDrafts ? window.Hearth.flushDrafts() : true", true)
+    .catch(() => undefined);
+  await Promise.race([flushed, new Promise((resolve) => setTimeout(resolve, 5000))]);
+}
+
 // Quitting stops only the backend's own process, never its group, so resumed task loops keep running (ADR-0038).
 async function quit(): Promise<void> {
   const backend = running;
@@ -195,6 +205,7 @@ async function quit(): Promise<void> {
     if (response === 0) return;
   }
   quitting = true;
+  await flushDrafts();
   if (backend && backend.child.exitCode === null && backend.child.signalCode === null) {
     const exited = new Promise((resolve) => backend.child.once("exit", resolve));
     backend.child.kill("SIGTERM");

@@ -49,7 +49,9 @@ test("a task answered in the app finishes verification and review after the app 
   assert.equal(record().status, "waiting");
 
   const first = await openApp(t, home, realBackend(home.dir), { env });
-  const page = await windowShowing(first.app, "Hub");
+  // "Live" appears after the first refresh, once the scripts have run; the nav's "Hub" is there before, and a hash set
+  // then is cleared with the launch token.
+  const page = await windowShowing(first.app, "Live ·");
   await page.evaluate((task) => void (window.location.hash = `#/tasks/${task}`), id);
   await windowShowing(first.app, "Which greeting?");
   await page.locator("textarea.answer-input").fill("Say hello to the person.");
@@ -73,7 +75,7 @@ test("a task answered in the app finishes verification and review after the app 
   assert.match(readFileSync(join(home.dir, "hearth/tasks", id, "resume.log"), "utf8"), /approved/);
 
   const second = await openApp(t, home, realBackend(home.dir), { env });
-  const reopened = await windowShowing(second.app, "Hub");
+  const reopened = await windowShowing(second.app, "Live ·");
   await reopened.evaluate((task) => void (window.location.hash = `#/tasks/${task}`), id);
   await windowShowing(second.app, "approve");
 });

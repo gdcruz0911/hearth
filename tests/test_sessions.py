@@ -340,6 +340,105 @@ class ReleasedReaderTests(SessionTestCase):
         self.assertEqual(self.calls(), [])  # The fake CLIs on PATH were never started.
 
 
+class SessionWorkTests(SessionTestCase):
+    """Slice 2: drafts that survive quitting (ADR-0044), the worktree's changes, and opening its folder."""
+
+    def test_a_late_save_never_brings_back_sent_text_or_overwrites_newer_text(self) -> None:
+        session_id = self.new()
+        sessions.save_draft(session_id, "Say hello", 10)
+        sessions.send(session_id, "Say hello", "send-0001", draft_at=10)
+        self.settled(session_id)
+        self.assertEqual(sessions.save_draft(session_id, "Say hello", 10), {"text": "", "at": 10})  # The save that raced its send.
+        sessions.save_draft(session_id, "Next question", 12)
+        self.assertEqual(sessions.save_draft(session_id, "Next q", 11), {"text": "Next question", "at": 12})  # An older save, late.
+        self.assertEqual(sessions.detail(session_id)["draft"], {"text": "Next question", "at": 12})
+
+    def test_a_send_does_not_clear_text_typed_after_it(self) -> None:
+        session_id = self.new()
+        sessions.save_draft(session_id, "Follow-up typed while sending", 20)
+        sessions.send(session_id, "Say hello", "send-0001", draft_at=15)
+        self.settled(session_id)
+        self.assertEqual(sessions.detail(session_id)["draft"]["text"], "Follow-up typed while sending")
+
+    def test_a_send_that_cannot_start_keeps_the_draft(self) -> None:
+        session_id = self.new()
+        sessions.save_draft(session_id, "Say hello", 10)
+        with mock.patch.object(sessions, "_launch", side_effect=OSError("no such program")):
+            sessions.send(session_id, "Say hello", "send-0001", draft_at=10)
+        self.assertEqual(sessions.detail(session_id)["draft"], {"text": "Say hello", "at": 10})
+        refused = self.new()
+        sessions.save_draft(refused, "Too long", 10)
+        with self.assertRaises(sessions.SessionError):
+            sessions.send(refused, "x" * (sessions.MESSAGE_LIMIT + 1), "send-0002", draft_at=10)
+        self.assertEqual(sessions.detail(refused)["draft"]["text"], "Too long")
+
+    def test_a_draft_must_be_text_with_a_version(self) -> None:
+        session_id = self.new()
+        for text, at in (("hi", None), ("hi", True), ("hi", -1), (None, 1), ("x" * (sessions.MESSAGE_LIMIT + 1), 1)):
+            with self.subTest(text=str(text)[:5], at=at), self.assertRaises(sessions.SessionError):
+                sessions.save_draft(session_id, text, at)
+
+    def test_changes_list_committed_edited_and_new_files_and_show_a_link_by_its_target(self) -> None:
+        session_id = self.new()
+        worktree = Path(self.only_task()["worktree"])
+        (worktree / "README.md").write_text("changed\n", encoding="utf-8")
+        (worktree / "committed.txt").write_text("one\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(worktree), "add", "committed.txt"], check=True)
+        subprocess.run(["git", "-C", str(worktree), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "c"], check=True)
+        (worktree / "new.txt").write_text("fresh\n", encoding="utf-8")
+        outside = self.home / "outside-secret.txt"
+        outside.write_text("do not show\n", encoding="utf-8")
+        (worktree / "link").symlink_to(outside)
+        before = sorted(p.name for p in Path(subprocess.run(["git", "-C", str(worktree), "rev-parse", "--git-dir"], capture_output=True, text=True,
+                                                               check=True).stdout.strip()).iterdir())
+
+        found = sessions.changes(session_id)
+
+        self.assertEqual(sorted((f["path"], f["status"]) for f in found["files"]),
+                         [("README.md", "M"), ("committed.txt", "A"), ("link", "?"), ("new.txt", "?")])
+        self.assertIn("+fresh", found["diff"])
+        self.assertIn(f"+{outside}", found["diff"])
+        self.assertNotIn("do not show", found["diff"])
+        self.assertEqual((found["truncated"], found["untracked_hidden"]), (False, 0))
+        self.assertGreater(found["added"], 0)
+        after = sorted(p.name for p in Path(subprocess.run(["git", "-C", str(worktree), "rev-parse", "--git-dir"], capture_output=True, text=True,
+                                                              check=True).stdout.strip()).iterdir())
+        self.assertEqual(before, after)  # No index.lock left, and nothing written beside it.
+
+    def test_changes_leave_out_the_guidance_hearth_copied_in(self) -> None:
+        (self.repo / "CONTEXT.md").write_text("Project words, neither committed nor ignored.\n", encoding="utf-8")
+        session_id = self.new()
+        worktree = Path(self.only_task()["worktree"])
+        self.assertIn("CONTEXT.md", self.only_task()["copied"])
+        (worktree / "made.txt").write_text("by the agent\n", encoding="utf-8")
+
+        self.assertEqual([f["path"] for f in sessions.changes(session_id)["files"]], ["made.txt"])
+
+    def test_changes_take_no_index_lock(self) -> None:
+        session_id = self.new()
+        with mock.patch("subprocess.run", wraps=subprocess.run) as run:
+            sessions.changes(session_id)
+        git_calls = [call.args[0] for call in run.call_args_list if call.args and call.args[0][:1] == ["git"]]
+        self.assertTrue(git_calls)
+        self.assertTrue(all(argv[1] == "--no-optional-locks" for argv in git_calls))
+
+    def test_opening_the_work_folder_opens_only_the_folder_hearth_made(self) -> None:
+        session_id = self.new()
+        record = self.only_task()
+        with mock.patch.object(sessions.subprocess, "run") as run:
+            self.assertEqual(sessions.open_folder(session_id), {"opened": record["worktree"]})
+        run.assert_called_once()
+        self.assertEqual(run.call_args.args[0], ["open", record["worktree"]])
+
+        task_dir = self.home / ".hearth/tasks" / session_id
+        changed = json.loads((task_dir / "task.json").read_text(encoding="utf-8"))
+        changed["worktree"] = "/Applications/Calculator.app"
+        (task_dir / "task.json").write_text(json.dumps(changed), encoding="utf-8")
+        with mock.patch.object(sessions.subprocess, "run") as run, self.assertRaises(sessions.SessionError):
+            sessions.open_folder(session_id)
+        run.assert_not_called()
+
+
 class SessionGuardTests(SessionTestCase):
     def test_task_commands_dashboard_tasks_and_stats_leave_sessions_alone(self) -> None:
         session_id = self.new()

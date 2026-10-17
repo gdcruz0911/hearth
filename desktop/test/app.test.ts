@@ -120,7 +120,7 @@ test("the real dashboard works through the shell, and agent-written text never r
   seedTask(home, task("20261009-120000", "javascript:alert(3)"));
   seedTask(home, task("20261009-120001", "https://github.com/gdcruz0911/hearth/pull/7"));
   const { app, output } = await openApp(t, home, realBackend(home.dir));
-  const page = await windowShowing(app, "Hub");
+  const page = await windowShowing(app, "Live ·");  // After the first refresh, so the hash set below is not cleared with the launch token.
   const [cookie] = await app.evaluate(async ({ BrowserWindow }) => (await BrowserWindow.getAllWindows()[0].webContents.session.cookies.get({})).map((item) => item.value));
   const dialogs: string[] = [];
   page.on("dialog", (dialog) => void dialogs.push(dialog.message()));
