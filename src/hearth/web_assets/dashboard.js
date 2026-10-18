@@ -719,7 +719,7 @@ function theme() {
 }
 
 // Shared with hub.js, which draws the same tasks as a graph.
-window.Hearth = { el, shown, badge, reason, command, api, session, root, loadKnowledge, ago, latest: null };
+window.Hearth = { el, shown, badge, reason, command, api, session, root, loadKnowledge, ago, files, latest: null };
 
 theme();
 defaultView();

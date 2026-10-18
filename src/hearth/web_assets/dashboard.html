@@ -80,11 +80,15 @@
               </form>
               <div id="convo-pane" class="convo-pane" hidden>
                 <header class="convo-head">
-                  <div class="row-top"><h2 id="convo-title" class="task-goal"></h2><span id="convo-badge"></span></div>
+                  <div class="row-top"><h2 id="convo-title" class="task-goal"></h2><span id="convo-badge"></span><button id="convo-open" class="btn small" type="button">Open work folder</button></div>
                   <p id="convo-meta" class="convo-meta"></p>
                   <p id="convo-commands" class="convo-fixed meta"></p>
                   <p class="convo-fixed meta">Model and effort are fixed for this conversation. For others, <a href="#/sessions/new">start a new conversation</a>; it begins without this one's context.</p>
                 </header>
+                <details id="convo-changes" class="convo-changes">
+                  <summary>Changes <span id="convo-changes-count" class="meta"></span></summary>
+                  <div id="convo-changes-body" class="convo-changes-body"></div>
+                </details>
                 <div id="convo-scroll" class="convo-scroll">
                   <ol id="convo-log" class="convo-log" aria-label="Conversation"></ol>
                 </div>

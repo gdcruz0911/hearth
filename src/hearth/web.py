@@ -124,6 +124,7 @@ class HearthWebApplication:
     ):
         self._service = service
         # ADR-0041: direct sessions (listing, detail, create, send, stop, SessionError); sends and stops need no preview.
+        # ADR-0044 adds saving a draft and opening the work folder, also without one; the changes view only reads.
         self._workbench_sessions = workbench_sessions
         self._rebuild_state = rebuild_state  # ~/.hearth/rebuild.json, so a crash mid-rebuild is reported (ADR-0038); None in tests.
         self._semantic_index_thread: threading.Thread | None = None
@@ -355,7 +356,14 @@ class HearthWebApplication:
                 return self._json_response({"session": sessions.create(text("project"), text("provider"), text("mode"), text("model"),
                                                                        text("effort"), text("request"))})
             if method == "POST" and len(parts) == 2 and parts[1] == "send":
-                return self._json_response({"session": sessions.send(parts[0], text("message"), text("send"))})
+                at = payload.get("draft_at")
+                return self._json_response({"session": sessions.send(parts[0], text("message"), text("send"), at if isinstance(at, int) else None)})
+            if method == "POST" and len(parts) == 2 and parts[1] == "draft":
+                return self._json_response({"draft": sessions.save_draft(parts[0], text("text"), payload.get("at"))})
+            if method == "GET" and len(parts) == 2 and parts[1] == "changes":
+                return self._json_response({"changes": sessions.changes(parts[0])})
+            if method == "POST" and len(parts) == 2 and parts[1] == "open":
+                return self._json_response(sessions.open_folder(parts[0]))
             if method == "POST" and len(parts) == 2 and parts[1] == "stop":
                 return self._json_response({"session": sessions.stop(parts[0], text("run"))})
         except sessions.SessionError as exc:

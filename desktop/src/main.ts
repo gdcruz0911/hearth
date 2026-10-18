@@ -131,6 +131,18 @@ function openWindow(): void {
     width: 1280, height: 860, title: "Hearth",
     webPreferences: { session: partition, sandbox: true, contextIsolation: true, nodeIntegration: false, webviewTag: false, spellcheck: false },
   });
+  // Closing the window destroys the page and any draft only it holds: save first, as quitting does (ADR-0044).
+  let closing = false;
+  window.on("close", (event) => {
+    if (closing || quitting) return;
+    event.preventDefault();
+    const closed = window;
+    void draftsKept().then((kept) => {
+      if (!kept || closed?.isDestroyed()) return;
+      closing = true;
+      closed?.close();
+    });
+  });
   window.on("closed", () => (window = null));
   if (running) void window.loadURL(`${running.origin}/`);
   else void window.loadURL(stoppedPage(stoppedReason));
@@ -182,6 +194,44 @@ async function rebuildState(backend: Running): Promise<"running" | "idle" | "unk
   }
 }
 
+// ADR-0044: drafts typed just before quitting are saved before the backend stops. Whether they all were is the page's answer;
+// a failed save, or no answer within five seconds, counts as not saved, so the keeper is asked rather than losing the text.
+async function draftsSaved(): Promise<boolean> {
+  const contents = window && !window.isDestroyed() ? window.webContents : null;
+  if (!contents) return true;  // No page, so no text typed in one waits to be saved.
+  const flushed = contents.executeJavaScript("window.Hearth && window.Hearth.flushDrafts ? window.Hearth.flushDrafts() : true", true)
+    .then((saved) => saved === true, () => false);
+  return Promise.race([flushed, new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 5000))]);
+}
+
+// True once every draft is saved, or the keeper chose to go on without them; false keeps the window and its text.
+// One question at a time: a repeat of the same request shares it, and a different one (Quit while Close is asked) waits for
+// it and then asks its own, so no button is ever taken to mean something it did not say.
+let askingDrafts: { leave: string; answer: Promise<boolean> } | null = null;
+async function draftsKept(leave = "Close Without Saving"): Promise<boolean> {
+  for (;;) {
+    if (await draftsSaved()) return true;
+    if (!askingDrafts) {
+      const answer = dialog.showMessageBox({
+        type: "warning", buttons: ["Keep Hearth Open", leave], defaultId: 0, cancelId: 0,
+        message: "Hearth could not save every draft.",
+        detail: "Text you typed, or the removal of a message you already sent, was not saved within five seconds. Keep Hearth open and it tries again. "
+          + "If you go on now, unsaved text is lost, and a sent message may come back as a draft when you reopen.",
+      }).then(({ response }) => response === 1).finally(() => (askingDrafts = null));
+      askingDrafts = { leave, answer };
+      return answer;
+    }
+    if (askingDrafts.leave === leave) return askingDrafts.answer;
+    await askingDrafts.answer;
+  }
+}
+
+// View > Reload replaces the page, and any draft only it holds, so it saves first, as closing and quitting do.
+async function reload(): Promise<void> {
+  const target = window;
+  if (target && (await draftsKept("Reload Without Saving")) && !target.isDestroyed()) target.webContents.reload();
+}
+
 // Quitting stops only the backend's own process, never its group, so resumed task loops keep running (ADR-0038).
 async function quit(): Promise<void> {
   const backend = running;
@@ -194,6 +244,7 @@ async function quit(): Promise<void> {
     });
     if (response === 0) return;
   }
+  if (!(await draftsKept("Quit Without Saving"))) return;
   quitting = true;
   if (backend && backend.child.exitCode === null && backend.child.signalCode === null) {
     const exited = new Promise((resolve) => backend.child.once("exit", resolve));
@@ -226,7 +277,7 @@ if (!app.requestSingleInstanceLock()) {
         { role: "quit" },
       ] },
       { role: "editMenu" },
-      { label: "View", submenu: [{ role: "reload" }] },
+      { label: "View", submenu: [{ label: "Reload", accelerator: "CmdOrCtrl+R", click: () => void reload() }] },
       { role: "windowMenu" },
     ]));
     return start();

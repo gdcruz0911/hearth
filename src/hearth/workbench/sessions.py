@@ -25,6 +25,7 @@ EFFORTS = ("low", "medium", "high")
 MESSAGE_LIMIT = 20_000
 SEND_ID = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
 TIMEOUT_SECONDS = 1800
+UNTRACKED_LIMIT = 200  # New files the Changes view lists; more are counted, not shown.
 WARNINGS = re.compile(r"\[claude-code:[a-z_]+\][^\n]*|unrecognized_model[^\n]*")
 
 _active: dict[str, subprocess.Popen] = {}  # Session ID to the turn this backend is running for it.
@@ -41,7 +42,8 @@ class SessionError(Exception):
 
 def options() -> dict:
     """What the new-conversation form offers: each project's allowed session CLIs and their default models."""
-    projects = tasks._projects()
+    # Before any project is added the form says how to add one, rather than the whole view failing.
+    projects = tasks._projects() if (tasks._home() / "projects.json").exists() else {}
     found = {}
     for name, project in projects.items():
         allowed = [provider for provider in project.get("providers", []) if provider in PROVIDERS]
@@ -87,8 +89,11 @@ def create(project: str, provider: str, mode: str, model: str | None, effort: st
     return summary(task)
 
 
-def send(session_id: str, message: str, send_id: str) -> dict:
-    """Start a turn with the keeper's message; the same send ID, retried, returns that turn instead of sending again."""
+def send(session_id: str, message: str, send_id: str, draft_at: int | None = None) -> dict:
+    """Start a turn with the keeper's message; the same send ID, retried, returns that turn instead of sending again.
+
+    `draft_at` is the draft version the message came from: a started turn clears that draft, and no older save brings it back.
+    """
     if not SEND_ID.match(send_id or ""):
         raise SessionError("A send needs a request ID.")
     message = (message or "").strip()
@@ -131,13 +136,24 @@ def send(session_id: str, message: str, send_id: str) -> dict:
             task["status"] = "done"
             tasks._write(task_dir, task)
             return summary(task)
-        # The backend that owns the turn: another backend on the same home must not take it for a crash's leftover.
-        record.update(pid=process.pid, pid_identity=tasks._identity(process.pid), owner=os.getpid(), owner_identity=tasks._identity(os.getpid()))
-        tasks._write(task_dir, task)
-    with _active_lock:
-        _active[session_id] = process
-    threading.Thread(target=_wait, args=(session_id, process), daemon=True).start()
-    return summary(task)
+        with _active_lock:
+            _active[session_id] = process  # Tracked before anything else can fail, so quitting always finds and stops it.
+        try:
+            # The backend that owns the turn: another backend on the same home must not take it for a crash's leftover.
+            record.update(pid=process.pid, pid_identity=tasks._identity(process.pid), owner=os.getpid(), owner_identity=tasks._identity(os.getpid()))
+            tasks._write(task_dir, task)
+        finally:
+            threading.Thread(target=_wait, args=(session_id, process), daemon=True).start()  # Settles the turn even if that write failed.
+    cleared = False  # Said in the reply, so a page whose draft was not cleared here saves the cleared draft itself and retries.
+    if isinstance(draft_at, int):
+        try:
+            with tasks._task_lock(task_dir):
+                if draft_at >= _draft(task_dir)["at"]:
+                    _write_draft(task_dir, "", draft_at)  # Sent: an empty draft at that version, so a late save of the same text is ignored.
+                cleared = True
+        except OSError:
+            pass  # The turn runs and is tracked either way.
+    return {**summary(task), "draft_cleared": cleared}
 
 
 def stop(session_id: str, run: str) -> dict:
@@ -197,7 +213,68 @@ def listing() -> dict:
 
 
 def detail(session_id: str) -> dict:
-    return summary(tasks._read(_dir(session_id)), turns=True)
+    task_dir = _dir(session_id)
+    return {**summary(tasks._read(task_dir), turns=True), "draft": _draft(task_dir)}
+
+
+def save_draft(session_id: str, text: str, at: int) -> dict:
+    """Keep the keeper's unsent text (ADR-0044); a save older than the stored version, such as one that arrives after its send, is ignored."""
+    if not isinstance(text, str) or len(text) > MESSAGE_LIMIT or not isinstance(at, int) or isinstance(at, bool) or at < 0:
+        raise SessionError(f"A draft is text of up to {MESSAGE_LIMIT} characters with a version number.")
+    task_dir = _dir(session_id)
+    with tasks._task_lock(task_dir):
+        if at > _draft(task_dir)["at"]:
+            _write_draft(task_dir, text, at)
+        return _draft(task_dir)
+
+
+def changes(session_id: str) -> dict:
+    """What the session's worktree changed since its base, in the task diff's shape: git read commands only, without the index lock."""
+    task = tasks._read(_dir(session_id))
+    def git(*args: str) -> subprocess.CompletedProcess:
+        # No optional locks, so an agent's own git add or commit never meets Hearth's lock; no external diff or textconv programs.
+        return subprocess.run(["git", "--no-optional-locks", "-c", "core.fsmonitor=false", "-C", task["worktree"], *args],
+                              capture_output=True, timeout=30)
+    tracked = git("diff", "--no-color", "--no-ext-diff", "--no-textconv", task["base"])
+    names = git("diff", "--name-status", "-z", "--no-renames", task["base"])
+    if tracked.returncode or names.returncode:
+        raise SessionError("Hearth could not read this conversation's changes. Next: check that its worktree still exists.", 409)
+    fields = names.stdout.decode("utf-8", errors="replace").split("\0")
+    files = [{"path": path, "status": status} for status, path in zip(fields[0::2], fields[1::2]) if path]
+    # Not the agent's work, as for a task's uncommitted files: Hearth's own folder, run caches, and the guidance Hearth copied in.
+    mine = [":(exclude).hearth", ":(exclude,glob)**/__pycache__/**", *[f":(exclude){name}" for name in tasks._copied(task)]]
+    untracked = [name for name in git("ls-files", "--others", "--exclude-standard", "-z", "--", ".", *mine).stdout
+                 .decode("utf-8", errors="replace").split("\0") if name]
+    raw = tracked.stdout
+    for name in untracked[:UNTRACKED_LIMIT]:
+        files.append({"path": name, "status": "?"})
+        if len(raw) <= tasks.DIFF_LIMIT:  # Past the limit nothing more is shown, so nothing more is read.
+            # Shown by git, never read here: a link shows the path it points to, not the file there.
+            raw += git("diff", "--no-color", "--no-ext-diff", "--no-textconv", "--no-index", "--", "/dev/null", name).stdout
+    lines = raw.decode("utf-8", errors="replace").splitlines()
+    shown = raw if len(raw) <= tasks.DIFF_LIMIT else raw[:tasks.DIFF_LIMIT][: raw[:tasks.DIFF_LIMIT].rfind(b"\n") + 1]
+    return {"session": task["id"], "files": files, "untracked_hidden": max(0, len(untracked) - UNTRACKED_LIMIT),
+            "diff": shown.decode("utf-8", errors="replace") or None,
+            "added": sum(line.startswith("+") and not line.startswith("+++") for line in lines),
+            "removed": sum(line.startswith("-") and not line.startswith("---") for line in lines),
+            "truncated": len(raw) > tasks.DIFF_LIMIT}
+
+
+def open_folder(session_id: str) -> dict:
+    """Open the session's own worktree in Finder (ADR-0044): only the folder Hearth made for it, never a path from the request."""
+    task = tasks._read(_dir(session_id))
+    expected = tasks._home() / "worktrees" / task["project"] / task["id"]
+    worktree = Path(task["worktree"])
+    if worktree != expected or worktree.is_symlink() or not worktree.is_dir():
+        raise SessionError("This conversation's work folder is missing or not the one Hearth made, so Hearth will not open it.", 409)
+    try:
+        opened = subprocess.run(["open", str(worktree)], capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise SessionError(f"Hearth could not open the work folder: {exc}. It is {worktree}.", 500) from None
+    if opened.returncode:
+        reason = (opened.stderr or "").strip().splitlines()[-1:] or [f"open exited with {opened.returncode}"]
+        raise SessionError(f"Hearth could not open the work folder: {reason[0]} It is {worktree}.", 500)
+    return {"opened": str(worktree)}
 
 
 def summary(task: dict, turns: bool = False) -> dict:
@@ -337,6 +414,20 @@ def _default_model(project: str, provider: str) -> str | None:
     except roles.RolesError:
         implement = {}
     return (implement.get("model") if implement.get("provider") == provider else None) or tasks._model(provider, "implement")
+
+
+def _draft(task_dir: Path) -> dict:
+    try:
+        found = json.loads((task_dir / "draft.json").read_text(encoding="utf-8"))
+        return {"text": str(found["text"]), "at": int(found["at"])}
+    except (OSError, ValueError, KeyError, TypeError):
+        return {"text": "", "at": 0}
+
+
+def _write_draft(task_dir: Path, text: str, at: int) -> None:
+    staged = task_dir / "draft.json.partial"
+    staged.write_text(json.dumps({"text": text, "at": at}), encoding="utf-8")
+    os.replace(staged, task_dir / "draft.json")
 
 
 def _dir(session_id: str) -> Path:
