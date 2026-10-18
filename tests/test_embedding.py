@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import sys
 import tempfile
 import types
@@ -27,6 +28,7 @@ def setUpModule() -> None:
     for patcher in (
         mock.patch("hearth.embedding._memory_signals", return_value=(1, 0.0)),
         mock.patch("hearth.embedding._BUILD_LOCK_PATH", Path(lock_directory.name) / "build.lock"),
+        mock.patch("hearth.embedding._model_load_log", return_value=Path(lock_directory.name) / "model-loads.jsonl"),
     ):
         patcher.start()
         unittest.addModuleCleanup(patcher.stop)
@@ -43,7 +45,7 @@ class FakeEmbedder:
     def __init__(self, vectors: dict[str, list[float]]):
         self._vectors = vectors
 
-    def embed(self, texts: list[str]) -> list[list[float]]:
+    def embed(self, texts: list[str], purpose: str = "unnamed") -> list[list[float]]:
         return [self._vectors[text] for text in texts]
 
 
@@ -125,6 +127,32 @@ class MLXEmbedderTests(unittest.TestCase):
             MLXEmbedder(_model_directory(self)).embed(["text"])
 
         self.assertEqual(core.cache_limits, [256 * 1024 * 1024])
+
+    def test_the_first_embed_logs_why_the_model_loaded_without_the_text(self) -> None:
+        core, patch = _fake_mlx(_EchoModel(), _Tokenizer([5]))
+        log = Path(tempfile.mkdtemp()) / "logs/model-loads.jsonl"
+        self.addCleanup(shutil.rmtree, log.parent.parent)
+
+        with patch, mock.patch("hearth.embedding._model_load_log", return_value=log):
+            embedder = MLXEmbedder(_model_directory(self))
+            embedder.embed(["a private question"], purpose="search")
+            embedder.embed(["another question"], purpose="search")
+
+        rows = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+        self.assertEqual([(row["purpose"], row["pressure_level"], row["swap_used_mb"]) for row in rows], [("search", 1, 0.0)])
+        self.assertEqual(set(rows[0]), {"at", "purpose", "pid", "seconds", "pressure_level", "swap_used_mb"})
+        self.assertNotIn("question", log.read_text(encoding="utf-8"))
+
+    def test_an_unwritable_model_load_log_does_not_stop_embedding(self) -> None:
+        core, patch = _fake_mlx(_EchoModel(), _Tokenizer([5]))
+        blocker = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, blocker)
+        (blocker / "logs").write_text("a file where the log folder should be", encoding="utf-8")
+
+        with patch, mock.patch("hearth.embedding._model_load_log", return_value=blocker / "logs/model-loads.jsonl"):
+            vectors = MLXEmbedder(_model_directory(self)).embed(["text"], purpose="search")
+
+        self.assertEqual(len(vectors), 1)
 
 
 class FlatVectorIndexTests(unittest.TestCase):
@@ -235,7 +263,7 @@ class FlatVectorIndexTests(unittest.TestCase):
 
     def test_a_document_imported_during_a_build_leaves_the_index_needing_a_rebuild(self) -> None:
         class AnyText(FakeEmbedder):
-            def embed(self, texts: list[str]) -> list[list[float]]:
+            def embed(self, texts: list[str], purpose: str = "unnamed") -> list[list[float]]:
                 return [[1.0, 0.0] for _ in texts]
 
         root = Path(self.temporary_directory.name)

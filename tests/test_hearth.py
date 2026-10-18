@@ -101,7 +101,7 @@ class FakeFlatEmbedder:
     def __init__(self, vectors: dict[str, list[float]]):
         self._vectors = vectors
 
-    def embed(self, texts: list[str]) -> list[list[float]]:
+    def embed(self, texts: list[str], purpose: str = "unnamed") -> list[list[float]]:
         return [self._vectors[text] for text in texts]
 
 
