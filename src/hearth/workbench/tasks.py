@@ -1872,16 +1872,75 @@ def _argv(template: list[str], provider: str, prompt: str, check: str, model: st
     return argv
 
 
-def _stop(process: subprocess.Popen) -> None:
+def _stop(process: subprocess.Popen) -> list[int]:
+    """Stop what the run started outside its process group, then the group; returns the IDs of processes that refused."""
+    refused: list[int] = []
     for sig in (signal.SIGTERM, signal.SIGKILL):
+        refused += _end_escaped(process.pid)
         try:
             os.killpg(process.pid, sig)
             process.wait(timeout=5)
-            return
+            break
         except ProcessLookupError:
-            return
+            break
         except subprocess.TimeoutExpired:
             continue
+    return sorted(set(refused))
+
+
+def _end_escaped(leader: int) -> list[int]:
+    """Force-stop every process below the run's leader that left its process group; returns those that refused.
+
+    Codex and Claude Code run their commands in groups of their own, so stopping the group alone left a check running
+    (slice 2 proof, 2026-10-18). Each is paused first, until no new one appears, so none can start more while they are found, then all
+    are ended at once. The leader's own group is left to its signals, so the agent can still finish writing what it has.
+    ponytail: only what is below the leader when this runs is found; work that double-forked away needs a per-turn marker.
+    """
+    paused: list[int] = []
+    refused: list[int] = []
+    for _ in range(20):  # A process that refuses to pause could keep starting more; what is left after this is reported.
+        new = [pid for pid in _escaped(leader) if pid not in paused and pid not in refused]
+        if not new:
+            break
+        for pid in new:
+            try:
+                os.kill(pid, signal.SIGSTOP)
+                paused.append(pid)
+            except ProcessLookupError:
+                pass
+            except PermissionError:
+                refused.append(pid)
+    else:
+        refused += [pid for pid in _escaped(leader) if pid not in paused and pid not in refused]
+    for pid in paused:  # Paused, none can exit, so these IDs are still theirs.
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        except PermissionError:
+            refused.append(pid)
+    return refused
+
+
+def _escaped(leader: int) -> list[int]:
+    """The processes below the leader, by parent, that are no longer in its process group; none when ps cannot say."""
+    try:
+        shown = subprocess.run(["ps", "-Ao", "pid=,ppid=,pgid="], capture_output=True, text=True).stdout
+    except OSError:
+        return []  # The group is still stopped by its own signals.
+    rows = []
+    for line in shown.splitlines():
+        fields = line.split()
+        if len(fields) == 3 and all(field.isdigit() for field in fields):  # A line ps garbled is skipped, not the whole list.
+            rows.append(tuple(map(int, fields)))
+    below, todo = {}, [leader]
+    while todo:
+        parent = todo.pop()
+        for pid, ppid, pgid in rows:
+            if ppid == parent and pid not in below:
+                below[pid] = pgid
+                todo.append(pid)
+    return [pid for pid, pgid in below.items() if pgid != leader]
 
 
 TASK_ID = re.compile(r"^[0-9]{8}-[0-9]{6}(-[0-9]+)?$")
@@ -1989,13 +2048,15 @@ def _identity(pid: int) -> str | None:
 
 def _stop_pid(pid: int, identity: str | None) -> bool:
     """Stop the run's process group, first politely, then by force, only while the process still has the identity recorded
-    at launch and leads its own group; returns False when the process could not be shown to be that run."""
+    at launch and leads its own group, each time first ending what it started outside the group; returns False when the
+    process could not be shown to be that run."""
     for sig in (signal.SIGTERM, signal.SIGKILL):
         current = _identity(pid)
         if current is None:
             return True
         if identity is None or current != identity or current.split()[0] != str(pid):
             return False
+        _end_escaped(pid)  # ponytail: a crashed backend's leftovers that refuse are not reported; record them if that is ever seen.
         try:
             os.killpg(pid, sig)
         except ProcessLookupError:

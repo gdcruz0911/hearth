@@ -171,7 +171,7 @@ def stop(session_id: str, run: str) -> dict:
     with _active_lock:
         process = _active.get(session_id)
     if process is not None:
-        tasks._stop(process)  # SIGTERM to the turn's process group, then SIGKILL; _wait records the outcome.
+        _left_running(session_id, tasks._stop(process))  # The turn's process group, then what it started elsewhere.
         _wait(session_id, process)
     else:  # A turn this backend did not start, such as one left by a crash.
         _settle(session_id)
@@ -190,7 +190,7 @@ def stop_all() -> None:
                 tasks._write(_dir(session_id), task)
         except (OSError, ValueError, KeyError, IndexError, SessionError):
             pass  # Its record is unreadable or gone; the process is still stopped.
-        tasks._stop(process)
+        _left_running(session_id, tasks._stop(process))
         _wait(session_id, process)
 
 
@@ -296,7 +296,8 @@ def summary(task: dict, turns: bool = False) -> dict:
             description = f"Shell commands run within Codex's {sandbox} sandbox."
         found["commands"] = {"description": description, "check": check}
         found["turns"] = [{key: run.get(key) for key in ("dir", "message", "model", "effort", "started", "finished", "outcome", "exit_code",
-                                                          "model_used", "sandbox_used", "warnings", "error", "session_id", "resumed", "stopped_by")}
+                                                          "model_used", "sandbox_used", "warnings", "error", "session_id", "resumed", "stopped_by",
+                                                          "left_running")}
                           for run in task["runs"]]
     return found
 
@@ -343,7 +344,7 @@ def _wait(session_id: str, process: subprocess.Popen) -> None:
     try:
         process.wait(timeout=TIMEOUT_SECONDS)
     except subprocess.TimeoutExpired:
-        tasks._stop(process)
+        _left_running(session_id, tasks._stop(process))
         process.wait()
     with _active_lock:
         if _active.get(session_id) is process:
@@ -352,6 +353,19 @@ def _wait(session_id: str, process: subprocess.Popen) -> None:
         _settle(session_id, process.returncode)
     except SessionError:
         pass  # The conversation's record is gone, so there is nothing left to record the end in.
+
+
+def _left_running(session_id: str, pids: list[int]) -> None:
+    """Record the processes a stopped turn started that could not be stopped, so the turn never reads as fully stopped."""
+    if not pids:
+        return
+    try:
+        with tasks._task_lock(_dir(session_id)):
+            task = tasks._read(_dir(session_id))
+            task["runs"][-1]["left_running"] = pids
+            tasks._write(_dir(session_id), task)
+    except (OSError, ValueError, KeyError, IndexError, SessionError):
+        pass  # Its record is unreadable or gone, so there is nowhere to say it.
 
 
 def _settle(session_id: str, exit_code: int | None = None) -> None:

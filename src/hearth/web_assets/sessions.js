@@ -281,6 +281,9 @@
           : " No output had arrived.";
         parts.push(el("p", "turn-note", who + kept));
       }
+      if ((turn.left_running || []).length) {
+        parts.push(el("p", "turn-note failed", `Hearth could not stop ${turn.left_running.length} process(es) this reply started: ${turn.left_running.join(", ")}. Check them with ps.`));
+      }
       if (turn.outcome === "interrupted") {
         parts.push(el("p", "turn-note failed", "Hearth stopped this reply when it quit or lost its backend. Nothing was resent; send again to continue."));
       }
