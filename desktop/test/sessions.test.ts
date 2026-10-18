@@ -8,21 +8,37 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { openApp, pause, python, realBackend, repo, scratch, windowShowing, type Scratch } from "./helpers.ts";
 
-function conversation(home: Scratch): string {
+function conversation(home: Scratch, request = "request-draft-01"): string {
   const project = join(home.dir, "project");
-  mkdirSync(project);
   const env = { PATH: "/usr/bin:/bin", HOME: join(home.dir, "home"), HEARTH_HOME: join(home.dir, "hearth"), PYTHONPATH: join(repo, "src"),
                 GIT_AUTHOR_NAME: "Person", GIT_AUTHOR_EMAIL: "person@example.com", GIT_COMMITTER_NAME: "Person", GIT_COMMITTER_EMAIL: "person@example.com" };
-  const git = (...args: string[]) => execFileSync("git", ["-C", project, ...args], { env });
-  git("init", "-q", "-b", "main");
-  writeFileSync(join(project, "README.md"), "# Project\n");
-  git("add", "README.md");
-  git("commit", "-q", "-m", "init");
-  mkdirSync(join(home.dir, "hearth"), { recursive: true });
-  writeFileSync(join(home.dir, "hearth/projects.json"), JSON.stringify({ demo: { path: project, check: "true", providers: ["claude", "codex"] } }));
+  if (!existsSync(project)) {
+    mkdirSync(project);
+    const git = (...args: string[]) => execFileSync("git", ["-C", project, ...args], { env });
+    git("init", "-q", "-b", "main");
+    writeFileSync(join(project, "README.md"), "# Project\n");
+    git("add", "README.md");
+    git("commit", "-q", "-m", "init");
+    mkdirSync(join(home.dir, "hearth"), { recursive: true });
+    writeFileSync(join(home.dir, "hearth/projects.json"), JSON.stringify({ demo: { path: project, check: "true", providers: ["claude", "codex"] } }));
+  }
   // Starting a conversation runs no agent, so none is needed here.
-  return execFileSync(python, ["-c", "from hearth.workbench import sessions; print(sessions.create('demo', 'claude', 'edit', None, 'medium', 'request-draft-01')['id'])"],
+  return execFileSync(python, ["-c", `from hearth.workbench import sessions; print(sessions.create('demo', 'claude', 'edit', None, 'medium', '${request}')['id'])`],
                       { env }).toString().trim();
+}
+
+// The only Claude the app can find: it logs each launch, says it started, and replies after a few seconds.
+function fakeClaude(home: Scratch): void {
+  const bin = join(home.dir, "home/.local/bin");
+  mkdirSync(bin, { recursive: true });
+  writeFileSync(join(bin, "claude"), `#!/bin/sh
+echo launch >> "$HOME/launches.log"
+cat > /dev/null
+echo '{"type": "system", "subtype": "init", "model": "fake", "session_id": "fake-1"}'
+sleep 4
+echo '{"type": "result", "result": "Done", "is_error": false, "session_id": "fake-1"}'
+`);
+  chmodSync(join(bin, "claude"), 0o755);
 }
 
 test("a draft typed just before quitting is saved, and is back in its conversation after reopening", async (t) => {
@@ -95,17 +111,7 @@ test("a draft typed just before reloading is saved, and is back after the reload
 test("text written while a reply runs stays editable, says it is not sent, and starts nothing", async (t) => {
   const home = scratch();
   const id = conversation(home);
-  // The only Claude the app can find: it logs each launch, says it started, and replies after a few seconds.
-  const bin = join(home.dir, "home/.local/bin");
-  mkdirSync(bin, { recursive: true });
-  writeFileSync(join(bin, "claude"), `#!/bin/sh
-echo launch >> "$HOME/launches.log"
-cat > /dev/null
-echo '{"type": "system", "subtype": "init", "model": "fake", "session_id": "fake-1"}'
-sleep 4
-echo '{"type": "result", "result": "Done", "is_error": false, "session_id": "fake-1"}'
-`);
-  chmodSync(join(bin, "claude"), 0o755);
+  fakeClaude(home);
   const { app } = await openApp(t, home, realBackend(home.dir), { env: { PATH: "/usr/bin:/bin" } });
   const page = await windowShowing(app, "Live ·");
   await page.evaluate((session) => void (window.location.hash = `#/sessions/${session}`), id);
@@ -247,3 +253,53 @@ test("reloading with a draft that fails to save asks first, and keeps the page b
   assert.deepEqual(await page.evaluate(() => [(window as unknown as { before?: boolean }).before, (document.getElementById("convo-message") as HTMLTextAreaElement).value]),
                    [true, "Keep me too"]);  // The same page, text and all.
 });
+
+for (const other of ["Same words", "Other words"]) {
+  test(`a reply to Send that arrives after switching clears only the sent conversation (other holds "${other}")`, async (t) => {
+    const home = scratch();
+    const sentFrom = conversation(home);
+    const elsewhere = conversation(home, "request-draft-02");
+    fakeClaude(home);
+    const { app } = await openApp(t, home, realBackend(home.dir), { env: { PATH: "/usr/bin:/bin" } });
+    const page = await windowShowing(app, "Live ·");
+    // Hold each Send reply in the page until released, so it can land after the keeper has switched conversations.
+    await app.context().addInitScript(() => {
+      const real = window.fetch.bind(window);
+      const held = window as unknown as { release?: () => void };
+      window.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+        if (!String(input).endsWith("/send")) return real(input, init);
+        const body = await (await real(input, init)).json();
+        await new Promise<void>((done) => (held.release = done));
+        return { ok: true, status: 200, json: async () => ((window as unknown as { handled: boolean }).handled = true, body) } as Response;
+      }) as typeof window.fetch;
+    });
+    await page.reload();
+    const open = async (id: string) => {
+      await page.evaluate((session) => void (window.location.hash = `#/sessions/${session}`), id);
+      await page.waitForFunction((session) => window.location.hash.endsWith(session), id);
+      await page.locator("#convo-message").waitFor();
+      await pause(400);  // Its saved draft, if any, has arrived.
+    };
+    const box = page.locator("#convo-message");
+
+    await open(sentFrom);
+    await box.fill("Same words");
+    await box.blur();
+    await page.getByRole("button", { name: "Send to Claude Code" }).click();
+    await page.waitForFunction(() => Boolean((window as unknown as { release?: () => void }).release));  // Sent; the reply is held.
+    await open(elsewhere);
+    await box.fill(other);
+    await box.blur();
+    const otherDraft = join(home.dir, "hearth/tasks", elsewhere, "draft.json");
+    for (let tries = 0; tries < 50 && !(existsSync(otherDraft) && JSON.parse(readFileSync(otherDraft, "utf8")).text === other); tries++) await pause(100);
+    await page.evaluate(() => (window as unknown as { release: () => void }).release());
+    await page.waitForFunction(() => (window as unknown as { handled?: boolean }).handled === true);  // The reply was read,
+    await page.evaluate(() => new Promise((done) => setTimeout(done, 0)));  // and what follows it in the page has run.
+
+    assert.equal(await box.inputValue(), other, "the other conversation's box is untouched");
+    await open(sentFrom);
+    assert.equal(await box.inputValue(), "", "the sent text does not come back");
+    await open(elsewhere);
+    assert.equal(await box.inputValue(), other);
+  });
+}

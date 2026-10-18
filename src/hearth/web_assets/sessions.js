@@ -386,9 +386,11 @@
   }
 
   async function openFolder() {
+    const from = state.selected;
     try {
-      await api(`sessions/${encodeURIComponent(state.selected)}/open`, {});
+      await api(`sessions/${encodeURIComponent(from)}/open`, {});
     } catch (failure) {
+      if (state.selected !== from) return; // Shown only with the conversation it is about.
       $("convo-send-error").hidden = false;
       $("convo-send-error").textContent = failure.message;
     }
@@ -430,22 +432,25 @@
     composer();
     say(`Sending to ${agent(state.detail.provider)}.`);
     const error = $("convo-send-error");
+    const from = state.selected; // The reply may land after the keeper has moved to another conversation.
+    const sent = state.sending;
     try {
-      const sent = state.sending;
-      const { session } = await api(`sessions/${encodeURIComponent(state.selected)}/send`,
+      const { session } = await api(`sessions/${encodeURIComponent(from)}/send`,
                                     { message: sent.message, send: sent.id, draft_at: sent.at });
-      state.sending = null;
-      error.hidden = true;
-      // A turn that could not start keeps the text; text typed after pressing Send is newer and is kept too.
-      if (session.status !== "failed" && $("convo-message").value.trim() === sent.message) {
-        $("convo-message").value = "";
-        const draft = state.drafts.get(session.id);
-        if (draft && draft.at === sent.at) Object.assign(draft, { text: "", saved: sent.at });
+      if (state.sending === sent) state.sending = null;
+      // A turn that could not start keeps the text, and so does text typed after pressing Send, which is newer.
+      // Only the sent conversation's own draft is cleared; the box on screen changes only if it still shows that draft.
+      const draft = state.drafts.get(from);
+      if (session.status !== "failed" && draft && draft.at === sent.at) {
+        Object.assign(draft, { text: "", saved: sent.at });
+        if (state.selected === from && $("convo-message").value.trim() === sent.message) $("convo-message").value = "";
       }
+      if (state.selected === from) error.hidden = true;
       await tick();
     } catch (failure) {
       const offline = failure instanceof TypeError; // The request may or may not have arrived: retry with the same ID.
-      if (!offline) state.sending = null;
+      if (!offline && state.sending === sent) state.sending = null;
+      if (state.selected !== from) return; // Its text stays in that conversation's draft; this box belongs to another.
       error.hidden = false;
       error.textContent = offline ? "Hearth did not answer. Your message is kept; Send retries it without sending it twice." : failure.message;
       composer();
@@ -456,12 +461,14 @@
     const turn = running();
     if (!turn) return;
     const button = $("convo-stop");
+    const from = state.selected;
     button.disabled = true;
     button.textContent = "Stopping…";
     try {
-      await api(`sessions/${encodeURIComponent(state.selected)}/stop`, { run: turn.dir });
+      await api(`sessions/${encodeURIComponent(from)}/stop`, { run: turn.dir });
       await tick();
     } catch (failure) {
+      if (state.selected !== from) return; // Shown only with the conversation it is about.
       $("convo-send-error").hidden = false;
       $("convo-send-error").textContent = failure.message;
     } finally {

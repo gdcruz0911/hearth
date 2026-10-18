@@ -136,14 +136,21 @@ def send(session_id: str, message: str, send_id: str, draft_at: int | None = Non
             task["status"] = "done"
             tasks._write(task_dir, task)
             return summary(task)
-        # The backend that owns the turn: another backend on the same home must not take it for a crash's leftover.
-        record.update(pid=process.pid, pid_identity=tasks._identity(process.pid), owner=os.getpid(), owner_identity=tasks._identity(os.getpid()))
-        tasks._write(task_dir, task)
-        if isinstance(draft_at, int) and draft_at >= _draft(task_dir)["at"]:
-            _write_draft(task_dir, "", draft_at)  # Sent: an empty draft at that version, so a late save of the same text is ignored.
-    with _active_lock:
-        _active[session_id] = process
-    threading.Thread(target=_wait, args=(session_id, process), daemon=True).start()
+        with _active_lock:
+            _active[session_id] = process  # Tracked before anything else can fail, so quitting always finds and stops it.
+        try:
+            # The backend that owns the turn: another backend on the same home must not take it for a crash's leftover.
+            record.update(pid=process.pid, pid_identity=tasks._identity(process.pid), owner=os.getpid(), owner_identity=tasks._identity(os.getpid()))
+            tasks._write(task_dir, task)
+        finally:
+            threading.Thread(target=_wait, args=(session_id, process), daemon=True).start()  # Settles the turn even if that write failed.
+    if isinstance(draft_at, int):
+        try:
+            with tasks._task_lock(task_dir):
+                if draft_at >= _draft(task_dir)["at"]:
+                    _write_draft(task_dir, "", draft_at)  # Sent: an empty draft at that version, so a late save of the same text is ignored.
+        except OSError:
+            pass  # The turn runs and is tracked either way; the draft is then kept, and the page clears its own copy.
     return summary(task)
 
 

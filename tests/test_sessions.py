@@ -376,6 +376,40 @@ class SessionWorkTests(SessionTestCase):
             sessions.send(refused, "x" * (sessions.MESSAGE_LIMIT + 1), "send-0002", draft_at=10)
         self.assertEqual(sessions.detail(refused)["draft"]["text"], "Too long")
 
+    def test_a_draft_that_cannot_be_cleared_still_leaves_the_turn_tracked_and_stopped_on_quit(self) -> None:
+        os.environ["FAKE_SESSION"] = "hang"
+        session_id = self.new()
+        sessions.save_draft(session_id, "Wait", 10)
+        with mock.patch.object(sessions, "_write_draft", side_effect=OSError("disk full")):
+            sessions.send(session_id, "Wait", "send-0001", draft_at=10)  # The turn started; the draft write is not its business.
+        self.started(session_id)
+        pid = tasks._read(self.home / ".hearth/tasks" / session_id)["runs"][-1]["pid"]
+
+        sessions.stop_all()
+
+        turn = sessions.detail(session_id)["turns"][-1]
+        self.assertEqual((turn["outcome"], turn["stopped_by"]), ("cancelled", "quit"))
+        self.assertFalse(tasks._alive(pid))
+        self.assertEqual(sessions.detail(session_id)["draft"]["text"], "Wait")  # Kept, since it could not be cleared.
+
+    def test_a_launched_turn_whose_record_cannot_be_updated_is_still_watched_and_settled(self) -> None:
+        session_id = self.new()
+        real, writes = tasks._write, []
+        def write(task_dir, task):
+            writes.append(task_dir)
+            if len(writes) == 2:  # The update just after launch; the one before it is how the turn was recorded.
+                raise OSError("disk full")
+            return real(task_dir, task)
+        with mock.patch.object(tasks, "_write", side_effect=write), self.assertRaises(OSError):
+            sessions.send(session_id, "Say hello", "send-0001")
+        with self.assertRaises(sessions.SessionError) as refused:  # Unsettled, so no second agent starts beside it.
+            sessions.send(session_id, "Again", "send-0002")
+        self.assertEqual(refused.exception.status, 409)
+
+        turn = self.settled(session_id)["turns"][-1]  # The watcher settles it when the agent ends.
+        self.assertEqual(turn["outcome"], "done")
+        self.assertEqual(len(self.calls()), 1)
+
     def test_a_draft_must_be_text_with_a_version(self) -> None:
         session_id = self.new()
         for text, at in (("hi", None), ("hi", True), ("hi", -1), (None, 1), ("x" * (sessions.MESSAGE_LIMIT + 1), 1)):
