@@ -215,7 +215,8 @@ async function draftsKept(leave = "Close Without Saving"): Promise<boolean> {
       const answer = dialog.showMessageBox({
         type: "warning", buttons: ["Keep Hearth Open", leave], defaultId: 0, cancelId: 0,
         message: "Hearth could not save every draft.",
-        detail: "Text you typed in a conversation was not saved within five seconds. Keep Hearth open to copy it or let it save again; going on now loses it.",
+        detail: "Text you typed, or the removal of a message you already sent, was not saved within five seconds. Keep Hearth open and it tries again. "
+          + "If you go on now, unsaved text is lost, and a sent message may come back as a draft when you reopen.",
       }).then(({ response }) => response === 1).finally(() => (askingDrafts = null));
       askingDrafts = { leave, answer };
       return answer;

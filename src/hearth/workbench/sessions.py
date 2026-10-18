@@ -144,14 +144,16 @@ def send(session_id: str, message: str, send_id: str, draft_at: int | None = Non
             tasks._write(task_dir, task)
         finally:
             threading.Thread(target=_wait, args=(session_id, process), daemon=True).start()  # Settles the turn even if that write failed.
+    cleared = False  # Said in the reply, so a page whose draft was not cleared here saves the cleared draft itself and retries.
     if isinstance(draft_at, int):
         try:
             with tasks._task_lock(task_dir):
                 if draft_at >= _draft(task_dir)["at"]:
                     _write_draft(task_dir, "", draft_at)  # Sent: an empty draft at that version, so a late save of the same text is ignored.
+                cleared = True
         except OSError:
-            pass  # The turn runs and is tracked either way; the draft is then kept, and the page clears its own copy.
-    return summary(task)
+            pass  # The turn runs and is tracked either way.
+    return {**summary(task), "draft_cleared": cleared}
 
 
 def stop(session_id: str, run: str) -> dict:

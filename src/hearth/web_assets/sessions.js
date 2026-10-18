@@ -160,7 +160,7 @@
 
   function typed(id, text) {
     const draft = state.drafts.get(id) || { saved: 0, timer: 0 };
-    Object.assign(draft, { text, at: version() });
+    Object.assign(draft, { text, at: version(), clearing: false });
     state.drafts.set(id, draft);
     clearTimeout(draft.timer);
     draft.timer = setTimeout(() => saveDraft(id), 400);
@@ -412,8 +412,10 @@
     $("convo-stop").hidden = !turn;
     $("convo-message").placeholder = state.detail ? `Message ${agent(state.detail.provider)}` : "";
     // Without a queue, text written during a reply waits here: say so, so it is never taken for sent.
-    const unsaved = (state.drafts.get(state.selected) || {}).failed;
-    $("convo-hint").textContent = unsaved ? "Draft not saved: Hearth did not answer. It stays here and is saved again as you type."
+    const mine = state.drafts.get(state.selected) || {};
+    $("convo-hint").textContent = mine.failed && mine.clearing
+      ? "Hearth could not remove the message you sent from this conversation's draft. It tries again; if you quit now, the sent message comes back as a draft when you reopen."
+      : mine.failed ? "Draft not saved: Hearth did not answer. It stays here and is saved again as you type."
       : turn && $("convo-message").value.trim()
       ? "Not sent: Hearth does not queue messages. Send it when this reply finishes · Esc stops the reply"
       : turn ? "Esc stops the reply · its output so far is kept" : "⌘↩ sends";
@@ -442,7 +444,13 @@
       // Only the sent conversation's own draft is cleared; the box on screen changes only if it still shows that draft.
       const draft = state.drafts.get(from);
       if (session.status !== "failed" && draft && draft.at === sent.at) {
-        Object.assign(draft, { text: "", saved: sent.at });
+        // Hearth emptied the saved draft when the turn started; if it could not, the page saves the empty draft as a newer
+        // version, retried like any other save and asked about at quit, so the sent text never comes back.
+        if (session.draft_cleared === true) Object.assign(draft, { text: "", saved: sent.at });
+        else {
+          Object.assign(draft, { text: "", at: version(), clearing: true });
+          saveDraft(from);
+        }
         if (state.selected === from && $("convo-message").value.trim() === sent.message) $("convo-message").value = "";
       }
       if (state.selected === from) error.hidden = true;

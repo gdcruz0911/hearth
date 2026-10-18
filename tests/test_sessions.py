@@ -350,7 +350,7 @@ class SessionWorkTests(SessionTestCase):
     def test_a_late_save_never_brings_back_sent_text_or_overwrites_newer_text(self) -> None:
         session_id = self.new()
         sessions.save_draft(session_id, "Say hello", 10)
-        sessions.send(session_id, "Say hello", "send-0001", draft_at=10)
+        self.assertTrue(sessions.send(session_id, "Say hello", "send-0001", draft_at=10)["draft_cleared"])
         self.settled(session_id)
         self.assertEqual(sessions.save_draft(session_id, "Say hello", 10), {"text": "", "at": 10})  # The save that raced its send.
         sessions.save_draft(session_id, "Next question", 12)
@@ -381,7 +381,8 @@ class SessionWorkTests(SessionTestCase):
         session_id = self.new()
         sessions.save_draft(session_id, "Wait", 10)
         with mock.patch.object(sessions, "_write_draft", side_effect=OSError("disk full")):
-            sessions.send(session_id, "Wait", "send-0001", draft_at=10)  # The turn started; the draft write is not its business.
+            sent = sessions.send(session_id, "Wait", "send-0001", draft_at=10)  # The turn started; the draft write is not its business.
+        self.assertFalse(sent["draft_cleared"])  # Said, so the page saves the cleared draft itself.
         self.started(session_id)
         pid = tasks._read(self.home / ".hearth/tasks" / session_id)["runs"][-1]["pid"]
 

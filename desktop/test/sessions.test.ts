@@ -3,7 +3,7 @@
 
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { openApp, pause, python, realBackend, repo, scratch, windowShowing, type Scratch } from "./helpers.ts";
@@ -303,3 +303,41 @@ for (const other of ["Same words", "Other words"]) {
     assert.equal(await box.inputValue(), other);
   });
 }
+
+test("when Hearth cannot clear a sent draft, the page clears it, quit asks while it cannot, and reopening never brings it back", async (t) => {
+  const home = scratch();
+  const id = conversation(home);
+  fakeClaude(home);
+  const saved = join(home.dir, "hearth/tasks", id, "draft.json");
+  const first = await openApp(t, home, realBackend(home.dir), { env: { PATH: "/usr/bin:/bin" } });
+  const page = await windowShowing(first.app, "Live ·");
+  await page.evaluate((session) => void (window.location.hash = `#/sessions/${session}`), id);
+  const box = page.locator("#convo-message");
+  await box.waitFor();
+  await box.fill("Sent once");
+  await box.blur();
+  for (let tries = 0; tries < 50 && !(existsSync(saved) && JSON.parse(readFileSync(saved, "utf8")).text === "Sent once"); tries++) await pause(100);
+  const blocker = join(home.dir, "hearth/tasks", id, "draft.json.partial");
+  mkdirSync(blocker);  // A folder where the draft is written: every draft write fails until it goes.
+  await page.getByRole("button", { name: "Send to Claude Code" }).click();
+  for (let tries = 0; tries < 50 && !existsSync(join(home.dir, "home/launches.log")); tries++) await pause(100);
+  await page.waitForFunction(() => (document.getElementById("convo-message") as HTMLTextAreaElement).value === "");
+  await page.waitForFunction(() => document.getElementById("convo-hint")?.textContent?.startsWith("Hearth could not remove the message you sent"));
+
+  await answering(first.app, [0]);  // Keep Hearth Open.
+  await first.app.evaluate(({ app }) => app.quit());
+  for (let tries = 0; tries < 80 && !(await first.app.evaluate(() => ((globalThis as unknown as { asked?: string[] }).asked ?? []).length)); tries++) await pause(100);
+  const askedWhileBlocked = await first.app.evaluate(() => (globalThis as unknown as { asked: string[] }).asked);
+  rmdirSync(blocker);
+  const exited = new Promise((done) => first.app.process().once("exit", done));
+  await first.app.evaluate(({ app }) => app.quit());  // The clear is retried, succeeds, and nothing is asked.
+  await exited;
+
+  assert.deepEqual(askedWhileBlocked, ["Hearth could not save every draft."]);
+  assert.equal(JSON.parse(readFileSync(saved, "utf8")).text, "");
+  const second = await openApp(t, home, realBackend(home.dir), { env: { PATH: "/usr/bin:/bin" } });
+  const reopened = await windowShowing(second.app, "Live ·");
+  await reopened.evaluate((session) => void (window.location.hash = `#/sessions/${session}`), id);
+  await reopened.getByRole("button", { name: "Send to Claude Code" }).waitFor();  // Set with the conversation's details, its draft included.
+  assert.equal(await reopened.locator("#convo-message").inputValue(), "");
+});
