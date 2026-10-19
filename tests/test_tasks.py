@@ -2565,8 +2565,8 @@ class CancelTests(TaskTestCase):
         env = {**os.environ, "PYTHONPATH": str(Path(tasks.__file__).parents[2])}
         return subprocess.run([sys.executable, "-m", "hearth.cli", "task", "cancel", task_id], env=env, capture_output=True, text=True)
 
-    def running(self) -> tuple[threading.Thread, dict]:
-        os.environ["FAKE_AGENT_SCENARIO"] = "hang"
+    def running(self, scenario: str = "hang") -> tuple[threading.Thread, dict]:
+        os.environ["FAKE_AGENT_SCENARIO"] = scenario
         worker = threading.Thread(target=self.cli, args=("task", "new", "demo", "Add hello.txt"))
         worker.start()
         for _ in range(200):
@@ -2593,6 +2593,27 @@ class CancelTests(TaskTestCase):
             os.kill(pid, 0)
         self.assertTrue(Path(task["worktree"]).exists())
         self.assertTrue((self.home / ".hearth/tasks" / task["id"] / "runs/01-implement-claude/prompt.md").exists())
+
+    def test_cancelling_a_task_also_ends_work_its_agent_started_in_another_session(self) -> None:
+        worker, task = self.running("hang-detach")
+        marker = self.home / ".fake-task-work"
+        for _ in range(200):
+            if marker.exists() and marker.read_text(encoding="utf-8"):
+                break
+            time.sleep(0.05)
+        work = int(marker.read_text(encoding="utf-8"))
+        self.addCleanup(lambda: tasks._alive(work) and os.kill(work, 9))
+
+        result = self.cancel_elsewhere(task["id"])
+        worker.join(timeout=20)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for _ in range(40):  # Its parent is gone, so the system reaps it shortly after.
+            if not tasks._alive(work):
+                break
+            time.sleep(0.05)
+        self.assertFalse(tasks._alive(work))
+        self.assertNotIn("could not", result.stderr)
 
     def test_a_reused_process_id_is_not_signalled(self) -> None:
         os.environ["FAKE_AGENT_SCENARIO"] = "idle"

@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import shlex
 import shutil
 import signal
@@ -16,6 +17,7 @@ import subprocess
 import sys
 import threading
 import time
+from datetime import datetime
 from pathlib import Path
 
 from ..runtime import hearth_home
@@ -735,9 +737,11 @@ def _run(task: dict, task_dir: Path, role: str, provider: str, template: list[st
         argv = _argv(template, provider, prompt, check, model, effort, verify, _claude_settings(Path(task["worktree"])))
         events = (run_dir / "events.jsonl").open("w", encoding="utf-8")
         errors = (run_dir / "stderr.txt").open("w", encoding="utf-8")
+        record["marker"] = _new_marker()
         try:
             process = subprocess.Popen(argv, cwd=task["worktree"], stdin=subprocess.PIPE, stdout=events, stderr=errors, text=True,
                                        start_new_session=True, env={**os.environ, **NO_BYTECODE, "HEARTH_TASK": task["id"], "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
+                                                                    RUN_MARKER: record["marker"],
                                                                     **({"CODEX_HOME": str(_codex_home(task_dir))} if provider == "codex" else {})})
         except OSError as exc:
             events.close()
@@ -755,7 +759,7 @@ def _run(task: dict, task_dir: Path, role: str, provider: str, template: list[st
             process.communicate("" if "{prompt}" in template else prompt, timeout=timeout)
         except subprocess.TimeoutExpired:
             timed_out = True
-            _stop(process)
+            note_cleanup(record, _stop(process, record, task["worktree"]))
     record.update(exit_code=process.returncode, finished=_now())
     parsed = parse_events(provider, (run_dir / "events.jsonl").read_text(encoding="utf-8"))
     # What actually ran, for later statistics: the CLI's own report, else the requested model.
@@ -1872,75 +1876,245 @@ def _argv(template: list[str], provider: str, prompt: str, check: str, model: st
     return argv
 
 
-def _stop(process: subprocess.Popen) -> list[int]:
-    """Stop what the run started outside its process group, then the group; returns the IDs of processes that refused."""
-    refused: list[int] = []
+RUN_MARKER = "HEARTH_RUN"  # Set to a run's own random marker for its agent, so work that leaves its process tree is still known as its own.
+
+
+def _new_marker() -> str:
+    return secrets.token_hex(16)
+
+
+def _stop(process: subprocess.Popen, run: dict, worktree: str | Path) -> dict:
+    """Stop a run this process started: what it started outside its process group first, then the group, then whatever is
+    left. Returns what could not be stopped or checked (see _cleanup)."""
+    # Its leader is this process's unreaped child until it is waited for, so its ID cannot be reused meanwhile.
+    return _stop_leader(process.pid, lambda timeout: _waited(process, timeout), lambda: True, run, worktree)
+
+
+def _stop_pid(run: dict, worktree: str | Path) -> tuple[bool, dict]:
+    """Stop a run another process started, only while its leader still has the identity recorded at launch and leads its own
+    group; work carrying the run's marker is stopped either way. Returns whether the leader was shown to be that run, and
+    what could not be stopped or checked."""
+    pid, identity = run.get("pid"), run.get("pid_identity")
+    current = _identity(pid) if pid else None
+    if current is None or identity is None or current != identity or current.split()[0] != str(pid):
+        # Gone, as after a crash, or not shown to be the run: only marked work can still be found, since its group may be reused.
+        cleanup = _cleanup()
+        if not run.get("finished"):  # A finished run's leftovers were settled when it ended; the folder may be the person's now.
+            _guarded(lambda: _sweep(None, run, worktree, cleanup), cleanup)
+        return current is None, cleanup
+
+    def exited(timeout: float) -> bool:
+        for _ in range(int(timeout * 10)):
+            if not _alive(pid):
+                return True
+            time.sleep(0.1)
+        return not _alive(pid)
+    cleanup = _stop_leader(pid, exited, lambda: _identity(pid) == current, run, worktree)
+    return not _alive(pid), cleanup
+
+
+def _waited(process: subprocess.Popen, timeout: float) -> bool:
+    try:
+        process.wait(timeout=timeout)
+        return True
+    except subprocess.TimeoutExpired:
+        return False
+
+
+def _stop_leader(leader: int, exited, still_leader, run: dict, worktree: str | Path) -> dict:
+    """End the leader's escaped work, ask its group to stop, force it after five seconds, then end everything left.
+
+    Codex and Claude Code run their commands in groups of their own (slice 2 proof, 2026-10-18), so the group alone is not the
+    run. Escaped work is ended before the leader is signalled, so an agent waiting for its command can still exit politely.
+    """
+    cleanup = _cleanup()
+    marker = run.get("marker")
     for sig in (signal.SIGTERM, signal.SIGKILL):
-        refused += _end_escaped(process.pid)
+        _guarded(lambda: _pause_and_end(
+            lambda found: [pid for pid in _below(found, leader) if found[pid][1] != leader] + _marked(found, marker, cleanup, leader),
+            cleanup), cleanup)
+        if not still_leader():
+            break  # Gone, and its ID may now be another process's.
         try:
-            os.killpg(process.pid, sig)
-            process.wait(timeout=5)
-            break
+            os.killpg(leader, sig)
         except ProcessLookupError:
             break
-        except subprocess.TimeoutExpired:
-            continue
-    return sorted(set(refused))
-
-
-def _end_escaped(leader: int) -> list[int]:
-    """Force-stop every process below the run's leader that left its process group; returns those that refused.
-
-    Codex and Claude Code run their commands in groups of their own, so stopping the group alone left a check running
-    (slice 2 proof, 2026-10-18). Each is paused first, until no new one appears, so none can start more while they are found, then all
-    are ended at once. The leader's own group is left to its signals, so the agent can still finish writing what it has.
-    ponytail: only what is below the leader when this runs is found; work that double-forked away needs a per-turn marker.
-    """
-    paused: list[int] = []
-    refused: list[int] = []
-    for _ in range(20):  # A process that refuses to pause could keep starting more; what is left after this is reported.
-        new = [pid for pid in _escaped(leader) if pid not in paused and pid not in refused]
-        if not new:
+        if exited(5):
             break
-        for pid in new:
+    _guarded(lambda: _sweep(leader, run, worktree, cleanup), cleanup)
+    return cleanup
+
+
+def _guarded(step, cleanup: dict) -> None:
+    """Run a cleanup step whose failure must never keep the agent itself from being stopped; a failure is reported."""
+    try:
+        step()
+    except Exception:  # noqa: BLE001 - anything unexpected here, such as a process's undecodable text, is reported instead.
+        cleanup["unchecked"] = True
+
+
+def _sweep(leader: int | None, run: dict, worktree: str | Path, cleanup: dict | None) -> dict:
+    """After the leader is gone: end its group's remaining members and anything carrying the run's marker, then list what
+    still runs in the worktree since the run started, which is reported and never stopped, since the person may work there."""
+    cleanup = cleanup or _cleanup()
+    marker = run.get("marker")
+
+    def left(found: dict) -> list[int]:
+        # A group outlives its leader while members remain, and its ID cannot be given to a new process until they are gone;
+        # while any process holds the leader's ID, the group is that process's or the leader's own, and is not touched.
+        group = [pid for pid, row in found.items() if leader and leader not in found and row[1] == leader]
+        return group + _marked(found, marker, cleanup, None)
+    _pause_and_end(left, cleanup)
+    cleanup["in_folder"] = _in_folder(worktree, _started(run), cleanup)
+    return cleanup
+
+
+def _cleanup() -> dict:
+    """refused: processes that could not be stopped; in_folder: processes started during the run that still work in its
+    worktree and were not stopped; unchecked: Hearth could not list processes, so leftovers may be unknown."""
+    return {"refused": [], "in_folder": [], "unchecked": False}
+
+
+def _processes(cleanup: dict) -> dict[int, tuple[int, int, str, float]] | None:
+    """Every process's parent, group, state, and start time; None, noted in cleanup, when ps cannot say."""
+    try:
+        shown = subprocess.run(["ps", "-Ao", "pid=,ppid=,pgid=,stat=,lstart="], capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        shown = None
+    if shown is None or shown.returncode != 0:
+        cleanup["unchecked"] = True
+        return None
+    found = {}
+    for line in shown.stdout.splitlines():
+        fields = line.split(None, 4)
+        if len(fields) == 5 and all(field.isdigit() for field in fields[:3]):  # A line ps garbled is skipped, not the whole list.
             try:
-                os.kill(pid, signal.SIGSTOP)
-                paused.append(pid)
-            except ProcessLookupError:
-                pass
-            except PermissionError:
-                refused.append(pid)
+                started = time.mktime(time.strptime(" ".join(fields[4].split()), "%a %b %d %H:%M:%S %Y"))
+            except ValueError:
+                continue
+            found[int(fields[0])] = (int(fields[1]), int(fields[2]), fields[3], started)
+    return found
+
+
+def _below(found: dict, leader: int) -> list[int]:
+    below, todo = [], [leader]
+    while todo:
+        parent = todo.pop()
+        for pid, row in found.items():
+            if row[0] == parent and pid not in below:
+                below.append(pid)
+                todo.append(pid)
+    return below
+
+
+def _marked(found: dict, marker: str | None, cleanup: dict, leader: int | None) -> list[int]:
+    """Processes whose environment carries the run's marker, outside the leader's group. The environments read here are
+    matched in memory only, never kept or shown. macOS hides the environment of its own programs, such as sleep and zsh."""
+    if not marker:
+        return []
+    wanted, hits = f"{RUN_MARKER}={marker}", []
+    if Path("/proc").is_dir():
+        for pid in found:
+            try:
+                if wanted.encode() in Path(f"/proc/{pid}/environ").read_bytes().split(b"\0"):
+                    hits.append(pid)
+            except OSError:
+                continue  # Exited, or not ours to read.
     else:
-        refused += [pid for pid in _escaped(leader) if pid not in paused and pid not in refused]
-    for pid in paused:  # Paused, none can exit, so these IDs are still theirs.
+        try:  # As bytes: another process's environment need not be valid text.
+            shown = subprocess.run(["ps", "-Eww", "-Ao", "pid=,command="], capture_output=True, timeout=10)
+        except (OSError, subprocess.TimeoutExpired):
+            shown = None
+        if shown is None or shown.returncode != 0:
+            cleanup["unchecked"] = True
+            return []
+        for line in shown.stdout.splitlines():
+            pid, _, rest = line.strip().partition(b" ")
+            if pid.isdigit() and b" " + wanted.encode() + b" " in b" " + rest + b" ":
+                hits.append(int(pid))
+    return [pid for pid in hits if pid in found and found[pid][1] != leader and pid != os.getpid()]
+
+
+def _pause_and_end(candidates, cleanup: dict) -> None:
+    """Pause each candidate until none is new, so none starts more, then force-stop them all; each signal goes only to a
+    process whose start time is still the one listed, re-read just before, so a reused process ID is never signalled."""
+    paused: dict[int, float] = {}
+    try:
+        for _ in range(20):  # A process that refuses to pause could keep starting more; what is left after this is reported.
+            found = _processes(cleanup)
+            if found is None:
+                break  # Unchecked, and noted; what is already paused is still ended below.
+            new = [pid for pid in dict.fromkeys(candidates(found)) if pid not in paused and pid not in cleanup["refused"]]
+            if not new:
+                break
+            _signal({pid: found[pid][3] for pid in new}, signal.SIGSTOP, cleanup, paused)
+        else:
+            found = _processes(cleanup) or {}
+            cleanup["refused"] += [pid for pid in candidates(found) if pid not in paused and pid not in cleanup["refused"]]
+    finally:
+        _signal(paused, signal.SIGKILL, cleanup, None)  # Never leave a paused process paused.
+
+
+def _signal(targets: dict[int, float], sig: int, cleanup: dict, sent: dict | None) -> None:
+    """Pausing needs the process listed with its start time; ending a paused one only needs it not listed as someone else,
+    since a paused process cannot exit, and its ID cannot be reused, unless something else ended it."""
+    if not targets:
+        return
+    found = _processes(cleanup) or {}
+    for pid, started in targets.items():
+        if pid in found and found[pid][3] != started or pid not in found and sig != signal.SIGKILL:
+            continue  # Exited, so its ID may now be another process's.
         try:
-            os.kill(pid, signal.SIGKILL)
+            os.kill(pid, sig)
+            if sent is not None:
+                sent[pid] = started
         except ProcessLookupError:
             pass
         except PermissionError:
-            refused.append(pid)
-    return refused
+            cleanup["refused"].append(pid)
 
 
-def _escaped(leader: int) -> list[int]:
-    """The processes below the leader, by parent, that are no longer in its process group; none when ps cannot say."""
+def _started(run: dict) -> float | None:
     try:
-        shown = subprocess.run(["ps", "-Ao", "pid=,ppid=,pgid="], capture_output=True, text=True).stdout
-    except OSError:
-        return []  # The group is still stopped by its own signals.
-    rows = []
-    for line in shown.splitlines():
-        fields = line.split()
-        if len(fields) == 3 and all(field.isdigit() for field in fields):  # A line ps garbled is skipped, not the whole list.
-            rows.append(tuple(map(int, fields)))
-    below, todo = {}, [leader]
-    while todo:
-        parent = todo.pop()
-        for pid, ppid, pgid in rows:
-            if ppid == parent and pid not in below:
-                below[pid] = pgid
-                todo.append(pid)
-    return [pid for pid, pgid in below.items() if pgid != leader]
+        return datetime.fromisoformat(run["started"]).timestamp()
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _in_folder(worktree: str | Path, since: float | None, cleanup: dict) -> list[int]:
+    """Processes started since the run began whose working folder is inside its worktree, other than this one."""
+    if since is None or not worktree:
+        return []
+    root = os.path.realpath(worktree)
+    found = _processes(cleanup)
+    if found is None:
+        return []
+    folders: dict[int, str] = {}
+    if Path("/proc").is_dir():
+        for pid in found:
+            try:
+                folders[pid] = os.readlink(f"/proc/{pid}/cwd")
+            except OSError:
+                continue
+    else:
+        try:
+            shown = subprocess.run(["lsof", "-nP", "-d", "cwd", "-Fpn"], capture_output=True, text=True, errors="surrogateescape",
+                                   timeout=10)
+        except (OSError, subprocess.TimeoutExpired):
+            cleanup["unchecked"] = True
+            return []
+        if shown.returncode not in (0, 1) or not shown.stdout:
+            cleanup["unchecked"] = True
+            return []
+        pid = None
+        for line in shown.stdout.splitlines():  # lsof exits 1 when some processes cannot be read; what it listed still holds.
+            if line[:1] == "p" and line[1:].isdigit():
+                pid = int(line[1:])
+            elif line[:1] == "n" and pid is not None:
+                folders[pid] = line[1:]
+    return sorted(pid for pid, folder in folders.items()
+                  if pid in found and pid != os.getpid() and found[pid][3] >= int(since)
+                  and (os.path.realpath(folder) + os.sep).startswith(root + os.sep) and "Z" not in found[pid][2])
 
 
 TASK_ID = re.compile(r"^[0-9]{8}-[0-9]{6}(-[0-9]+)?$")
@@ -2029,43 +2203,45 @@ def _cancel(task: dict, task_dir: Path, source: str = "terminal") -> int:
         return 1
     (task_dir / "cancel").write_text(f"{_now()} {source}\n", encoding="utf-8")
     run = task["runs"][-1] if task["runs"] else None
-    unproven = bool(run and _alive(run.get("pid")) and not _stop_pid(run["pid"], run.get("pid_identity")))
+    unproven, cleanup = False, _cleanup()
+    if run and run.get("pid") and (_alive(run["pid"]) or run.get("marker") and not run.get("finished")):
+        proven, cleanup = _stop_pid(run, task["worktree"])
+        unproven = not proven
     _write(task_dir, task)
     print(f"{task['id']}  cancelled  {task['worktree']}")
     if unproven:
         print(f"Process {run['pid']} is running but could not be shown to be this task's run, so it was not signalled.\n"
               "Next: check it with ps before stopping it yourself; no further agent will start for this task", file=sys.stderr)
+    for line in cleanup_notes(cleanup):
+        print(line, file=sys.stderr)
     if run and run.get("interactive"):
         print(f"Next: close its tmux window yourself; the session may hold work you want to keep", file=sys.stderr)
     return 0
+
+
+def note_cleanup(record: dict, cleanup: dict) -> None:
+    """Keep on the run record what its stop could not stop or check; nothing is added after a complete stop."""
+    for key, field in (("refused", "left_running"), ("in_folder", "left_in_folder"), ("unchecked", "cleanup_unchecked")):
+        if cleanup[key]:
+            record[field] = cleanup[key]
+
+
+def cleanup_notes(cleanup: dict) -> list[str]:
+    """What a stop left behind, in words, so a stop is never reported as complete when it was not."""
+    notes = []
+    if cleanup["refused"]:
+        notes.append(f"Hearth could not stop processes this run started: {', '.join(map(str, cleanup['refused']))}.")
+    if cleanup["in_folder"]:
+        notes.append(f"Still running in the task's folder, not stopped by Hearth: {', '.join(map(str, cleanup['in_folder']))}.")
+    if cleanup["unchecked"]:
+        notes.append("Hearth could not list processes, so some of this run's work may still be running.")
+    return notes + ["Next: check them with ps before stopping them yourself"] if notes else []
 
 
 def _identity(pid: int) -> str | None:
     """A process's group and start time, which a reused process ID does not share; None once it has exited."""
     shown = subprocess.run(["ps", "-o", "pgid=,lstart=", "-p", str(pid)], capture_output=True, text=True)
     return " ".join(shown.stdout.split()) or None if shown.returncode == 0 else None
-
-
-def _stop_pid(pid: int, identity: str | None) -> bool:
-    """Stop the run's process group, first politely, then by force, only while the process still has the identity recorded
-    at launch and leads its own group, each time first ending what it started outside the group; returns False when the
-    process could not be shown to be that run."""
-    for sig in (signal.SIGTERM, signal.SIGKILL):
-        current = _identity(pid)
-        if current is None:
-            return True
-        if identity is None or current != identity or current.split()[0] != str(pid):
-            return False
-        _end_escaped(pid)  # ponytail: a crashed backend's leftovers that refuse are not reported; record them if that is ever seen.
-        try:
-            os.killpg(pid, sig)
-        except ProcessLookupError:
-            return True
-        for _ in range(50):
-            if not _alive(pid):
-                return True
-            time.sleep(0.1)
-    return not _alive(pid)
 
 
 def dashboard_tasks() -> dict:

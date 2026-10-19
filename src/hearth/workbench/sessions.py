@@ -143,7 +143,8 @@ def send(session_id: str, message: str, send_id: str, draft_at: int | None = Non
             record.update(pid=process.pid, pid_identity=tasks._identity(process.pid), owner=os.getpid(), owner_identity=tasks._identity(os.getpid()))
             tasks._write(task_dir, task)
         finally:
-            threading.Thread(target=_wait, args=(session_id, process), daemon=True).start()  # Settles the turn even if that write failed.
+            # Settles the turn even if that write failed, in this conversation's folder, found now rather than when the turn ends.
+            threading.Thread(target=_wait, args=(task_dir, session_id, process), daemon=True).start()
     cleared = False  # Said in the reply, so a page whose draft was not cleared here saves the cleared draft itself and retries.
     if isinstance(draft_at, int):
         try:
@@ -171,10 +172,10 @@ def stop(session_id: str, run: str) -> dict:
     with _active_lock:
         process = _active.get(session_id)
     if process is not None:
-        _left_running(session_id, tasks._stop(process))  # The turn's process group, then what it started elsewhere.
-        _wait(session_id, process)
+        _stop_turn(task_dir, process)
+        _wait(task_dir, session_id, process)
     else:  # A turn this backend did not start, such as one left by a crash.
-        _settle(session_id)
+        _settle(task_dir)
     return summary(tasks._read(task_dir))
 
 
@@ -190,8 +191,12 @@ def stop_all() -> None:
                 tasks._write(_dir(session_id), task)
         except (OSError, ValueError, KeyError, IndexError, SessionError):
             pass  # Its record is unreadable or gone; the process is still stopped.
-        _left_running(session_id, tasks._stop(process))
-        _wait(session_id, process)
+        task_dir = tasks._home() / "tasks" / session_id
+        try:
+            _stop_turn(task_dir, process)
+            _wait(task_dir, session_id, process)
+        except Exception:  # noqa: BLE001 - one conversation that cannot be stopped cleanly must not leave the others running.
+            continue
 
 
 def recover() -> None:
@@ -199,7 +204,7 @@ def recover() -> None:
     for task in _sessions():
         last = task["runs"][-1] if task["runs"] else {}
         if last and not last.get("finished") and not _owned_elsewhere(last):
-            _settle(task["id"])
+            _settle(tasks._home() / "tasks" / task["id"])
 
 
 def _owned_elsewhere(record: dict) -> bool:
@@ -297,7 +302,7 @@ def summary(task: dict, turns: bool = False) -> dict:
         found["commands"] = {"description": description, "check": check}
         found["turns"] = [{key: run.get(key) for key in ("dir", "message", "model", "effort", "started", "finished", "outcome", "exit_code",
                                                           "model_used", "sandbox_used", "warnings", "error", "session_id", "resumed", "stopped_by",
-                                                          "left_running")}
+                                                          "left_running", "left_in_folder", "cleanup_unchecked")}
                           for run in task["runs"]]
     return found
 
@@ -311,7 +316,8 @@ def _launch(task: dict, task_dir: Path, record: dict, message: str) -> subproces
     record["argv"] = argv  # It holds no message text, which goes on stdin.
     run_dir = task_dir / "runs" / record["dir"]
     events, errors = (run_dir / "events.jsonl").open("w", encoding="utf-8"), (run_dir / "stderr.txt").open("w", encoding="utf-8")
-    env = {**os.environ, **tasks.NO_BYTECODE, "HEARTH_TASK": task["id"], "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1"}
+    record["marker"] = tasks._new_marker()
+    env = {**os.environ, **tasks.NO_BYTECODE, "HEARTH_TASK": task["id"], "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1", tasks.RUN_MARKER: record["marker"]}
     if settings["provider"] == "codex":
         env["CODEX_HOME"] = str(tasks._codex_home(task_dir))
     try:
@@ -340,37 +346,41 @@ def _resumable(argv: list[str], provider: str, cli_session: str | None) -> list[
     return argv
 
 
-def _wait(session_id: str, process: subprocess.Popen) -> None:
+def _wait(task_dir: Path, session_id: str, process: subprocess.Popen) -> None:
     try:
         process.wait(timeout=TIMEOUT_SECONDS)
     except subprocess.TimeoutExpired:
-        _left_running(session_id, tasks._stop(process))
+        _stop_turn(task_dir, process)
         process.wait()
     with _active_lock:
         if _active.get(session_id) is process:
             del _active[session_id]
+    _settle(task_dir, process.returncode)
+
+
+def _stop_turn(task_dir: Path, process: subprocess.Popen) -> None:
+    """Stop the running turn and everything it started, and keep on its record whatever could not be stopped or checked."""
     try:
-        _settle(session_id, process.returncode)
-    except SessionError:
-        pass  # The conversation's record is gone, so there is nothing left to record the end in.
-
-
-def _left_running(session_id: str, pids: list[int]) -> None:
-    """Record the processes a stopped turn started that could not be stopped, so the turn never reads as fully stopped."""
-    if not pids:
+        task = tasks._read(task_dir)
+        record, worktree = task["runs"][-1], task["worktree"]
+    except (OSError, ValueError, KeyError, IndexError):
+        record, worktree = {}, ""  # Its record is unreadable or gone; the process is still stopped.
+    cleanup = tasks._stop(process, record, worktree)
+    if not any(cleanup.values()):
         return
     try:
-        with tasks._task_lock(_dir(session_id)):
-            task = tasks._read(_dir(session_id))
-            task["runs"][-1]["left_running"] = pids
-            tasks._write(_dir(session_id), task)
-    except (OSError, ValueError, KeyError, IndexError, SessionError):
+        with tasks._task_lock(task_dir):
+            task = tasks._read(task_dir)
+            tasks.note_cleanup(task["runs"][-1], cleanup)
+            tasks._write(task_dir, task)
+    except (OSError, ValueError, KeyError, IndexError):
         pass  # Its record is unreadable or gone, so there is nowhere to say it.
 
 
-def _settle(session_id: str, exit_code: int | None = None) -> None:
+def _settle(task_dir: Path, exit_code: int | None = None) -> None:
     """Record how the last turn ended, once: from its own exit, or, for a turn no longer owned, by stopping what is left."""
-    task_dir = _dir(session_id)
+    if not (task_dir / "task.json").is_file():
+        return  # The conversation's record is gone, so there is nothing left to record the end in.
     with tasks._task_lock(task_dir):
         task = tasks._read(task_dir)
         if not task["runs"] or task["runs"][-1].get("finished"):
@@ -378,7 +388,7 @@ def _settle(session_id: str, exit_code: int | None = None) -> None:
         record = task["runs"][-1]
         owned = exit_code is not None
         if not owned and record.get("pid"):
-            tasks._stop_pid(record["pid"], record.get("pid_identity"))  # Only while the process still is that turn.
+            tasks.note_cleanup(record, tasks._stop_pid(record, task["worktree"])[1])  # The leader only while it still is that turn.
         run_dir = task_dir / "runs" / record["dir"]
         text = (run_dir / "events.jsonl").read_text(encoding="utf-8", errors="replace") if (run_dir / "events.jsonl").exists() else ""
         parsed = tasks.parse_events(record["provider"], text)
