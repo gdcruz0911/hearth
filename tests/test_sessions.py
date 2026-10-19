@@ -346,7 +346,8 @@ class SessionTests(SessionTestCase):
         child = int((self.home / ".fake-child").read_text())
         self.addCleanup(lambda: tasks._alive(child) and os.kill(child, 9))
         self.assertTrue(tasks._alive(child))  # Hearth cannot tell it from the person's own work there, so it is left alone.
-        self.assertEqual(sessions.detail(session_id)["turns"][0]["left_in_folder"], [child])
+        turn = sessions.detail(session_id)["turns"][0]
+        self.assertEqual(turn["left_in_folder"], [child], {key: turn[key] for key in ("left_running", "cleanup_unchecked", "started")})
 
     def test_a_command_in_the_agents_group_that_ignores_sigterm_is_still_stopped(self) -> None:
         os.environ["FAKE_SESSION"] = "group-ignore"
@@ -433,6 +434,25 @@ class SessionTests(SessionTestCase):
             tasks._stop_pid(run, "")
 
         self.assertTrue(tasks._alive(stubborn))  # The force was not sent to what might be someone else.
+
+    def test_the_folder_report_compares_start_times_on_the_clock_ps_uses(self) -> None:
+        folder = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, folder, True)
+        work = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"], cwd=folder)
+        self.addCleanup(lambda: (work.kill(), work.wait()))
+        time.sleep(0.2)
+        processes = tasks._processes
+        started = processes(tasks._cleanup())[work.pid][3]
+
+        def a_second_early(cleanup: dict) -> dict | None:  # As Linux's ps can report, from a boot time rounded down.
+            found = processes(cleanup)
+            return found and {pid: (*row[:3], row[3] - 1) for pid, row in found.items()}
+        run = {"started": time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(started)),  # The same second by the wall clock.
+               "pid_identity": "1 " + time.strftime("%a %b %d %H:%M:%S %Y", time.localtime(started - 1))}  # As ps showed the agent.
+        with mock.patch.object(tasks, "_processes", a_second_early):
+            found = tasks._in_folder(folder, tasks._started(run), tasks._cleanup())
+
+        self.assertEqual(found, [work.pid])
 
     def test_a_stop_that_cannot_list_processes_says_so(self) -> None:
         os.environ["FAKE_SESSION"] = "detach"

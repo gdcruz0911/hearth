@@ -2075,6 +2075,12 @@ def _signal(targets: dict[int, float], sig: int, cleanup: dict, sent: dict | Non
 
 
 def _started(run: dict) -> float | None:
+    """When the run's agent started, by ps's own clock where recorded: Linux's ps derives start times from a boot time
+    rounded to the second, so they can read up to a second early against the wall clock, and must be compared to each other."""
+    try:
+        return time.mktime(time.strptime(run["pid_identity"].split(None, 1)[1], "%a %b %d %H:%M:%S %Y"))
+    except (KeyError, AttributeError, IndexError, ValueError):
+        pass
     try:
         return datetime.fromisoformat(run["started"]).timestamp()
     except (KeyError, TypeError, ValueError):
