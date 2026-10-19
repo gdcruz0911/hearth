@@ -90,6 +90,15 @@ class SessionTestCase(TaskTestCase):
     def new(self, provider: str = "claude", mode: str = "edit", model: str | None = "fake-model") -> str:
         return sessions.create("demo", provider, mode, model, "medium", f"request-{provider}-{mode}-{time.time_ns()}")["id"]
 
+    def why(self, session_id: str, pids=()) -> str:
+        """Diagnostics only (temporary branch): the turn record, its stderr and events, and the state of given processes."""
+        task_dir = self.home / ".hearth/tasks" / session_id
+        record = tasks._read(task_dir)["runs"][-1]
+        run = task_dir / "runs" / record["dir"]
+        read = lambda name: (run / name).read_text(errors="replace")[-1500:] if (run / name).exists() else "(none)"  # noqa: E731
+        shown = subprocess.run(["ps", "-o", "pid,ppid,pgid,stat,command", "-p", ",".join(map(str, pids))], capture_output=True, text=True).stdout if pids else ""
+        return f"\nRECORD {record}\nSTDERR {read('stderr.txt')}\nEVENTS {read('events.jsonl')}\nPS {shown}\nRUNNER pid {os.getpid()} pgid {os.getpgid(0)}"
+
     def settled(self, session_id: str) -> dict:
         for _ in range(200):
             detail = sessions.detail(session_id)
@@ -165,7 +174,7 @@ class SessionTests(SessionTestCase):
         self.assertIn("--include-partial-messages", call["argv"])
         self.assertEqual(call["prompt"], "Say hello")  # On stdin, never in the argument list.
         self.assertNotIn("Say hello", call["argv"])
-        self.assertEqual((turn["outcome"], turn["model"], turn["model_used"]), ("done", "fake-model", "fake-model"))
+        self.assertEqual((turn["outcome"], turn["model"], turn["model_used"]), ("done", "fake-model", "fake-model"), self.why(session_id))
         self.assertIn("unrecognized_model", turn["warnings"][0])
         items = transcript.read(session_id, turn["dir"], 0)["items"]
         self.assertEqual([item["text"] for item in items if item["kind"] in ("delta", "message")], ["Hel", "lo", "Hello"])
@@ -248,7 +257,7 @@ class SessionTests(SessionTestCase):
         sessions.stop_all()
 
         turn = sessions.detail(session_id)["turns"][0]
-        self.assertEqual((turn["outcome"], turn["stopped_by"]), ("cancelled", "quit"))
+        self.assertEqual((turn["outcome"], turn["stopped_by"]), ("cancelled", "quit"), self.why(session_id))
         self.assertEqual(sessions._active, {})
 
     def test_stop_also_ends_work_the_agent_started_in_another_session(self) -> None:
@@ -272,7 +281,7 @@ class SessionTests(SessionTestCase):
         sessions.stop(session_id, "01-session-codex")
 
         self.assertLess(time.monotonic() - started, 4)  # Within the polite wait, so the agent was not forced.
-        self.assertEqual([pid for pid in work if tasks._alive(pid)], [])
+        self.assertEqual([pid for pid in work if tasks._alive(pid)], [], self.why(session_id, work))
 
     def test_quitting_also_ends_work_the_agent_started_in_another_session(self) -> None:
         os.environ["FAKE_SESSION"] = "detach"

@@ -1,18 +1,22 @@
 # Hearth
 
-Hearth is a personal workbench on one Mac.
-You say what you want done, coding agents you already pay for do the work, other agents check it, and Hearth keeps an honest record of all of it.
-It also keeps your own notes searchable, so the agents can build on what you already know.
+Hearth is being built as a personal agentic organ and workbench on one Mac.
+Its intended experience is one persistent place to work directly with several CLI agents and models, delegate tasks, inspect results, and carry useful knowledge into later work.
+The keeper chose direct agent sessions first, then delegation and memory.
+The current app has task execution, checking, knowledge retrieval, and an Electron dashboard; the complete desktop session workflow is still to be built.
 
 Hearth serves one person, its keeper; it is not a product or a service.
 
-## What it does
+## Current foundations
 
-- **Runs agents in their own space.** Claude and Codex work through their official apps, each task in a separate copy of the project, so nothing reaches your work until you accept it.
-- **Checks the work.** Every change runs the project's tests, a second agent runs the real program to confirm it, and an agent from a different company reviews it. No agent grades its own work.
+- **Runs agents in their own space.** Claude and Codex work through their official CLIs, with coding tasks in separate worktrees.
+- **Checks delegated coding work.** The task loop records project checks, verification, and review, with providers, models, and effort configurable by role.
+  A role can use the same provider or model as another; the record shows who checked what.
 - **Answers from your notes.** It finds the answer in your own documents and shows where it came from, or says it found nothing.
-- **Keeps you in charge.** Merging, publishing, and anything that cannot be undone wait for you, and no agent can act as you.
-- **Shows everything in one place.** `hearth web` opens a dashboard on your Mac with your projects, tasks, live agent sessions, and notes.
+- **Keeps you in charge.** Merging and memory promotion require you.
+  Delegated publication follows the project's recorded permissions and applicable approvals.
+- **Shows task activity.** The local dashboard, also hosted in the Electron app, shows projects, tasks, live transcripts, changes, and knowledge.
+  Its current task actions are cancellation, answering questions, and approving tests.
 
 ## Privacy
 
@@ -27,8 +31,15 @@ Hearth runs on your Mac and has no accounts, tracking, or error reports of its o
 
 ## Status
 
-Working now: tasks from request to reviewed pull request, search and recall from your notes, the dashboard, attributed agent notes in your notes folder, and the Google sign-in.
-Next: full task and agent views in the dashboard, phone alerts through a Hearth calendar, and the morning brief.
+The CLI and backend provide task execution and a checking loop toward reviewable changes or draft pull requests, search and scoped recall, attributed note promotion, and Google sign-in support.
+The desktop shell is installed locally, but packaging and task monitoring alone do not make it a usable agent workbench.
+
+Next: create and continue direct sessions from the app, choose CLI/model/effort visibly, work with two agents, send follow-ups, inspect results, and recover conversations and drafts after restart.
+Then add conversation-led delegation and stronger memory continuity.
+Phone alerts, the morning brief, more widgets, and graph refinements follow that usable workflow.
+
+The acceptance test is a real working session with two CLI agents inside the installed app without a separate terminal for agent orchestration.
+The [product direction](PRODUCT.md), [UI specification](docs/workbench-ui.md), and [next implementation plan](docs/workbench-next-plan.md) describe that target and distinguish it from current behavior.
 
 ## Setup
 
@@ -53,4 +64,4 @@ Every command is listed in [docs/commands.md](docs/commands.md), and `hearth <co
 ## Documentation
 
 Design documents are kept on the author's Mac for now, so these links work only in a local checkout:
-[knowledge details](docs/knowledge.md), [privacy](docs/privacy.md), [architecture](docs/architecture.md), [decisions](docs/decisions/README.md), [workbench specification](docs/workbench-spec.md), [workbench plan](docs/workbench-plan.md), and [coding requirements](CODING_REQUIREMENTS.md).
+[product direction](PRODUCT.md), [vision](VISION.md), [UI specification](docs/workbench-ui.md), [next implementation plan](docs/workbench-next-plan.md), [knowledge details](docs/knowledge.md), [privacy](docs/privacy.md), [architecture](docs/architecture.md), [decisions](docs/decisions/README.md), [original workbench specification](docs/workbench-spec.md), [original workbench plan](docs/workbench-plan.md), and [coding requirements](CODING_REQUIREMENTS.md).
