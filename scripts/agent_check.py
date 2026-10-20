@@ -186,7 +186,7 @@ class Check:
             "Codex's check and every command captured before the stop have ended": _ended([tests["codex"], *captured]),
             "nothing of Codex's runs in its worktree": _in(self.worktree(codex)) == [],
             "Claude still runs": tasks._alive(claude_agent),
-            "Claude's check, the same process, still runs": tasks._identity(tests["claude"]["pid"]) == tests["claude"]["identity"],
+            "Claude's check, the same process, still runs": _running(tests["claude"]),
             "nothing is left paused": _paused(self.out) == [],
             "Codex's turn is recorded as stopped by the keeper, with nothing left": _stopped(record, "keeper"),
         }})
@@ -273,6 +273,12 @@ def _commands(pids: list[int]) -> dict[int, str]:
     """Each process's command line; never its environment."""
     shown = subprocess.run(["ps", "-o", "pid=,command=", "-p", ",".join(map(str, pids)) or "0"], capture_output=True, text=True, errors="replace")
     return {int(pid): command for pid, command in (line.strip().split(" ", 1) for line in shown.stdout.splitlines() if " " in line.strip())}
+
+
+def _running(process: dict) -> bool:
+    """Still the same process, and neither paused nor ended but not yet reaped, which keeps its identity in ps."""
+    state = (tasks._processes(tasks._cleanup()) or {}).get(process["pid"], (0, 0, "Z", 0))[2]
+    return tasks._identity(process["pid"]) == process["identity"] and state[:1] not in ("Z", "T")
 
 
 def _ended(captured: list[dict]) -> bool:
