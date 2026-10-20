@@ -91,6 +91,24 @@ class WorkerIsolationTests(unittest.TestCase):
                 self.assertIn("--ignore-user-config", table["codex"])
 
 
+def working_in(folder: Path) -> set[int]:
+    """Processes whose working folder is inside the folder; their paths are only compared, never shown."""
+    root, found = os.path.realpath(folder), set()
+    if Path("/proc").is_dir():
+        for entry in Path("/proc").iterdir():
+            with contextlib.suppress(OSError):
+                if entry.name.isdigit() and (os.readlink(entry / "cwd") + "/").startswith(root + "/"):
+                    found.add(int(entry.name))
+        return found
+    pid = None
+    for line in subprocess.run(["lsof", "-a", "-d", "cwd", "-Fpn"], capture_output=True, text=True, errors="surrogateescape").stdout.splitlines():
+        if line.startswith("p"):
+            pid = int(line[1:])
+        elif line.startswith("n") and (line[1:] + "/").startswith(root + "/"):
+            found.add(pid)
+    return found
+
+
 class TaskTestCase(unittest.TestCase):
     def setUp(self) -> None:
         # Git's automatic maintenance can run detached after a commit and still be writing .git/objects when tearDown
@@ -128,7 +146,44 @@ class TaskTestCase(unittest.TestCase):
         os.environ.pop("HEARTH_HOME", None)  # Restored by the patch; a set HEARTH_HOME would move these records.
 
     def tearDown(self) -> None:
+        self.report_failure()
         self.temporary_directory.cleanup()
+
+    def report_failure(self) -> None:
+        """After a failure, before cleanup ends anything: each task's runs and the processes that matter to them, by ID, group,
+        and state only. Never environments or command lines, which can hold credentials or prompts."""
+        result = getattr(getattr(self, "_outcome", None), "result", None)  # None under debug(), which records nothing.
+        # tearDown runs as its own part, so the test's success is read from what it recorded.
+        failed = result is not None and any(test is self or getattr(test, "test_case", None) is self for test, _ in result.failures + result.errors)
+        if not failed or getattr(self, "_reported", False):
+            return
+        self._reported = True
+        lines = [f"--- {self.id()} failed; what it left ---"]
+        try:
+            runs = []
+            for path in sorted(tasks._home().glob("tasks/*/task.json")):
+                task = json.loads(path.read_text(encoding="utf-8"))
+                lines.append(f"task {task['id']} kind={task.get('kind', 'task')} status={task['status']}")
+                for run in task["runs"]:
+                    if not run.get("finished"):  # A finished run's ID may be another process's by now.
+                        runs.append(run.get("pid"))
+                    lines.append("  run " + " ".join(f"{key}={run.get(key)}" for key in (
+                        "dir", "pid", "exit_code", "outcome", "stopped_by", "finished", "left_running", "left_in_folder", "cleanup_unchecked")))
+            rows = {}
+            for line in subprocess.run(["ps", "-Ao", "pid=,ppid=,pgid=,stat="], capture_output=True, text=True).stdout.splitlines():
+                pid, ppid, pgid, stat = line.split()
+                rows[int(pid)] = (int(ppid), int(pgid), stat)
+            relevant, todo = set(), [pid for pid in runs if pid in rows]
+            while todo:  # Each run's process, everything below it, and everything in its group.
+                pid = todo.pop()
+                if pid not in relevant:
+                    relevant.add(pid)
+                    todo += [child for child, row in rows.items() if row[0] == pid or row[1] == pid]
+            relevant |= working_in(self.home) & rows.keys()  # And what still works in the test's folder, as escaped commands do.
+            lines += ["process pid ppid pgid stat"] + [f"process {pid} {rows[pid][0]} {rows[pid][1]} {rows[pid][2]}" for pid in sorted(relevant)]
+        except Exception as error:  # A report that cannot be made must not hide the failure it reports.
+            lines.append(f"(could not report: {type(error).__name__})")
+        print("\n".join(lines), file=sys.stderr)
 
     def write_roles(self, **chosen: str) -> None:
         """Write roles.md (ADR-0039), each role as its providers in order, such as review="antigravity,codex"."""
@@ -3219,3 +3274,48 @@ class DetachedResumeTests(VerifyTestCase):
         self.assertIn("tests_approved", task)
         self.assertNotIn("approval_failed", task)
         self.assertIsNone(tasks.dashboard_task_state(task["id"], "approve-tests"))
+
+
+class FailureReportTests(unittest.TestCase):
+    def test_a_failure_reports_its_runs_and_their_processes_without_command_lines(self) -> None:
+        class Inner(TaskTestCase):  # Defined here, so discovery does not run it on its own.
+            def test_fails(self) -> None:
+                # Started in the test's folder and recorded as a run, as an agent is; its marker must not be shown.
+                work = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)", "MARKER-IN-ARGV"], cwd=self.home,
+                                        start_new_session=True)
+                self.addCleanup(work.wait)
+                self.addCleanup(work.kill)
+                # And one no run records, found only by working in the test's folder, as an escaped command is.
+                escaped = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"], cwd=self.home, start_new_session=True)
+                self.addCleanup(escaped.wait)
+                self.addCleanup(escaped.kill)
+                self.pid, self.escaped = work.pid, escaped.pid
+                time.sleep(0.2)  # So each has changed into the folder before the report looks.
+                task_dir = tasks._home() / "tasks" / "20261019-000000"
+                task_dir.mkdir(parents=True)
+                (task_dir / "task.json").write_text(json.dumps({"id": "20261019-000000", "status": "running", "runs": [
+                    # A finished run whose ID another process now holds: this one, which is not the run's.
+                    {"dir": "00-plan-claude", "pid": os.getpid(), "exit_code": 0, "finished": "2026-10-19T00:00:00-0400"},
+                    {"dir": "01-implement-claude", "pid": work.pid, "exit_code": None, "message": "MARKER-IN-PROMPT"}]}), encoding="utf-8")
+                self.fail("as intended")
+
+            def test_passes(self) -> None:
+                pass
+
+        for name, failures in (("test_fails", 1), ("test_passes", 0)):
+            with self.subTest(name=name):
+                case, result, shown = Inner(name), unittest.TestResult(), io.StringIO()
+                with contextlib.redirect_stderr(shown):
+                    case.run(result)
+                self.assertEqual(len(result.failures), failures)
+                if not failures:
+                    self.assertEqual(shown.getvalue(), "")
+                    continue
+                report = shown.getvalue()
+                self.assertIn(f"{case.id()} failed; what it left", report)
+                self.assertIn("task 20261019-000000 kind=task status=running", report)
+                self.assertIn(f"run dir=01-implement-claude pid={case.pid} exit_code=None", report)
+                for pid in (case.pid, case.escaped):
+                    self.assertRegex(report, rf"process {pid} \d+ {pid} \S+")
+                self.assertNotIn("MARKER-IN", report)  # Neither the command line nor the prompt.
+                self.assertNotIn(f"process {os.getpid()} ", report)

@@ -4,6 +4,11 @@ on:
   pull_request:
   push:
     branches: [main]
+  workflow_dispatch:  # A manual run, on the branch picked for it or on the commit given here.
+    inputs:
+      ref:
+        description: "Commit, tag, or branch to check, with the steps of the branch picked above (default: that branch)"
+        required: false
 
 jobs:
   check:
@@ -11,6 +16,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
+          ref: ${{ inputs.ref }}  # Empty except on a manual run, which keeps the event's own commit.
           fetch-depth: 0  # The session tests run the released v0.3.0 reader from its commit.
       - uses: actions/setup-python@v7
         with:
@@ -23,6 +29,8 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
       - uses: actions/setup-python@v7
         with:
           python-version: "3.14"
