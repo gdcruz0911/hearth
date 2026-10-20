@@ -152,8 +152,9 @@ class TaskTestCase(unittest.TestCase):
     def report_failure(self) -> None:
         """After a failure, before cleanup ends anything: each task's runs and the processes that matter to them, by ID, group,
         and state only. Never environments or command lines, which can hold credentials or prompts."""
-        result = self._outcome.result  # tearDown runs as its own part, so the test's success is read from what it recorded.
-        failed = any(test is self or getattr(test, "test_case", None) is self for test, _ in result.failures + result.errors)
+        result = getattr(getattr(self, "_outcome", None), "result", None)  # None under debug(), which records nothing.
+        # tearDown runs as its own part, so the test's success is read from what it recorded.
+        failed = result is not None and any(test is self or getattr(test, "test_case", None) is self for test, _ in result.failures + result.errors)
         if not failed or getattr(self, "_reported", False):
             return
         self._reported = True
@@ -164,7 +165,8 @@ class TaskTestCase(unittest.TestCase):
                 task = json.loads(path.read_text(encoding="utf-8"))
                 lines.append(f"task {task['id']} kind={task.get('kind', 'task')} status={task['status']}")
                 for run in task["runs"]:
-                    runs.append(run.get("pid"))
+                    if not run.get("finished"):  # A finished run's ID may be another process's by now.
+                        runs.append(run.get("pid"))
                     lines.append("  run " + " ".join(f"{key}={run.get(key)}" for key in (
                         "dir", "pid", "exit_code", "outcome", "stopped_by", "finished", "left_running", "left_in_folder", "cleanup_unchecked")))
             rows = {}
@@ -3271,6 +3273,8 @@ class FailureReportTests(unittest.TestCase):
                 task_dir = tasks._home() / "tasks" / "20261019-000000"
                 task_dir.mkdir(parents=True)
                 (task_dir / "task.json").write_text(json.dumps({"id": "20261019-000000", "status": "running", "runs": [
+                    # A finished run whose ID another process now holds: this one, which is not the run's.
+                    {"dir": "00-plan-claude", "pid": os.getpid(), "exit_code": 0, "finished": "2026-10-19T00:00:00-0400"},
                     {"dir": "01-implement-claude", "pid": work.pid, "exit_code": None, "message": "MARKER-IN-PROMPT"}]}), encoding="utf-8")
                 self.fail("as intended")
 
@@ -3293,3 +3297,4 @@ class FailureReportTests(unittest.TestCase):
                 for pid in (case.pid, case.escaped):
                     self.assertRegex(report, rf"process {pid} \d+ {pid} \S+")
                 self.assertNotIn("MARKER-IN", report)  # Neither the command line nor the prompt.
+                self.assertNotIn(f"process {os.getpid()} ", report)

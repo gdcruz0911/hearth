@@ -7,7 +7,7 @@ on:
   workflow_dispatch:  # A manual run, on the branch picked for it or on the commit given here.
     inputs:
       ref:
-        description: "Commit, tag, or branch to check (default: the branch picked above)"
+        description: "Commit, tag, or branch to check, with the steps of the branch picked above (default: that branch)"
         required: false
 
 jobs:
