@@ -72,6 +72,7 @@ class SessionTestCase(TaskTestCase):
         self.write_projects(check="true", providers=("claude", "codex", "antigravity"))
 
     def tearDown(self) -> None:
+        self.report_failure()  # Before stopping, so it shows what the failure left running.
         sessions.stop_all()  # Before the folder goes, so every turn records its end in it.
         super().tearDown()
 
