@@ -345,7 +345,7 @@ class SessionTests(SessionTestCase):
 
         child = int((self.home / ".fake-child").read_text())
         self.addCleanup(lambda: tasks._alive(child) and os.kill(child, 9))
-        self.assertTrue(tasks._alive(child))  # Hearth cannot tell it from the person's own work there, so it is left alone.
+        self.assertTrue(self.running(child))  # Hearth cannot tell it from the person's own work there, so it is left alone.
         turn = sessions.detail(session_id)["turns"][0]
         self.assertEqual(turn["left_in_folder"], [child], {key: turn[key] for key in ("left_running", "cleanup_unchecked", "started")})
 
@@ -433,7 +433,33 @@ class SessionTests(SessionTestCase):
         with mock.patch.object(tasks, "_identity", changed_after_the_first):
             tasks._stop_pid(run, "")
 
-        self.assertTrue(tasks._alive(stubborn))  # The force was not sent to what might be someone else.
+        self.assertTrue(self.running(stubborn))  # The force was not sent to what might be someone else.
+
+    def test_a_stop_after_the_watcher_reaped_the_turn_spares_whatever_took_its_id(self) -> None:
+        # The turn's own process object, after its watcher reaped the agent, names an ID a replacement now holds: a leader of
+        # its own group, started later than the turn recorded, with a command in another group below it.
+        replacement = subprocess.Popen([sys.executable, "-c", "import subprocess, sys, time; child = subprocess.Popen([sys.executable, '-c', "
+                                        "'import time; time.sleep(60)'], start_new_session=True); print(child.pid, flush=True); time.sleep(60)"],
+                                       stdout=subprocess.PIPE, text=True, start_new_session=True)
+        child = int(replacement.stdout.readline())
+        self.addCleanup(lambda: (tasks._alive(child) and os.kill(child, 9), replacement.kill(), replacement.wait(), replacement.stdout.close()))
+        run = {"pid": replacement.pid, "pid_identity": f"{replacement.pid} Thu Jan  1 00:00:00 2026", "started": tasks._now(), "marker": None}
+
+        tasks._stop(replacement, run, "")
+
+        self.assertTrue(self.running(child))  # Not the turn's command: its ancestry runs through a process that is not the turn.
+        self.assertIsNone(replacement.poll())  # Nor was the replacement's group signalled.
+
+    def test_a_turn_whose_identity_was_never_recorded_is_reported_not_signalled(self) -> None:
+        agent = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True)
+        self.addCleanup(lambda: (agent.kill(), agent.wait()))
+        run = {"pid": agent.pid, "pid_identity": None, "started": tasks._now(), "marker": None}
+        for shown in (None, tasks._identity(agent.pid)):  # The ID gone from ps, or held by a process never shown to be the turn.
+            with self.subTest(shown=shown), mock.patch.object(tasks, "_identity", return_value=shown), \
+                    mock.patch.object(tasks.os, "killpg") as killpg:
+                cleanup = tasks._stop(agent, run, "")
+                killpg.assert_not_called()
+                self.assertEqual(cleanup["refused"], [agent.pid])  # Shown as "could not stop", not as nothing left.
 
     def test_the_folder_report_compares_start_times_on_the_clock_ps_uses(self) -> None:
         folder = Path(tempfile.mkdtemp())
@@ -504,7 +530,7 @@ class SessionTests(SessionTestCase):
         sessions.stop(stopped, "01-session-codex")
 
         self.assertEqual([pid for pid in stopped_work if tasks._alive(pid)], [])
-        self.assertTrue(all(tasks._alive(pid) for pid in [agent, *running_work]))
+        self.assertTrue(all(self.running(pid) for pid in [agent, *running_work]))
         self.assertEqual(sessions.detail(running)["status"], "running")
 
     def test_recovery_stops_a_turn_left_by_a_crashed_backend_and_never_resends(self) -> None:
@@ -591,6 +617,10 @@ class SessionTests(SessionTestCase):
                 return pids
             time.sleep(0.05)
         self.fail("The agent's work did not start.")
+
+    def running(self, pid: int) -> bool:
+        """Still running as itself: listed, and neither ended but not yet reaped nor paused, which `_alive` cannot tell apart."""
+        return (tasks._processes(tasks._cleanup()) or {}).get(pid, (0, 0, "Z", 0))[2][:1] not in ("Z", "T")
 
     def orphan(self, *code: str) -> int:
         """A process whose parent has already exited, as a crashed backend's turn is, so the system reaps it; it runs

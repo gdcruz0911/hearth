@@ -1886,8 +1886,13 @@ def _new_marker() -> str:
 def _stop(process: subprocess.Popen, run: dict, worktree: str | Path) -> dict:
     """Stop a run this process started: what it started outside its process group first, then the group, then whatever is
     left. Returns what could not be stopped or checked (see _cleanup)."""
-    # Its leader is this process's unreaped child until it is waited for, so its ID cannot be reused meanwhile.
-    return _stop_leader(process.pid, lambda timeout: _waited(process, timeout), lambda: True, run, worktree)
+    # Its watcher may already have reaped it, freeing its ID for another process, so it is checked as any other leader is.
+    identity = run.get("pid_identity")
+    cleanup = _stop_leader(process.pid, lambda timeout: _waited(process, timeout),
+                           lambda: identity is not None and _identity(process.pid) == identity, run, worktree)
+    if identity is None and _alive(process.pid):  # Never shown to be the run, so not signalled; reported instead.
+        cleanup["refused"].append(process.pid)
+    return cleanup
 
 
 def _stop_pid(run: dict, worktree: str | Path) -> tuple[bool, dict]:
@@ -1931,8 +1936,8 @@ def _stop_leader(leader: int, exited, still_leader, run: dict, worktree: str | P
     marker = run.get("marker")
     for sig in (signal.SIGTERM, signal.SIGKILL):
         _guarded(lambda: _pause_and_end(
-            lambda found: [pid for pid in _below(found, leader) if found[pid][1] != leader] + _marked(found, marker, cleanup, leader),
-            cleanup), cleanup)
+            lambda found: ([pid for pid in _below(found, leader) if found[pid][1] != leader] if _leads(found, leader, run) else [])
+            + _marked(found, marker, cleanup, leader), cleanup), cleanup)
         if not still_leader():
             break  # Gone, and its ID may now be another process's.
         try:
@@ -1943,6 +1948,12 @@ def _stop_leader(leader: int, exited, still_leader, run: dict, worktree: str | P
             break
     _guarded(lambda: _sweep(leader, run, worktree, cleanup), cleanup)
     return cleanup
+
+
+def _leads(found: dict, leader: int, run: dict) -> bool:
+    """Whether the leader's ID, as listed, is still the run's own agent: leading its group and started when recorded at launch.
+    Only then does what runs below it belong to the run; once the agent is reaped, its ID and children may be another's."""
+    return bool(run.get("pid_identity")) and leader in found and found[leader][1] == leader and found[leader][3] == _started(run)
 
 
 def _guarded(step, cleanup: dict) -> None:
