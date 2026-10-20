@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+import signal
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 from unittest import mock
@@ -14,7 +17,10 @@ from hearth.workbench import sessions, stats, tasks, transcript
 from test_tasks import TaskTestCase
 
 # A stand-in for both CLIs: it logs how it was called, then prints that CLI's events. FAKE_SESSION picks the
-# scenario: reply (default), hang (some partial text, then waits to be stopped), or fail.
+# scenario: reply (default), hang (some partial text, then waits to be stopped), detach (hang after starting work in its
+# own session, as Codex runs its commands, that starts more in another), detach-wait (detach, and on SIGTERM waits for
+# that work to end), term-spawn (on SIGTERM starts work in its own session, then exits; -unmarked without the run's marker),
+# group-ignore (hang with a command in its group that ignores SIGTERM), or fail.
 FAKE = r'''
 import json, os, re, sys, time
 from pathlib import Path
@@ -27,6 +33,27 @@ def emit(event):
     print(json.dumps(event), flush=True)
 args = sys.argv[1:]
 model = args[args.index("-m" if codex else "--model") + 1] if ("-m" if codex else "--model") in args else None
+if scenario in ("detach", "detach-wait"):
+    import signal, subprocess
+    work = subprocess.Popen([sys.executable, "-c", DETACHED, "1", DETACHED], start_new_session=True,
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if scenario == "detach-wait":  # Asked to stop, it waits for its command to end first, as an agent may.
+        signal.signal(signal.SIGTERM, lambda *_: (work.wait(), sys.exit(0)))
+if scenario in ("term-spawn", "term-spawn-unmarked"):  # Asked to stop, it starts a command in its own session, then exits.
+    import signal, subprocess
+    def on_term(*_):
+        env = {key: value for key, value in os.environ.items() if scenario == "term-spawn" or key != "HEARTH_RUN"}
+        child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True, env=env,
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        (Path.home() / ".fake-child").write_text(str(child.pid))
+        sys.exit(0)
+    signal.signal(signal.SIGTERM, on_term)
+if scenario == "group-ignore":  # A command in the agent's own group that ignores SIGTERM.
+    import subprocess
+    subprocess.Popen([sys.executable, "-c", "import os, signal, sys, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+                      "open(sys.argv[1], 'w').write(str(os.getpid())); time.sleep(60)", str(Path.home() / ".fake-child")],
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                     env={key: value for key, value in os.environ.items() if key != "HEARTH_RUN"})  # Found by its group alone.
 if scenario == "fail":
     print("Not logged in. Run login.", file=sys.stderr)
     sys.exit(1)
@@ -39,7 +66,7 @@ if codex:
     rollout.parent.mkdir(parents=True, exist_ok=True)
     with rollout.open("a") as file:
         file.write(json.dumps({"type": "turn_context", "payload": {"model": model or "gpt-default", "sandbox_policy": {"type": sandbox}}}) + "\n")
-    if scenario == "hang":
+    if scenario in ("hang", "detach", "detach-wait", "term-spawn", "term-spawn-unmarked", "group-ignore"):
         time.sleep(60)
     emit({"type": "item.completed", "item": {"type": "agent_message", "text": "Hello from codex"}})
     emit({"type": "turn.completed", "usage": {}})
@@ -48,7 +75,7 @@ else:
     print('[claude-code:unrecognized_model] {"model":"%s"}' % model, file=sys.stderr, flush=True)
     emit({"type": "system", "subtype": "init", "model": model, "session_id": session})
     emit({"type": "stream_event", "event": {"type": "content_block_delta", "delta": {"type": "text_delta", "text": "Hel"}}, "session_id": session})
-    if scenario == "hang":
+    if scenario in ("hang", "detach", "detach-wait", "term-spawn", "term-spawn-unmarked", "group-ignore"):
         time.sleep(60)
     emit({"type": "stream_event", "event": {"type": "content_block_delta", "delta": {"type": "text_delta", "text": "lo"}}, "session_id": session})
     emit({"type": "assistant", "message": {"content": [{"type": "text", "text": "Hello"}]}, "session_id": session})
@@ -99,6 +126,15 @@ class SessionTestCase(TaskTestCase):
         self.fail("The turn wrote nothing.")
 
 
+# Work an agent started: it logs its process ID with the folder it runs in, and the first starts a second in its own session.
+DETACHED = (
+    "import json, os, subprocess, sys, time\n"
+    "from pathlib import Path\n"
+    "with open(Path.home() / '.fake-detached.jsonl', 'a') as log: log.write(json.dumps({'cwd': os.getcwd(), 'pid': os.getpid()}) + '\\n')\n"
+    "if sys.argv[1] == '1': subprocess.Popen([sys.executable, '-c', sys.argv[2], '2', sys.argv[2]], start_new_session=True)\n"
+    "time.sleep(60)\n"
+)
+FAKE = FAKE.replace("DETACHED", repr(DETACHED))
 PROVIDERS, REVIEWERS = dict(tasks.PROVIDERS), dict(tasks.REVIEWERS)  # Taken at import, before any test patches the tables.
 
 
@@ -234,6 +270,297 @@ class SessionTests(SessionTestCase):
         self.assertEqual((turn["outcome"], turn["stopped_by"]), ("cancelled", "quit"))
         self.assertEqual(sessions._active, {})
 
+    def test_stop_also_ends_work_the_agent_started_in_another_session(self) -> None:
+        os.environ["FAKE_SESSION"] = "detach"
+        session_id = self.new("codex")
+        sessions.send(session_id, "Run the check", "send-0001")
+        work = self.detached(session_id)
+
+        sessions.stop(session_id, "01-session-codex")
+
+        self.assertEqual(sessions.detail(session_id)["turns"][0]["outcome"], "cancelled")
+        self.assertEqual([pid for pid in work if tasks._alive(pid)], [])
+
+    def test_stop_ends_the_agents_work_before_the_agent_so_an_agent_waiting_for_it_exits_at_once(self) -> None:
+        os.environ["FAKE_SESSION"] = "detach-wait"
+        session_id = self.new("codex")
+        sessions.send(session_id, "Run the check", "send-0001")
+        work = self.detached(session_id)
+
+        started = time.monotonic()
+        sessions.stop(session_id, "01-session-codex")
+
+        self.assertLess(time.monotonic() - started, 4)  # Within the polite wait, so the agent was not forced.
+        self.assertEqual([pid for pid in work if tasks._alive(pid)], [])
+
+    def test_quitting_also_ends_work_the_agent_started_in_another_session(self) -> None:
+        os.environ["FAKE_SESSION"] = "detach"
+        session_id = self.new("codex")
+        sessions.send(session_id, "Run the check", "send-0001")
+        work = self.detached(session_id)
+
+        sessions.stop_all()
+
+        self.assertEqual([pid for pid in work if tasks._alive(pid)], [])
+
+    def test_a_stop_that_cannot_end_the_agents_work_says_so(self) -> None:
+        os.environ["FAKE_SESSION"] = "detach"
+        session_id = self.new("codex")
+        sessions.send(session_id, "Run the check", "send-0001")
+        work = self.detached(session_id)
+        self.addCleanup(lambda: [os.kill(pid, 9) for pid in work if tasks._alive(pid)])
+        kill = os.kill
+
+        def refusing(pid: int, sig: int) -> None:
+            if sig == signal.SIGKILL and pid in work:
+                raise PermissionError(pid)  # As a process of another user's would.
+            kill(pid, sig)
+        with mock.patch.object(tasks.os, "kill", refusing):
+            sessions.stop(session_id, "01-session-codex")
+
+        turn = sessions.detail(session_id)["turns"][0]
+        self.assertEqual((turn["outcome"], sorted(turn["left_running"])), ("cancelled", sorted(work)))
+
+    def test_work_an_agent_starts_while_stopping_is_ended_by_its_marker(self) -> None:
+        os.environ["FAKE_SESSION"] = "term-spawn"
+        session_id = self.new("codex")
+        sessions.send(session_id, "Run the check", "send-0001")
+        self.started(session_id)
+
+        sessions.stop(session_id, "01-session-codex")
+
+        child = int((self.home / ".fake-child").read_text())
+        self.addCleanup(lambda: tasks._alive(child) and os.kill(child, 9))
+        turn = sessions.detail(session_id)["turns"][0]
+        self.assertFalse(tasks._alive(child))
+        self.assertEqual((turn["outcome"], turn["left_running"], turn["left_in_folder"]), ("cancelled", None, None))
+
+    def test_work_without_the_marker_left_in_the_folder_is_reported_not_stopped(self) -> None:
+        os.environ["FAKE_SESSION"] = "term-spawn-unmarked"
+        session_id = self.new("codex")
+        sessions.send(session_id, "Run the check", "send-0001")
+        self.started(session_id)
+
+        sessions.stop(session_id, "01-session-codex")
+
+        child = int((self.home / ".fake-child").read_text())
+        self.addCleanup(lambda: tasks._alive(child) and os.kill(child, 9))
+        self.assertTrue(self.running(child))  # Hearth cannot tell it from the person's own work there, so it is left alone.
+        turn = sessions.detail(session_id)["turns"][0]
+        self.assertEqual(turn["left_in_folder"], [child], {key: turn[key] for key in ("left_running", "cleanup_unchecked", "started")})
+
+    def test_a_command_in_the_agents_group_that_ignores_sigterm_is_still_stopped(self) -> None:
+        os.environ["FAKE_SESSION"] = "group-ignore"
+        session_id = self.new("codex")
+        sessions.send(session_id, "Run the check", "send-0001")
+        pid_file = self.home / ".fake-child"
+        for _ in range(200):
+            if pid_file.exists() and pid_file.read_text():
+                break
+            time.sleep(0.05)
+        child = int(pid_file.read_text())
+        self.addCleanup(lambda: tasks._alive(child) and os.kill(child, 9))
+
+        sessions.stop(session_id, "01-session-codex")
+
+        for _ in range(40):  # Its parent is gone, so the system reaps it shortly after.
+            if not tasks._alive(child):
+                break
+            time.sleep(0.05)
+        self.assertFalse(tasks._alive(child))
+
+    def test_a_process_whose_start_time_changed_is_never_signalled(self) -> None:
+        other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+        self.addCleanup(lambda: (other.kill(), other.wait()))
+        listed = tasks._processes(tasks._cleanup())
+        processes = tasks._processes
+        calls = []
+
+        def first_listing_from_before(cleanup: dict) -> dict:  # As if the listed process had exited and its ID been reused.
+            calls.append(1)
+            found = processes(cleanup)
+            if len(calls) == 1:
+                found[other.pid] = (*found[other.pid][:3], listed[other.pid][3] - 100)
+            return found
+        cleanup = tasks._cleanup()
+        with mock.patch.object(tasks, "_processes", first_listing_from_before):
+            tasks._pause_and_end(lambda found: [other.pid] if len(calls) == 1 else [], cleanup)  # Listed only before the reuse.
+
+        state = subprocess.run(["ps", "-o", "stat=", "-p", str(other.pid)], capture_output=True, text=True).stdout
+        self.assertIsNone(other.poll())
+        self.assertNotIn("T", state)  # Neither paused nor killed.
+
+    def test_a_listing_that_fails_after_pausing_still_ends_what_was_paused(self) -> None:
+        work = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"], start_new_session=True)
+        self.addCleanup(lambda: (work.kill(), work.wait()))
+        processes = tasks._processes
+        calls = []
+
+        def failing_from_the_third(cleanup: dict) -> dict | None:  # Listed, paused, then ps stops answering.
+            calls.append(1)
+            if len(calls) >= 3:
+                cleanup["unchecked"] = True
+                return None
+            return processes(cleanup)
+        cleanup = tasks._cleanup()
+        with mock.patch.object(tasks, "_processes", failing_from_the_third):
+            tasks._pause_and_end(lambda found: [work.pid], cleanup)
+
+        self.assertEqual(work.wait(timeout=5), -signal.SIGKILL)  # Ended, never left paused.
+        self.assertTrue(cleanup["unchecked"])
+
+    def test_an_environment_that_is_not_text_does_not_stop_the_search(self) -> None:
+        odd = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"],
+                               env={**os.environb, b"HEARTH_TEST_ODD": b"\xff\xfe"})
+        self.addCleanup(lambda: (odd.kill(), odd.wait()))
+        time.sleep(0.2)
+        cleanup = tasks._cleanup()
+
+        found = tasks._processes(cleanup)
+        self.assertEqual(tasks._marked(found, "not-anyones", cleanup, None), [])
+        self.assertFalse(cleanup["unchecked"])
+
+    def test_recovery_does_not_force_a_process_that_stopped_being_the_turn(self) -> None:
+        stubborn = self.orphan("import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)")
+        time.sleep(0.3)  # Ignoring SIGTERM before it is sent.
+        run = {"pid": stubborn, "pid_identity": tasks._identity(stubborn), "started": tasks._now(), "marker": None}
+        identity = tasks._identity
+        calls = []
+
+        def changed_after_the_first(pid: int) -> str | None:  # As if it exited during the polite wait and its ID was reused.
+            calls.append(pid)
+            return identity(pid) if len(calls) <= 2 else "another process"
+        with mock.patch.object(tasks, "_identity", changed_after_the_first):
+            tasks._stop_pid(run, "")
+
+        self.assertTrue(self.running(stubborn))  # The force was not sent to what might be someone else.
+
+    def test_a_stop_after_the_watcher_reaped_the_turn_spares_whatever_took_its_id(self) -> None:
+        # The turn's own process object, already reaped by its watcher, still names the turn's ID, which a replacement now
+        # holds: a leader of its own group, started later than the turn recorded, with a command in another group below it.
+        turn = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(0.5)"], start_new_session=True)
+        recorded = tasks._identity(turn.pid).split(None, 1)[1]  # Its start time.
+        turn.wait()
+        time.sleep(1.1)  # A reused ID belongs to a process started later; ps shows start times to the second.
+        replacement = subprocess.Popen([sys.executable, "-c", "import subprocess, sys, time; child = subprocess.Popen([sys.executable, '-c', "
+                                        "'import time; time.sleep(60)'], start_new_session=True); print(child.pid, flush=True); time.sleep(60)"],
+                                       stdout=subprocess.PIPE, text=True, start_new_session=True)
+        child = int(replacement.stdout.readline())
+        self.addCleanup(lambda: (tasks._alive(child) and os.kill(child, 9), replacement.kill(), replacement.wait(), replacement.stdout.close()))
+        turn.pid = replacement.pid  # The reuse itself cannot be arranged, so the reaped turn is pointed at the replacement.
+        run = {"pid": replacement.pid, "pid_identity": f"{replacement.pid} {recorded}", "started": tasks._now(), "marker": None}
+
+        cleanup = tasks._stop(turn, run, "")
+
+        self.assertTrue(self.running(child))  # Not the turn's command: its ancestry runs through a process that is not the turn.
+        self.assertIsNone(replacement.poll())  # Nor was the replacement's group signalled.
+        self.assertEqual(cleanup["refused"], [])  # The turn itself has ended; the replacement is not reported as its own.
+
+    def test_a_live_turn_whose_identity_was_never_recorded_is_still_stopped(self) -> None:
+        # An unreaped child's ID cannot be another's, so a stop takes the identity it lacks; one that cannot be taken, as when
+        # ps fails, leaves the turn unsignalled and reported, without waiting on it.
+        for shown in (True, False):
+            with self.subTest(identity_shown=shown):
+                agent = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True)
+                self.addCleanup(lambda agent=agent: (agent.kill(), agent.wait()))
+                run = {"pid": agent.pid, "pid_identity": None, "started": tasks._now(), "marker": None}
+                started = time.monotonic()
+                with mock.patch.object(tasks, "_identity", tasks._identity if shown else lambda pid: None):
+                    cleanup = tasks._stop(agent, run, "")
+                self.assertLess(time.monotonic() - started, 4)
+                if shown:
+                    self.assertEqual((agent.returncode, cleanup["refused"]), (-signal.SIGTERM, []))
+                else:
+                    self.assertEqual((agent.returncode, cleanup["refused"]), (None, [agent.pid]))  # Shown as "could not stop".
+
+    def test_a_turn_that_cannot_be_shown_to_be_the_run_is_reported_and_stop_returns(self) -> None:
+        os.environ["FAKE_SESSION"] = "hang"
+        session_id = self.new()
+        sessions.send(session_id, "Hi", "send-0001")
+        self.started(session_id)
+        agent = tasks._read(self.home / ".hearth/tasks" / session_id)["runs"][-1]["pid"]
+        started = time.monotonic()
+
+        # Neither its identity nor its marker shows it is the turn, as for a program whose environment macOS hides.
+        with mock.patch.object(tasks, "_identity", return_value="another process"), mock.patch.object(tasks, "_marked", return_value=[]):
+            sessions.stop(session_id, "01-session-claude")
+
+        self.assertLess(time.monotonic() - started, 10)  # Not waiting on a turn it could not stop.
+        self.assertTrue(self.running(agent))
+        self.assertEqual(sessions.detail(session_id)["turns"][0]["left_running"], [agent])
+
+    def test_the_folder_report_compares_start_times_on_the_clock_ps_uses(self) -> None:
+        folder = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, folder, True)
+        work = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"], cwd=folder)
+        self.addCleanup(lambda: (work.kill(), work.wait()))
+        time.sleep(0.2)
+        processes = tasks._processes
+        started = processes(tasks._cleanup())[work.pid][3]
+
+        def a_second_early(cleanup: dict) -> dict | None:  # As Linux's ps can report, from a boot time rounded down.
+            found = processes(cleanup)
+            return found and {pid: (*row[:3], row[3] - 1) for pid, row in found.items()}
+        run = {"started": time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(started)),  # The same second by the wall clock.
+               "pid_identity": "1 " + time.strftime("%a %b %d %H:%M:%S %Y", time.localtime(started - 1))}  # As ps showed the agent.
+        with mock.patch.object(tasks, "_processes", a_second_early):
+            found = tasks._in_folder(folder, tasks._started(run), tasks._cleanup())
+
+        self.assertEqual(found, [work.pid])
+
+    def test_a_stop_that_cannot_list_processes_says_so(self) -> None:
+        os.environ["FAKE_SESSION"] = "detach"
+        session_id = self.new("codex")
+        sessions.send(session_id, "Run the check", "send-0001")
+        work = self.detached(session_id)
+        self.addCleanup(lambda: [os.kill(pid, 9) for pid in work if tasks._alive(pid)])
+
+        def failing(cleanup: dict) -> None:
+            cleanup["unchecked"] = True
+        with mock.patch.object(tasks, "_processes", failing):
+            sessions.stop(session_id, "01-session-codex")
+
+        turn = sessions.detail(session_id)["turns"][0]
+        self.assertEqual((turn["outcome"], turn["cleanup_unchecked"]), ("cancelled", True))
+
+    def test_a_settle_after_the_home_changed_records_in_its_own_conversation(self) -> None:
+        os.environ["FAKE_SESSION"] = "hang"
+        session_id = self.new()
+        sessions.send(session_id, "Wait", "send-0001")
+        self.started(session_id)
+        pid = tasks._read(self.home / ".hearth/tasks" / session_id)["runs"][-1]["pid"]
+        other_home = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, other_home, True)
+        shutil.copytree(self.home / ".hearth/tasks" / session_id, other_home / ".hearth/tasks" / session_id)
+        home = os.environ["HOME"]
+        os.environ["HOME"] = str(other_home)  # As the next test does while this turn's watcher is still waking.
+        try:
+            os.killpg(pid, signal.SIGKILL)
+            for _ in range(100):
+                if not sessions._active:
+                    break
+                time.sleep(0.05)
+            time.sleep(0.2)
+        finally:
+            os.environ["HOME"] = home
+
+        self.assertIsNone(tasks._read(other_home / ".hearth/tasks" / session_id)["runs"][-1]["finished"])
+        self.assertEqual(sessions.detail(session_id)["turns"][0]["outcome"], "failed")
+
+    def test_stopping_one_conversation_leaves_the_other_and_its_work_running(self) -> None:
+        os.environ["FAKE_SESSION"] = "detach"
+        stopped, running = self.new("codex"), self.new("claude")
+        sessions.send(stopped, "Run the check", "send-0001")
+        sessions.send(running, "Run the check", "send-0002")
+        stopped_work, running_work = self.detached(stopped), self.detached(running)
+        agent = tasks._read(self.home / ".hearth/tasks" / running)["runs"][-1]["pid"]
+
+        sessions.stop(stopped, "01-session-codex")
+
+        self.assertEqual([pid for pid in stopped_work if tasks._alive(pid)], [])
+        self.assertTrue(all(self.running(pid) for pid in [agent, *running_work]))
+        self.assertEqual(sessions.detail(running)["status"], "running")
+
     def test_recovery_stops_a_turn_left_by_a_crashed_backend_and_never_resends(self) -> None:
         session_id = self.new()
         task_dir = self.home / ".hearth/tasks" / session_id
@@ -253,11 +580,82 @@ class SessionTests(SessionTestCase):
         sessions.send(session_id, "Hi", "send-0001")  # A retry of the interrupted send returns it, and is not run again.
         self.assertEqual(self.calls(), [])
 
-    def orphan(self) -> int:
-        """A process whose parent has already exited, as a crashed backend's turn is, so the system reaps it."""
-        launcher = subprocess.run([sys.executable, "-c", "import subprocess, sys; print(subprocess.Popen([sys.executable, '-c', "
-                                   "'import time; time.sleep(60)'], start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).pid)"],
-                                  capture_output=True, text=True, check=True)
+    def test_recovery_also_ends_work_a_crashed_backends_turn_started(self) -> None:
+        session_id = self.new("codex")
+        task_dir = self.home / ".hearth/tasks" / session_id
+        orphan = self.orphan(DETACHED, "1", DETACHED)
+        log = self.home / ".fake-detached.jsonl"
+        for _ in range(200):
+            work = [row["pid"] for row in map(json.loads, log.read_text(encoding="utf-8").splitlines())] if log.exists() else []
+            if len(work) == 2:
+                break
+            time.sleep(0.05)
+        work.remove(orphan)
+        self.addCleanup(lambda: tasks._alive(work[0]) and os.kill(work[0], 9))
+        task = tasks._read(task_dir)
+        task["status"] = "running"
+        task["runs"].append({"dir": "01-session-codex", "role": "session", "provider": "codex", "model": "fake-model", "started": tasks._now(),
+                             "finished": None, "pid": orphan, "pid_identity": tasks._identity(orphan), "send_id": "send-0001", "message": "Hi"})
+        (task_dir / "runs/01-session-codex").mkdir(parents=True)
+        tasks._write(task_dir, task)
+
+        sessions.recover()
+
+        self.assertEqual(sessions.detail(session_id)["turns"][0]["outcome"], "interrupted")
+        self.assertEqual([pid for pid in (orphan, *work) if tasks._alive(pid)], [])
+
+    def test_recovery_records_work_it_could_not_stop(self) -> None:
+        session_id = self.new("codex")
+        task_dir = self.home / ".hearth/tasks" / session_id
+        orphan = self.orphan(DETACHED, "1", DETACHED)
+        log = self.home / ".fake-detached.jsonl"
+        for _ in range(200):
+            work = [row["pid"] for row in map(json.loads, log.read_text(encoding="utf-8").splitlines())] if log.exists() else []
+            if len(work) == 2:
+                break
+            time.sleep(0.05)
+        work.remove(orphan)
+        self.addCleanup(lambda: tasks._alive(work[0]) and os.kill(work[0], 9))
+        task = tasks._read(task_dir)
+        task["status"] = "running"
+        task["runs"].append({"dir": "01-session-codex", "role": "session", "provider": "codex", "model": "fake-model", "started": tasks._now(),
+                             "finished": None, "pid": orphan, "pid_identity": tasks._identity(orphan), "send_id": "send-0001", "message": "Hi"})
+        (task_dir / "runs/01-session-codex").mkdir(parents=True)
+        tasks._write(task_dir, task)
+        kill = os.kill
+
+        def refusing(pid: int, sig: int) -> None:
+            if sig == signal.SIGKILL and pid == work[0]:
+                raise PermissionError(pid)
+            kill(pid, sig)
+        with mock.patch.object(tasks.os, "kill", refusing):
+            sessions.recover()
+
+        turn = sessions.detail(session_id)["turns"][0]
+        self.assertEqual((turn["outcome"], turn["left_running"]), ("interrupted", work))
+
+    def detached(self, session_id: str) -> list[int]:
+        """The process IDs of the two processes the session's agent started outside its own session, once both run."""
+        worktree = Path(tasks._read(self.home / ".hearth/tasks" / session_id)["worktree"]).resolve()
+        log = self.home / ".fake-detached.jsonl"
+        for _ in range(200):
+            rows = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()] if log.exists() else []
+            pids = [row["pid"] for row in rows if Path(row["cwd"]).resolve() == worktree]
+            if len(pids) == 2:
+                return pids
+            time.sleep(0.05)
+        self.fail("The agent's work did not start.")
+
+    def running(self, pid: int) -> bool:
+        """Still running as itself: listed, and neither ended but not yet reaped nor paused, which `_alive` cannot tell apart."""
+        return (tasks._processes(tasks._cleanup()) or {}).get(pid, (0, 0, "Z", 0))[2][:1] not in ("Z", "T")
+
+    def orphan(self, *code: str) -> int:
+        """A process whose parent has already exited, as a crashed backend's turn is, so the system reaps it; it runs
+        Python `code` with its arguments, or sleeps."""
+        command = [sys.executable, "-c", *(code or ("import time; time.sleep(60)",))]
+        launcher = subprocess.run([sys.executable, "-c", f"import subprocess; print(subprocess.Popen({command!r}, start_new_session=True, "
+                                   "stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).pid)"], capture_output=True, text=True, check=True)
         pid = int(launcher.stdout)
         self.addCleanup(lambda: tasks._alive(pid) and os.kill(pid, 9))
         return pid

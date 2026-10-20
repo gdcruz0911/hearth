@@ -341,3 +341,28 @@ test("when Hearth cannot clear a sent draft, the page clears it, quit asks while
   await reopened.getByRole("button", { name: "Send to Claude Code" }).waitFor();  // Set with the conversation's details, its draft included.
   assert.equal(await reopened.locator("#convo-message").inputValue(), "");
 });
+
+test("what a stop left behind shows in its reply even when it is recorded after the reply finished", async (t) => {
+  const home = scratch();
+  const id = conversation(home, "request-left-01");
+  fakeClaude(home);
+  const { app } = await openApp(t, home, realBackend(home.dir), { env: { PATH: "/usr/bin:/bin" } });
+  const page = await windowShowing(app, "Live ·");
+  await page.evaluate((session) => void (window.location.hash = `#/sessions/${session}`), id);
+  await page.locator("#convo-message").fill("Run the check");
+  await page.locator("#convo-message").blur();
+  await page.getByRole("button", { name: "Send to Claude Code" }).click();
+  await page.locator("#convo-stop").waitFor({ state: "visible" });
+  await page.locator("#convo-stop").waitFor({ state: "hidden", timeout: 20_000 });
+
+  const record = join(home.dir, "hearth/tasks", id, "task.json");
+  const task = JSON.parse(readFileSync(record, "utf8"));
+  Object.assign(task.runs.at(-1), { left_running: [4242], left_in_folder: [4343], cleanup_unchecked: true });
+  writeFileSync(record, JSON.stringify(task));
+
+  await page.waitForFunction(() => {
+    const text = document.body.textContent ?? "";
+    return text.includes("Hearth could not stop 1 process(es) this reply started: 4242")
+      && text.includes("not stopped by Hearth: 4343") && text.includes("Hearth could not list processes");
+  }, null, { timeout: 15_000 });
+});

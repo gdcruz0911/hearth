@@ -257,7 +257,8 @@
 
   function footer(view) {
     const { turn } = view;
-    const key = JSON.stringify([turn.finished, turn.outcome, turn.model_used, turn.warnings, turn.error, Boolean(view.draft)]);
+    const key = JSON.stringify([turn.finished, turn.outcome, turn.model_used, turn.warnings, turn.error, Boolean(view.draft),
+      turn.left_running, turn.left_in_folder, turn.cleanup_unchecked]);
     if (key === view.footKey) return;
     view.footKey = key;
     const parts = [];
@@ -280,6 +281,16 @@
           ? " Hearth keeps what arrived above; the agent's own session does not, so it will not remember this reply."
           : " No output had arrived.";
         parts.push(el("p", "turn-note", who + kept));
+      }
+      // What a stop left behind comes only from the record, so a stop is never shown as complete when it was not.
+      if ((turn.left_running || []).length) {
+        parts.push(el("p", "turn-note failed", `Hearth could not stop ${turn.left_running.length} process(es) this reply started: ${turn.left_running.join(", ")}. Check them with ps.`));
+      }
+      if ((turn.left_in_folder || []).length) {
+        parts.push(el("p", "turn-note failed", `Still running in this conversation's folder, and not stopped by Hearth: ${turn.left_in_folder.join(", ")}. Check them with ps.`));
+      }
+      if (turn.cleanup_unchecked) {
+        parts.push(el("p", "turn-note failed", "Hearth could not list processes when it stopped this reply, so some of its work may still be running."));
       }
       if (turn.outcome === "interrupted") {
         parts.push(el("p", "turn-note failed", "Hearth stopped this reply when it quit or lost its backend. Nothing was resent; send again to continue."));
