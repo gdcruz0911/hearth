@@ -1886,11 +1886,14 @@ def _new_marker() -> str:
 def _stop(process: subprocess.Popen, run: dict, worktree: str | Path) -> dict:
     """Stop a run this process started: what it started outside its process group first, then the group, then whatever is
     left. Returns what could not be stopped or checked (see _cleanup)."""
-    # Its watcher may already have reaped it, freeing its ID for another process, so it is checked as any other leader is.
+    # Until it is reaped, its ID and group cannot be anyone else's, so an identity missing from the record is taken now. Once its
+    # watcher may have reaped it, the ID may be another process's, so it is checked as any other leader is.
+    if not run.get("pid_identity") and process.returncode is None:
+        run = {**run, "pid_identity": _identity(process.pid)}
     identity = run.get("pid_identity")
     cleanup = _stop_leader(process.pid, lambda timeout: _waited(process, timeout),
                            lambda: identity is not None and _identity(process.pid) == identity, run, worktree)
-    if identity is None and _alive(process.pid):  # Never shown to be the run, so not signalled; reported instead.
+    if not _waited(process, 1):  # Still running, as when it could not be shown to be the run: reported, never waited on.
         cleanup["refused"].append(process.pid)
     return cleanup
 

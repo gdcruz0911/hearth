@@ -436,30 +436,58 @@ class SessionTests(SessionTestCase):
         self.assertTrue(self.running(stubborn))  # The force was not sent to what might be someone else.
 
     def test_a_stop_after_the_watcher_reaped_the_turn_spares_whatever_took_its_id(self) -> None:
-        # The turn's own process object, after its watcher reaped the agent, names an ID a replacement now holds: a leader of
-        # its own group, started later than the turn recorded, with a command in another group below it.
+        # The turn's own process object, already reaped by its watcher, still names the turn's ID, which a replacement now
+        # holds: a leader of its own group, started later than the turn recorded, with a command in another group below it.
+        turn = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(0.5)"], start_new_session=True)
+        recorded = tasks._identity(turn.pid).split(None, 1)[1]  # Its start time.
+        turn.wait()
+        time.sleep(1.1)  # A reused ID belongs to a process started later; ps shows start times to the second.
         replacement = subprocess.Popen([sys.executable, "-c", "import subprocess, sys, time; child = subprocess.Popen([sys.executable, '-c', "
                                         "'import time; time.sleep(60)'], start_new_session=True); print(child.pid, flush=True); time.sleep(60)"],
                                        stdout=subprocess.PIPE, text=True, start_new_session=True)
         child = int(replacement.stdout.readline())
         self.addCleanup(lambda: (tasks._alive(child) and os.kill(child, 9), replacement.kill(), replacement.wait(), replacement.stdout.close()))
-        run = {"pid": replacement.pid, "pid_identity": f"{replacement.pid} Thu Jan  1 00:00:00 2026", "started": tasks._now(), "marker": None}
+        turn.pid = replacement.pid  # The reuse itself cannot be arranged, so the reaped turn is pointed at the replacement.
+        run = {"pid": replacement.pid, "pid_identity": f"{replacement.pid} {recorded}", "started": tasks._now(), "marker": None}
 
-        tasks._stop(replacement, run, "")
+        cleanup = tasks._stop(turn, run, "")
 
         self.assertTrue(self.running(child))  # Not the turn's command: its ancestry runs through a process that is not the turn.
         self.assertIsNone(replacement.poll())  # Nor was the replacement's group signalled.
+        self.assertEqual(cleanup["refused"], [])  # The turn itself has ended; the replacement is not reported as its own.
 
-    def test_a_turn_whose_identity_was_never_recorded_is_reported_not_signalled(self) -> None:
-        agent = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True)
-        self.addCleanup(lambda: (agent.kill(), agent.wait()))
-        run = {"pid": agent.pid, "pid_identity": None, "started": tasks._now(), "marker": None}
-        for shown in (None, tasks._identity(agent.pid)):  # The ID gone from ps, or held by a process never shown to be the turn.
-            with self.subTest(shown=shown), mock.patch.object(tasks, "_identity", return_value=shown), \
-                    mock.patch.object(tasks.os, "killpg") as killpg:
-                cleanup = tasks._stop(agent, run, "")
-                killpg.assert_not_called()
-                self.assertEqual(cleanup["refused"], [agent.pid])  # Shown as "could not stop", not as nothing left.
+    def test_a_live_turn_whose_identity_was_never_recorded_is_still_stopped(self) -> None:
+        # An unreaped child's ID cannot be another's, so a stop takes the identity it lacks; one that cannot be taken, as when
+        # ps fails, leaves the turn unsignalled and reported, without waiting on it.
+        for shown in (True, False):
+            with self.subTest(identity_shown=shown):
+                agent = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True)
+                self.addCleanup(lambda agent=agent: (agent.kill(), agent.wait()))
+                run = {"pid": agent.pid, "pid_identity": None, "started": tasks._now(), "marker": None}
+                started = time.monotonic()
+                with mock.patch.object(tasks, "_identity", tasks._identity if shown else lambda pid: None):
+                    cleanup = tasks._stop(agent, run, "")
+                self.assertLess(time.monotonic() - started, 4)
+                if shown:
+                    self.assertEqual((agent.returncode, cleanup["refused"]), (-signal.SIGTERM, []))
+                else:
+                    self.assertEqual((agent.returncode, cleanup["refused"]), (None, [agent.pid]))  # Shown as "could not stop".
+
+    def test_a_turn_that_cannot_be_shown_to_be_the_run_is_reported_and_stop_returns(self) -> None:
+        os.environ["FAKE_SESSION"] = "hang"
+        session_id = self.new()
+        sessions.send(session_id, "Hi", "send-0001")
+        self.started(session_id)
+        agent = tasks._read(self.home / ".hearth/tasks" / session_id)["runs"][-1]["pid"]
+        started = time.monotonic()
+
+        # Neither its identity nor its marker shows it is the turn, as for a program whose environment macOS hides.
+        with mock.patch.object(tasks, "_identity", return_value="another process"), mock.patch.object(tasks, "_marked", return_value=[]):
+            sessions.stop(session_id, "01-session-claude")
+
+        self.assertLess(time.monotonic() - started, 10)  # Not waiting on a turn it could not stop.
+        self.assertTrue(self.running(agent))
+        self.assertEqual(sessions.detail(session_id)["turns"][0]["left_running"], [agent])
 
     def test_the_folder_report_compares_start_times_on_the_clock_ps_uses(self) -> None:
         folder = Path(tempfile.mkdtemp())
