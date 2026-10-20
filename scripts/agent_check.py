@@ -12,7 +12,7 @@ and records the identity (process ID, group, and start time) of it and of every 
 - A: stop Codex while Claude runs its check; each of Codex's commands must have ended, and Claude's check must still run.
 - B: quit while Codex runs its check; every command must have ended, and every turn must be recorded as stopped by quitting.
 
-The report (agent versions, models, the commit, timings, those identities, process snapshots without environments, and each
+The report (agent versions, models, the commit, timings, those identities, process snapshots with program names but no arguments or environments, and each
 check) is written to <folder>/report.json, and the scratch data is removed unless --keep is given. Claude keeps its own
 transcripts of these turns in ~/.claude/projects, outside the scratch folder; they are the provider's records, so the report
 lists them and nothing deletes them. This does not replace the installed-app check, which also exercises packaging, the
@@ -26,6 +26,7 @@ import http.cookiejar
 import json
 import os
 import re
+import shlex
 import shutil
 import signal
 import socket
@@ -60,6 +61,8 @@ class Check:
             self.report["uncommitted_src"] = bool(_git("status", "--porcelain", "--", "src"))
         self.src = self.project / "src" if ref else REPO / "src"
         self.backend: subprocess.Popen | None = None
+        self.log = None
+        self.watched: list[dict] = []  # Every command captured before a stop, ended at the end if it still runs as itself.
         self.opener = self.token = self.base = None
 
     def run(self) -> bool:
@@ -84,7 +87,7 @@ class Check:
         subprocess.run(["git", "clone", "-q", str(REPO), str(self.project)], check=True)
         subprocess.run(["git", "-C", str(self.project), "checkout", "-q", "--detach", self.report["commit"]], check=True)
         self.home.mkdir(parents=True)
-        self.check = f"PYTHONPATH=src {sys.executable} -m unittest discover -s tests"
+        self.check = f"PYTHONPATH=src {shlex.quote(sys.executable)} {TEST_ARGS}"
         (self.home / "projects.json").write_text(json.dumps(
             {"hearth": {"path": str(self.project), "check": self.check, "providers": list(AGENTS), "pr": False}}), encoding="utf-8")
         models = Path.home() / ".hearth/models.json"  # The person's default models, so the check uses what they use.
@@ -96,10 +99,10 @@ class Check:
         with socket.socket() as probe:
             probe.bind(("127.0.0.1", 0))
             port = probe.getsockname()[1]
-        log = (self.out / "backend.log").open("w", encoding="utf-8")
+        self.log = (self.out / "backend.log").open("w", encoding="utf-8")
         self.backend = subprocess.Popen(
             [sys.executable, "-m", "hearth.cli", "--database", str(self.out / "hearth.sqlite"), "web", "--port", str(port), "--no-open"],
-            cwd=self.out, stdout=log, stderr=log, start_new_session=True,
+            cwd=self.out, stdout=self.log, stderr=self.log, start_new_session=True,
             env={**os.environ, "HEARTH_HOME": str(self.home), "PYTHONPATH": str(self.src)})
         url = None
         for _ in range(150):
@@ -143,12 +146,13 @@ class Check:
 
     def test_command(self, session: str) -> dict | None:
         """The requested check's own Python process below the agent, with its identity; a helper such as an MCP server, or the
-        shell that starts the check, is not it."""
+        shell that starts the check, is not it. Command lines are matched in memory only; the report keeps the program."""
         for pid, command in _commands(self.escaped(session)).items():
-            if TEST_ARGS in command and Path(command.split()[0]).name.lower().startswith("python"):
+            program = command.partition(f" {TEST_ARGS}")[0]
+            if program != command and Path(program).name.lower().startswith("python"):
                 identity = tasks._identity(pid)
                 if identity:
-                    return {"pid": pid, "identity": identity, "command": command[:120]}
+                    return {"pid": pid, "identity": identity, "program": Path(program).name}
         return None
 
     def wait_tests(self, *agents: str) -> dict:
@@ -157,13 +161,15 @@ class Check:
             if all(found.values()):
                 return found
             time.sleep(1)
-        others = {agent: [command[:120] for command in _commands(self.escaped(self.sessions[agent])).values()] for agent in agents}
+        others = {agent: list(_programs(self.escaped(self.sessions[agent])).values()) for agent in agents}
         raise Failed(f"The requested check did not start within {WAIT_SECONDS} seconds; other commands below the agents: {others}")
 
     def captured(self, agent: str) -> list[dict]:
         """Every command below the agent with its identity, taken just before it is stopped, to show each ended."""
-        return [{"pid": pid, "identity": identity, "command": command[:120]} for pid, command in _commands(self.escaped(self.sessions[agent])).items()
-                if (identity := tasks._identity(pid))]
+        captured = [{"pid": pid, "identity": identity, "program": program} for pid, program in _programs(self.escaped(self.sessions[agent])).items()
+                    if (identity := tasks._identity(pid))]
+        self.watched += captured
+        return captured
 
     def round_a(self) -> None:
         message = f"Run the full check exactly once: `{self.check}`. Do not change any files. Reply with its final summary line only."
@@ -174,7 +180,8 @@ class Check:
             self.send(session, message)
         tests = self.wait_tests(*AGENTS)
         claude, codex = self.sessions["claude"], self.sessions["codex"]
-        claude_agent, captured = self.run_record(claude)["pid"], self.captured("codex")
+        claude_agent, captured = self.run_record(claude), self.captured("codex")
+        claude_agent = {"pid": claude_agent["pid"], "identity": claude_agent["pid_identity"]}
         before = _snapshot(self.out)
         started = time.monotonic()
         self.api("POST", f"sessions/{codex}/stop", {"run": self.run_record(codex)["dir"]})
@@ -185,7 +192,7 @@ class Check:
                                       "before": before, "after": _snapshot(self.out), "checks": {
             "Codex's check and every command captured before the stop have ended": _ended([tests["codex"], *captured]),
             "nothing of Codex's runs in its worktree": _in(self.worktree(codex)) == [],
-            "Claude still runs": tasks._alive(claude_agent),
+            "Claude still runs": _running(claude_agent),
             "Claude's check, the same process, still runs": _running(tests["claude"]),
             "nothing is left paused": _paused(self.out) == [],
             "Codex's turn is recorded as stopped by the keeper, with nothing left": _stopped(record, "keeper"),
@@ -225,9 +232,13 @@ class Check:
                 self.backend.kill()
         transcripts = Path.home() / ".claude/projects"  # Named by Claude after the folder it ran in.
         self.report["claude_transcripts"] = sorted(str(path) for path in transcripts.glob(re.sub(r"[^A-Za-z0-9]", "-", str(self.home)) + "-*"))
-        left = _in(self.out) or []
-        if left:  # A failure of what this checks; ended so the check never leaves its own work behind.
-            self.report["left_after"] = _snapshot(self.out)
+        if self.log:
+            self.log.close()
+        # A failure of what this checks; ended so the check never leaves its own work behind, whether it works in the scratch
+        # folder or is a captured command, such as a helper, working elsewhere and still running as itself.
+        left = sorted(set(_in(self.out) or []) | {process["pid"] for process in self.watched if tasks._identity(process["pid"]) == process["identity"]})
+        if left:
+            self.report["left_after"] = _snapshot(self.out, left)
             for pid in left:
                 try:
                     os.kill(pid, signal.SIGKILL)
@@ -269,10 +280,15 @@ def _stopped(record: dict, by: str) -> bool:
         record.get(key) for key in ("left_running", "left_in_folder", "cleanup_unchecked"))
 
 
-def _commands(pids: list[int]) -> dict[int, str]:
-    """Each process's command line; never its environment."""
-    shown = subprocess.run(["ps", "-o", "pid=,command=", "-p", ",".join(map(str, pids)) or "0"], capture_output=True, text=True, errors="replace")
+def _commands(pids: list[int], column: str = "command") -> dict[int, str]:
+    """Each process's command line, or with column "comm" its program alone; never its environment."""
+    shown = subprocess.run(["ps", "-o", f"pid=,{column}=", "-p", ",".join(map(str, pids)) or "0"], capture_output=True, text=True, errors="replace")
     return {int(pid): command for pid, command in (line.strip().split(" ", 1) for line in shown.stdout.splitlines() if " " in line.strip())}
+
+
+def _programs(pids: list[int]) -> dict[int, str]:
+    """Each process's program name, which is what the report keeps: arguments can hold anything an agent typed."""
+    return {pid: Path(program).name for pid, program in _commands(pids, "comm").items()}
 
 
 def _running(process: dict) -> bool:
@@ -286,11 +302,13 @@ def _ended(captured: list[dict]) -> bool:
     return all(tasks._identity(process["pid"]) != process["identity"] for process in captured)
 
 
-def _snapshot(folder: Path) -> list[dict]:
-    """Process IDs, groups, states, and commands only; never environments."""
-    found, pids = tasks._processes(tasks._cleanup()) or {}, _in(folder) or []
-    commands = _commands(pids)
-    return [{"pid": pid, "ppid": found[pid][0], "pgid": found[pid][1], "stat": found[pid][2], "command": commands.get(pid, "")[:120]}
+def _snapshot(folder: Path, pids: list[int] | None = None) -> list[dict]:
+    """Process IDs, groups, states, and programs only; never arguments or environments."""
+    found = tasks._processes(tasks._cleanup()) or {}
+    if pids is None:
+        pids = _in(folder) or []
+    programs = _programs(pids)
+    return [{"pid": pid, "ppid": found[pid][0], "pgid": found[pid][1], "stat": found[pid][2], "program": programs.get(pid, "")}
             for pid in pids if pid in found]
 
 

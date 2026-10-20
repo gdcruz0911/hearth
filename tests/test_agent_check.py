@@ -5,9 +5,12 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
+from hearth.workbench import tasks
+from scripts import agent_check
 from test_sessions import FAKE
 
 # Run before the session tests' stand-in. check: start a helper in its own session, as Codex starts its MCP server, then three
@@ -77,7 +80,8 @@ class AgentCheckTests(unittest.TestCase):
         self.assertEqual([round_["test_commands"]["codex"]["pid"] for round_ in report["rounds"]], [entry["test"] for entry in codex])
         self.assertEqual(report["rounds"][0]["test_commands"]["claude"]["pid"], next(entry["test"] for entry in started if entry["agent"] == "claude"))
         self.assertIn(codex[0]["helper"], [process["pid"] for process in report["rounds"][0]["captured"]])  # And it was checked as ended.
-        self.assertNotIn("HEARTH_RUN", json.dumps(report))  # Snapshots name commands, never environments.
+        self.assertNotIn("HEARTH_RUN", json.dumps(report))  # Snapshots name programs, never environments
+        self.assertNotIn("unittest", json.dumps(report))  # or arguments.
         self.assertEqual(report["claude_transcripts"], [])  # The fake Claude keeps none.
         self.assertFalse((out / "home").exists() or (out / "project").exists())
 
@@ -92,3 +96,16 @@ class AgentCheckTests(unittest.TestCase):
         self.assertIn("FAIL nothing of Codex's runs in its worktree", shown.stdout)
         self.assertTrue(report["left_after"])  # Found after the backend quit, and ended by the check.
         self.assertEqual(subprocess.run(["pgrep", "-f", str(out)], capture_output=True).stdout, b"")
+
+    def test_cleanup_ends_a_captured_command_still_running_outside_the_scratch_folder(self) -> None:
+        out = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        helper = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], cwd=tempfile.gettempdir(), start_new_session=True)
+        self.addCleanup(lambda: (helper.kill(), helper.wait()))
+        time.sleep(0.2)
+        check = agent_check.Check(out, None)
+        check.watched = [{"pid": helper.pid, "identity": tasks._identity(helper.pid), "program": "python"}]
+
+        check.clean_up()
+
+        self.assertEqual(helper.wait(timeout=5), -9)
+        self.assertEqual([process["pid"] for process in check.report["left_after"]], [helper.pid])
