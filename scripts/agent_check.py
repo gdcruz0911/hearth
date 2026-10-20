@@ -1,17 +1,22 @@
 """Check stopping and quitting with the real agents before a release that affects execution.
 
-Run from the checkout: `.venv/bin/python scripts/agent_check.py --yes`. It sends real Claude and Codex turns, which use the
-person's plans, so it never runs without --yes. The checkout's own backend runs in a new scratch folder with its own home,
+Run from the checkout: `.venv/bin/python scripts/agent_check.py --yes [--ref <commit>]`. It sends real Claude and Codex turns,
+which use the person's plans, so it never runs without --yes. Hearth's backend runs in a new scratch folder with its own home,
 a clone of this repository for the agents to work in, and its own port, so the person's records and the installed app are
-never touched. Two rounds, each with both agents running the project's full check:
+never touched. With --ref, the backend and the clone are that commit exactly, which release evidence needs; without it, the
+backend runs the checkout's src as it is now, and the report says whether that had uncommitted changes.
 
-- A: stop Codex while Claude keeps working; nothing of Codex's may remain, and Claude and its work must keep running.
-- B: quit while Codex's own commands run; nothing may remain, and every turn must be recorded as stopped by quitting.
+Each round waits until the requested check's own Python process runs below the agent, not just a helper such as an MCP server,
+and records the identity (process ID, group, and start time) of it and of every other command the agent started:
 
-The report (agent versions, models, timings, process snapshots without environments, and each check) is written to
-<folder>/report.json, and the scratch data is removed unless --keep is given. Claude keeps its own transcripts of these turns in
-~/.claude/projects, outside the scratch folder; the report lists them. This does not replace the installed-app check, which also
-exercises packaging, the window's lifecycle, and the shipped backend.
+- A: stop Codex while Claude runs its check; each of Codex's commands must have ended, and Claude's check must still run.
+- B: quit while Codex runs its check; every command must have ended, and every turn must be recorded as stopped by quitting.
+
+The report (agent versions, models, the commit, timings, those identities, process snapshots without environments, and each
+check) is written to <folder>/report.json, and the scratch data is removed unless --keep is given. Claude keeps its own
+transcripts of these turns in ~/.claude/projects, outside the scratch folder; they are the provider's records, so the report
+lists them and nothing deletes them. This does not replace the installed-app check, which also exercises packaging, the
+window's lifecycle, and the shipped backend.
 """
 
 from __future__ import annotations
@@ -36,7 +41,8 @@ sys.path.insert(0, str(REPO / "src"))
 from hearth.workbench import tasks  # noqa: E402
 
 AGENTS = ("claude", "codex")
-WAIT_SECONDS = 300  # For an agent to start its command; real agents take seconds, a slow sign-in longer.
+TEST_ARGS = "-m unittest discover -s tests"  # The requested check, as its Python process's command line shows it.
+WAIT_SECONDS = 300  # For an agent to start the check; real agents take seconds, a slow sign-in longer.
 
 
 class Failed(Exception):
@@ -44,11 +50,15 @@ class Failed(Exception):
 
 
 class Check:
-    def __init__(self, out: Path) -> None:
-        self.out, self.home, self.project = out, out / "home", out / "project"
-        self.report: dict = {"started": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "commit": _git("rev-parse", "HEAD"),
-                             # The backend runs the checkout's src, so a change not yet committed is what was checked.
-                             "uncommitted_src": bool(_git("status", "--porcelain", "--", "src")), "rounds": []}
+    def __init__(self, out: Path, ref: str | None) -> None:
+        self.out, self.home, self.project, self.ref = out, out / "home", out / "project", ref
+        # With a ref, the backend and the agents' project are that commit exactly, as release evidence must be; without one, the
+        # backend runs the checkout's src, so a change not yet committed is what is checked, and the report says so.
+        self.report: dict = {"started": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "commit": ref or _git("rev-parse", "HEAD"),
+                             "source": "commit" if ref else "checkout", "rounds": []}
+        if not ref:
+            self.report["uncommitted_src"] = bool(_git("status", "--porcelain", "--", "src"))
+        self.src = self.project / "src" if ref else REPO / "src"
         self.backend: subprocess.Popen | None = None
         self.opener = self.token = self.base = None
 
@@ -72,6 +82,7 @@ class Check:
     def prepare(self) -> None:
         self.report["versions"] = {agent: _version(agent) for agent in AGENTS}
         subprocess.run(["git", "clone", "-q", str(REPO), str(self.project)], check=True)
+        subprocess.run(["git", "-C", str(self.project), "checkout", "-q", "--detach", self.report["commit"]], check=True)
         self.home.mkdir(parents=True)
         self.check = f"PYTHONPATH=src {sys.executable} -m unittest discover -s tests"
         (self.home / "projects.json").write_text(json.dumps(
@@ -89,7 +100,7 @@ class Check:
         self.backend = subprocess.Popen(
             [sys.executable, "-m", "hearth.cli", "--database", str(self.out / "hearth.sqlite"), "web", "--port", str(port), "--no-open"],
             cwd=self.out, stdout=log, stderr=log, start_new_session=True,
-            env={**os.environ, "HEARTH_HOME": str(self.home), "PYTHONPATH": str(REPO / "src")})
+            env={**os.environ, "HEARTH_HOME": str(self.home), "PYTHONPATH": str(self.src)})
         url = None
         for _ in range(150):
             url = next((word for word in (self.out / "backend.log").read_text(encoding="utf-8").split() if "/launch/" in word), None)
@@ -124,18 +135,35 @@ class Check:
     def worktree(self, session: str) -> Path:
         return Path(tasks._read(self.home / "tasks" / session)["worktree"])
 
-    def working(self, session: str) -> list[int]:
-        """The processes below the session's agent outside its group: its commands, which the bug this checks left running."""
+    def escaped(self, session: str) -> list[int]:
+        """The processes below the session's agent outside its group: its commands and helpers, which the bug this checks left running."""
         agent = self.run_record(session).get("pid")
         found = tasks._processes(tasks._cleanup()) or {}
         return [pid for pid in tasks._below(found, agent) if found[pid][1] != agent] if agent in found else []
 
-    def wait_working(self, *sessions: str) -> None:
+    def test_command(self, session: str) -> dict | None:
+        """The requested check's own Python process below the agent, with its identity; a helper such as an MCP server, or the
+        shell that starts the check, is not it."""
+        for pid, command in _commands(self.escaped(session)).items():
+            if TEST_ARGS in command and Path(command.split()[0]).name.lower().startswith("python"):
+                identity = tasks._identity(pid)
+                if identity:
+                    return {"pid": pid, "identity": identity, "command": command[:120]}
+        return None
+
+    def wait_tests(self, *agents: str) -> dict:
         for _ in range(WAIT_SECONDS):
-            if all(self.working(session) for session in sessions):
-                return
+            found = {agent: self.test_command(self.sessions[agent]) for agent in agents}
+            if all(found.values()):
+                return found
             time.sleep(1)
-        raise Failed(f"No command started within {WAIT_SECONDS} seconds in {', '.join(sessions)}.")
+        others = {agent: [command[:120] for command in _commands(self.escaped(self.sessions[agent])).values()] for agent in agents}
+        raise Failed(f"The requested check did not start within {WAIT_SECONDS} seconds; other commands below the agents: {others}")
+
+    def captured(self, agent: str) -> list[dict]:
+        """Every command below the agent with its identity, taken just before it is stopped, to show each ended."""
+        return [{"pid": pid, "identity": identity, "command": command[:120]} for pid, command in _commands(self.escaped(self.sessions[agent])).items()
+                if (identity := tasks._identity(pid))]
 
     def round_a(self) -> None:
         message = f"Run the full check exactly once: `{self.check}`. Do not change any files. Reply with its final summary line only."
@@ -144,20 +172,21 @@ class Check:
                          for agent in AGENTS}
         for session in self.sessions.values():
             self.send(session, message)
-        self.wait_working(*self.sessions.values())
+        tests = self.wait_tests(*AGENTS)
         claude, codex = self.sessions["claude"], self.sessions["codex"]
-        claude_agent, claude_work = self.run_record(claude)["pid"], self.working(claude)
+        claude_agent, captured = self.run_record(claude)["pid"], self.captured("codex")
         before = _snapshot(self.out)
         started = time.monotonic()
         self.api("POST", f"sessions/{codex}/stop", {"run": self.run_record(codex)["dir"]})
         seconds = round(time.monotonic() - started, 1)
         time.sleep(3)
         record = self.run_record(codex)
-        self.report["rounds"].append({"name": "A: stop Codex while Claude works", "seconds": seconds, "before": before, "after": _snapshot(self.out),
-                                      "checks": {
+        self.report["rounds"].append({"name": "A: stop Codex while Claude works", "seconds": seconds, "test_commands": tests, "captured": captured,
+                                      "before": before, "after": _snapshot(self.out), "checks": {
+            "Codex's check and every command captured before the stop have ended": _ended([tests["codex"], *captured]),
             "nothing of Codex's runs in its worktree": _in(self.worktree(codex)) == [],
             "Claude still runs": tasks._alive(claude_agent),
-            "Claude's command still runs": any(tasks._alive(pid) for pid in claude_work),
+            "Claude's check, the same process, still runs": tasks._identity(tests["claude"]["pid"]) == tests["claude"]["identity"],
             "nothing is left paused": _paused(self.out) == [],
             "Codex's turn is recorded as stopped by the keeper, with nothing left": _stopped(record, "keeper"),
         }})
@@ -165,7 +194,8 @@ class Check:
     def round_b(self) -> None:
         codex = self.sessions["codex"]
         self.send(codex, f"Run the full check exactly once more: `{self.check}`. Do not change any files. Reply with its final summary line only.")
-        self.wait_working(codex)
+        tests = self.wait_tests("codex")
+        captured = self.captured("codex") + self.captured("claude")
         before = _snapshot(self.out)
         started = time.monotonic()
         self.backend.send_signal(signal.SIGTERM)  # As the app does when it quits.
@@ -176,8 +206,9 @@ class Check:
         seconds = round(time.monotonic() - started, 1)
         time.sleep(3)
         records = {agent: self.run_record(session) for agent, session in self.sessions.items()}
-        self.report["rounds"].append({"name": "B: quit while Codex's command runs", "seconds": seconds, "before": before, "after": _snapshot(self.out),
-                                      "checks": {
+        self.report["rounds"].append({"name": "B: quit while Codex's check runs", "seconds": seconds, "test_commands": tests, "captured": captured,
+                                      "before": before, "after": _snapshot(self.out), "checks": {
+            "Codex's check and every command captured before quitting have ended": _ended([tests["codex"], *captured]),
             "nothing runs in the scratch folder": _in(self.out) == [],
             "nothing is left paused": _paused(self.out) == [],
             "Codex's turn is recorded as stopped by quitting, with nothing left": _stopped(records["codex"], "quit"),
@@ -238,12 +269,22 @@ def _stopped(record: dict, by: str) -> bool:
         record.get(key) for key in ("left_running", "left_in_folder", "cleanup_unchecked"))
 
 
+def _commands(pids: list[int]) -> dict[int, str]:
+    """Each process's command line; never its environment."""
+    shown = subprocess.run(["ps", "-o", "pid=,command=", "-p", ",".join(map(str, pids)) or "0"], capture_output=True, text=True, errors="replace")
+    return {int(pid): command for pid, command in (line.strip().split(" ", 1) for line in shown.stdout.splitlines() if " " in line.strip())}
+
+
+def _ended(captured: list[dict]) -> bool:
+    """None of the processes is still running as itself; a reused process ID is another process."""
+    return all(tasks._identity(process["pid"]) != process["identity"] for process in captured)
+
+
 def _snapshot(folder: Path) -> list[dict]:
     """Process IDs, groups, states, and commands only; never environments."""
     found, pids = tasks._processes(tasks._cleanup()) or {}, _in(folder) or []
-    shown = subprocess.run(["ps", "-o", "pid=,command=", "-p", ",".join(map(str, pids)) or "0"], capture_output=True, text=True, errors="replace")
-    commands = dict(line.strip().split(" ", 1) for line in shown.stdout.splitlines() if " " in line.strip())
-    return [{"pid": pid, "ppid": found[pid][0], "pgid": found[pid][1], "stat": found[pid][2], "command": commands.get(str(pid), "")[:120]}
+    commands = _commands(pids)
+    return [{"pid": pid, "ppid": found[pid][0], "pgid": found[pid][1], "stat": found[pid][2], "command": commands.get(pid, "")[:120]}
             for pid in pids if pid in found]
 
 
@@ -251,6 +292,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--yes", action="store_true", help="Run real Claude and Codex turns, which use your plans.")
     parser.add_argument("--out", type=Path, help="The scratch folder, which must not exist (default ~/hearth-agent-check-<time>).")
+    parser.add_argument("--ref", help="Check this commit exactly, as release evidence, instead of the checkout's src as it is now.")
     parser.add_argument("--keep", action="store_true", help="Keep the scratch home and clone for inspection.")
     args = parser.parse_args(argv)
     if not args.yes:
@@ -258,9 +300,14 @@ def main(argv: list[str] | None = None) -> int:
     missing = [agent for agent in AGENTS if not shutil.which(agent)]
     if missing:
         parser.error(f"{', '.join(missing)} not found on PATH")
+    ref = None
+    if args.ref:
+        ref = _git("rev-parse", "--verify", "--quiet", f"{args.ref}^{{commit}}")
+        if not ref:
+            parser.error(f"{args.ref} is not a commit in this checkout")
     out = (args.out or Path.home() / f"hearth-agent-check-{time.strftime('%Y%m%d-%H%M%S')}").expanduser()
     out.mkdir(parents=True)
-    passed = Check(out).run()
+    passed = Check(out, ref).run()
     if not args.keep:
         shutil.rmtree(out / "home", ignore_errors=True)
         shutil.rmtree(out / "project", ignore_errors=True)

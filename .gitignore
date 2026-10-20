@@ -55,11 +55,12 @@ logs/
 !tests/fixtures/public/
 !tests/fixtures/public/**/*.pdf
 
-# Markdown stays on this Mac for now, except the README, the command list, the reviewer guide Hearth reads from a task's base commit,
-# and the public test fixtures the tests read.
+# Markdown stays on this Mac for now, except the README, the command list, the release checklist, the reviewer guide Hearth reads
+# from a task's base commit, and the public test fixtures the tests read.
 *.md
 !/README.md
 !/docs/commands.md
+!/docs/release.md
 !/docs/agents/review.md
 !tests/fixtures/public/*.md
 
