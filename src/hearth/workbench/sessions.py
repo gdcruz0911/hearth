@@ -173,7 +173,8 @@ def stop(session_id: str, run: str) -> dict:
         process = _active.get(session_id)
     if process is not None:
         _stop_turn(task_dir, process)
-        _wait(task_dir, session_id, process)
+        if process.returncode is not None:  # Otherwise it could not be stopped, which its record says; its watcher settles it.
+            _wait(task_dir, session_id, process)
     else:  # A turn this backend did not start, such as one left by a crash.
         _settle(task_dir)
     return summary(tasks._read(task_dir))
@@ -194,7 +195,8 @@ def stop_all() -> None:
         task_dir = tasks._home() / "tasks" / session_id
         try:
             _stop_turn(task_dir, process)
-            _wait(task_dir, session_id, process)
+            if process.returncode is not None:  # Otherwise it could not be stopped, which its record says; recovery settles it.
+                _wait(task_dir, session_id, process)
         except Exception:  # noqa: BLE001 - one conversation that cannot be stopped cleanly must not leave the others running.
             continue
 
