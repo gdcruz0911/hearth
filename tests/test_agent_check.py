@@ -36,7 +36,7 @@ SCRIPT = Path(__file__).resolve().parents[1] / "scripts/agent_check.py"
 
 
 class AgentCheckTests(unittest.TestCase):
-    def run_check(self, *args: str, scenario: str = "check") -> tuple[subprocess.CompletedProcess, Path]:
+    def run_check(self, *args: str, scenario: str = "check", out: str | None = None) -> tuple[subprocess.CompletedProcess, Path]:
         self.folder = Path(self.enterContext(tempfile.TemporaryDirectory()))
         bin_dir = self.folder / "bin"
         bin_dir.mkdir()
@@ -46,7 +46,7 @@ class AgentCheckTests(unittest.TestCase):
             (bin_dir / name).chmod(0o755)
         environment = {**os.environ, "HOME": str(self.folder), "PATH": f"{bin_dir}:/usr/bin:/bin:/usr/sbin", "FAKE_SESSION": scenario}
         environment.pop("HEARTH_HOME", None)
-        shown = subprocess.run([sys.executable, str(SCRIPT), *args, "--out", str(self.folder / "out")], env=environment,
+        shown = subprocess.run([sys.executable, str(SCRIPT), *args, "--out", out or str(self.folder / "out")], env=environment, cwd=self.folder,
                                capture_output=True, text=True, timeout=420)  # Longer than the script's own wait, so it cleans up.
         return shown, self.folder / "out"
 
@@ -62,7 +62,8 @@ class AgentCheckTests(unittest.TestCase):
                 self.assertFalse(out.exists())
 
     def test_stopping_and_quitting_pass_and_leave_nothing_behind(self) -> None:
-        shown, out = self.run_check("--yes")  # The checkout's src, so a change to stopping not yet committed is what is checked.
+        # The checkout's src, so a change to stopping not yet committed is what is checked; a relative folder is the one it names.
+        shown, out = self.run_check("--yes", out="out")
         report = json.loads((out / "report.json").read_text(encoding="utf-8"))
         self.assertEqual(shown.returncode, 0, shown.stdout + shown.stderr)
         self.assertTrue(report["passed"])

@@ -305,7 +305,7 @@ def main(argv: list[str] | None = None) -> int:
         ref = _git("rev-parse", "--verify", "--quiet", f"{args.ref}^{{commit}}")
         if not ref:
             parser.error(f"{args.ref} is not a commit in this checkout")
-    out = (args.out or Path.home() / f"hearth-agent-check-{time.strftime('%Y%m%d-%H%M%S')}").expanduser()
+    out = (args.out or Path.home() / f"hearth-agent-check-{time.strftime('%Y%m%d-%H%M%S')}").expanduser().resolve()  # The backend runs inside it.
     out.mkdir(parents=True)
     passed = Check(out, ref).run()
     if not args.keep:
