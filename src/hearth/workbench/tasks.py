@@ -738,6 +738,7 @@ def _run(task: dict, task_dir: Path, role: str, provider: str, template: list[st
         events = (run_dir / "events.jsonl").open("w", encoding="utf-8")
         errors = (run_dir / "stderr.txt").open("w", encoding="utf-8")
         record["marker"] = _new_marker()
+        record["descendants"] = str(run_dir / "descendants")
         try:
             process = subprocess.Popen(argv, cwd=task["worktree"], stdin=subprocess.PIPE, stdout=events, stderr=errors, text=True,
                                        start_new_session=True, env={**os.environ, **NO_BYTECODE, "HEARTH_TASK": task["id"], "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
@@ -753,6 +754,7 @@ def _run(task: dict, task_dir: Path, role: str, provider: str, template: list[st
             record["pid_identity"] = _identity(process.pid)  # Lets a later cancel prove it signals this run, not a reused ID.
         finally:
             _write(task_dir, task)  # Once a process exists, the task owns it, whatever fails next.
+    _track(record)
     with events, errors:
         timed_out = False
         try:
@@ -1876,11 +1878,40 @@ def _argv(template: list[str], provider: str, prompt: str, check: str, model: st
     return argv
 
 
+TRACK_INTERVAL = 0.25  # Seconds between looks at what runs below an agent; a ps took about 10 ms with 620 processes.
 RUN_MARKER = "HEARTH_RUN"  # Set to a run's own random marker for its agent, so work that leaves its process tree is still known as its own.
 
 
 def _new_marker() -> str:
     return secrets.token_hex(16)
+
+
+def _track(run: dict) -> None:
+    """While the run's agent lives, keep a file of the processes below it, each by ID and start time. macOS hides the
+    environment of its own programs, such as the zsh Claude Code runs every command through, so the marker never shows on
+    them; after a crash this record is the proof that one was the run's, for what it saw. It dies with the process that launched
+    the agent, and misses a command started in the last interval before the agent died."""
+    threading.Thread(target=_record_below, args=(run,), daemon=True).start()
+
+
+def _record_below(run: dict) -> None:
+    seen = set()
+    try:
+        while True:
+            found = _processes(_cleanup())
+            if found is None and not _alive(run["pid"]):
+                return  # ps cannot say, and the agent is gone.
+            if found is not None:
+                if not _leads(found, run["pid"], run):
+                    return  # Gone or reaped: what is below it now was reparented and is not shown to be the run's.
+                new = [pid for pid in _below(found, run["pid"]) if (pid, found[pid][3]) not in seen]
+                seen.update((pid, found[pid][3]) for pid in new)
+                if new:
+                    with open(run["descendants"], "a", encoding="utf-8") as file:
+                        file.write("".join(f"{pid} {int(found[pid][3])}\n" for pid in new))
+            time.sleep(TRACK_INTERVAL)
+    except (OSError, KeyError):
+        pass  # The run goes on unrecorded. ponytail: polling, so a command started within one interval of the agent's death is missed.
 
 
 def _stop(process: subprocess.Popen, run: dict, worktree: str | Path) -> dict:
@@ -1940,7 +1971,7 @@ def _stop_leader(leader: int, exited, still_leader, run: dict, worktree: str | P
     for sig in (signal.SIGTERM, signal.SIGKILL):
         _guarded(lambda: _pause_and_end(
             lambda found: ([pid for pid in _below(found, leader) if found[pid][1] != leader] if _leads(found, leader, run) else [])
-            + _marked(found, marker, cleanup, leader), cleanup), cleanup)
+            + _marked(found, marker, cleanup, leader) + _owned(found, run, leader), cleanup), cleanup)
         if not still_leader():
             break  # Gone, and its ID may now be another process's.
         try:
@@ -1977,7 +2008,7 @@ def _sweep(leader: int | None, run: dict, worktree: str | Path, cleanup: dict | 
         # A group outlives its leader while members remain, and its ID cannot be given to a new process until they are gone;
         # while any process holds the leader's ID, the group is that process's or the leader's own, and is not touched.
         group = [pid for pid, row in found.items() if leader and leader not in found and row[1] == leader]
-        return group + _marked(found, marker, cleanup, None)
+        return group + _marked(found, marker, cleanup, None) + _owned(found, run, None)
     _pause_and_end(left, cleanup)
     cleanup["in_folder"] = _in_folder(worktree, _started(run), cleanup)
     return cleanup
@@ -2047,6 +2078,19 @@ def _marked(found: dict, marker: str | None, cleanup: dict, leader: int | None) 
             if pid.isdigit() and b" " + wanted.encode() + b" " in b" " + rest + b" ":
                 hits.append(int(pid))
     return [pid for pid in hits if pid in found and found[pid][1] != leader and pid != os.getpid()]
+
+
+def _owned(found: dict, run: dict, leader: int | None) -> list[int]:
+    """Processes recorded below the run's agent (see _track) that still have the start time recorded, and what runs below them,
+    outside the leader's group. Unlike the folder, this is proof they are the run's, so they are stopped."""
+    try:
+        rows = [line.split() for line in Path(run["descendants"]).read_text(encoding="utf-8").splitlines()]
+    except (KeyError, OSError):
+        return []  # Not recorded, as for a run that began before this was kept.
+    recorded = [int(pid) for pid, started in (row for row in rows if len(row) == 2 and all(field.isdigit() for field in row))
+                if int(pid) in found and int(found[int(pid)][3]) == int(started) >= (_started(run) or 0)]  # Never older than the agent.
+    owned = recorded + [pid for root in recorded for pid in _below(found, root)]
+    return [pid for pid in owned if found[pid][1] != leader and pid != os.getpid()]
 
 
 def _pause_and_end(candidates, cleanup: dict) -> None:

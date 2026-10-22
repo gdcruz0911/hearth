@@ -144,6 +144,7 @@ def send(session_id: str, message: str, send_id: str, draft_at: int | None = Non
             tasks._write(task_dir, task)
         finally:
             # Settles the turn even if that write failed, in this conversation's folder, found now rather than when the turn ends.
+            tasks._track(record)
             threading.Thread(target=_wait, args=(task_dir, session_id, process), daemon=True).start()
     cleared = False  # Said in the reply, so a page whose draft was not cleared here saves the cleared draft itself and retries.
     if isinstance(draft_at, int):
@@ -319,6 +320,7 @@ def _launch(task: dict, task_dir: Path, record: dict, message: str) -> subproces
     run_dir = task_dir / "runs" / record["dir"]
     events, errors = (run_dir / "events.jsonl").open("w", encoding="utf-8"), (run_dir / "stderr.txt").open("w", encoding="utf-8")
     record["marker"] = tasks._new_marker()
+    record["descendants"] = str(run_dir / "descendants")
     env = {**os.environ, **tasks.NO_BYTECODE, "HEARTH_TASK": task["id"], "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1", tasks.RUN_MARKER: record["marker"]}
     if settings["provider"] == "codex":
         env["CODEX_HOME"] = str(tasks._codex_home(task_dir))
