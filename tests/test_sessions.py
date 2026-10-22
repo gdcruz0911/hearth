@@ -20,7 +20,8 @@ from test_tasks import TaskTestCase
 # scenario: reply (default), hang (some partial text, then waits to be stopped), detach (hang after starting work in its
 # own session, as Codex runs its commands, that starts more in another), detach-wait (detach, and on SIGTERM waits for
 # that work to end), term-spawn (on SIGTERM starts work in its own session, then exits; -unmarked without the run's marker),
-# group-ignore (hang with a command in its group that ignores SIGTERM), or fail.
+# group-ignore (hang with a command in its group that ignores SIGTERM), chain (hang after starting a chained command through a
+# shell in its own group without the run's marker), or fail.
 FAKE = r'''
 import json, os, re, sys, time
 from pathlib import Path
@@ -54,6 +55,11 @@ if scenario == "group-ignore":  # A command in the agent's own group that ignore
                       "open(sys.argv[1], 'w').write(str(os.getpid())); time.sleep(60)", str(Path.home() / ".fake-child")],
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                      env={key: value for key, value in os.environ.items() if key != "HEARTH_RUN"})  # Found by its group alone.
+if scenario == "chain":
+    import subprocess
+    child = subprocess.Popen(["env", "-u", "HEARTH_RUN", "/bin/sh", "-c", "until [ -e go ]; do sleep 0.1; done; touch ran-after"], start_new_session=True,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    (Path.home() / ".fake-child").write_text(str(child.pid))
 if scenario == "fail":
     print("Not logged in. Run login.", file=sys.stderr)
     sys.exit(1)
@@ -66,7 +72,7 @@ if codex:
     rollout.parent.mkdir(parents=True, exist_ok=True)
     with rollout.open("a") as file:
         file.write(json.dumps({"type": "turn_context", "payload": {"model": model or "gpt-default", "sandbox_policy": {"type": sandbox}}}) + "\n")
-    if scenario in ("hang", "detach", "detach-wait", "term-spawn", "term-spawn-unmarked", "group-ignore"):
+    if scenario in ("hang", "detach", "detach-wait", "term-spawn", "term-spawn-unmarked", "group-ignore", "chain"):
         time.sleep(60)
     emit({"type": "item.completed", "item": {"type": "agent_message", "text": "Hello from codex"}})
     emit({"type": "turn.completed", "usage": {}})
@@ -75,7 +81,7 @@ else:
     print('[claude-code:unrecognized_model] {"model":"%s"}' % model, file=sys.stderr, flush=True)
     emit({"type": "system", "subtype": "init", "model": model, "session_id": session})
     emit({"type": "stream_event", "event": {"type": "content_block_delta", "delta": {"type": "text_delta", "text": "Hel"}}, "session_id": session})
-    if scenario in ("hang", "detach", "detach-wait", "term-spawn", "term-spawn-unmarked", "group-ignore"):
+    if scenario in ("hang", "detach", "detach-wait", "term-spawn", "term-spawn-unmarked", "group-ignore", "chain"):
         time.sleep(60)
     emit({"type": "stream_event", "event": {"type": "content_block_delta", "delta": {"type": "text_delta", "text": "lo"}}, "session_id": session})
     emit({"type": "assistant", "message": {"content": [{"type": "text", "text": "Hello"}]}, "session_id": session})
@@ -281,6 +287,31 @@ class SessionTests(SessionTestCase):
 
         self.assertEqual(sessions.detail(session_id)["turns"][0]["outcome"], "cancelled")
         self.assertEqual([pid for pid in work if tasks._alive(pid)], [])
+
+    def test_a_crashed_turns_chained_command_is_stopped_though_its_shell_hides_its_marker(self) -> None:
+        os.environ["FAKE_SESSION"] = "chain"
+        session_id = self.new()
+        task_dir = self.home / ".hearth/tasks" / session_id
+        sessions.send(session_id, "Run the chain", "send-0001")
+        self.started(session_id)
+        child = self.home / ".fake-child"
+        run = tasks._read(task_dir)["runs"][-1]
+        for _ in range(200):
+            recorded = Path(run["descendants"]).read_text(encoding="utf-8") if Path(run["descendants"]).exists() else ""
+            if child.exists() and child.read_text(encoding="utf-8") and f"{child.read_text(encoding='utf-8')} " in recorded:
+                break
+            time.sleep(0.05)
+        wrapper = int(child.read_text(encoding="utf-8"))
+        self.addCleanup(lambda: tasks._alive(wrapper) and os.kill(wrapper, 9))
+        os.kill(run["pid"], signal.SIGKILL)
+        self.settled(session_id)
+
+        tasks._stop_pid(run, tasks._read(task_dir)["worktree"])  # What recovery does for a turn whose backend crashed with it.
+
+        (Path(tasks._read(task_dir)["worktree"]) / "go").touch()  # Lets the chain's next command run, if its shell survived.
+        time.sleep(1)
+        self.assertFalse(tasks._alive(wrapper))
+        self.assertFalse((Path(tasks._read(task_dir)["worktree"]) / "ran-after").exists())
 
     def test_stop_ends_the_agents_work_before_the_agent_so_an_agent_waiting_for_it_exits_at_once(self) -> None:
         os.environ["FAKE_SESSION"] = "detach-wait"

@@ -2670,6 +2670,35 @@ class CancelTests(TaskTestCase):
         self.assertFalse(tasks._alive(work))
         self.assertNotIn("could not", result.stderr)
 
+    def test_a_crashed_agents_chained_command_is_stopped_though_its_shell_hides_its_marker(self) -> None:
+        worker, task = self.running("hang-chain")
+        run, folder = task["runs"][0], Path(task["worktree"])
+        marker = self.home / ".fake-task-work"
+        recorded = Path(run["descendants"])
+        for _ in range(200):  # The shell is recorded below the agent while the agent lives, before the crash.
+            if marker.exists() and marker.read_text(encoding="utf-8") and recorded.exists() \
+                    and f"{marker.read_text(encoding='utf-8')} " in recorded.read_text(encoding="utf-8"):
+                break
+            time.sleep(0.05)
+        wrapper = int(marker.read_text(encoding="utf-8"))
+        self.addCleanup(lambda: tasks._alive(wrapper) and os.kill(wrapper, 9))
+        os.kill(run["pid"], signal.SIGKILL)
+        worker.join(timeout=20)
+
+        proven, cleanup = tasks._stop_pid(run, task["worktree"])  # What a later cancel or recovery does with the unfinished run.
+
+        for _ in range(40):
+            if not tasks._alive(wrapper):
+                break
+            time.sleep(0.05)
+        (folder / "go").touch()  # Lets the chain's next command run, if its shell survived.
+        time.sleep(1)
+        self.assertTrue(proven)
+        self.assertFalse(tasks._alive(wrapper))
+        self.assertFalse((folder / "ran-after").exists())
+        self.assertEqual(working_in(folder), set())
+        self.assertEqual(cleanup, {"refused": [], "in_folder": [], "unchecked": False})
+
     def test_a_reused_process_id_is_not_signalled(self) -> None:
         os.environ["FAKE_AGENT_SCENARIO"] = "idle"
         self.cli("task", "new", "demo", "Add hello.txt")

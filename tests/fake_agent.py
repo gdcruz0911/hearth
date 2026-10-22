@@ -1,7 +1,7 @@
 """A stand-in provider CLI for workbench tests.
 
 It reads the prompt on standard input and prints Claude-format stream events, or another CLI's after `--as codex` or `--as antigravity`.
-The scenario comes from FAKE_AGENT_SCENARIO: edit, rewrite, idle, fail, auth, hang, or hang-detach.
+The scenario comes from FAKE_AGENT_SCENARIO: edit, rewrite, idle, fail, auth, hang, hang-detach, or hang-chain.
 A prompt that starts with "# Review" is answered with the next verdict in FAKE_REVIEWS: approve, changes, elsewhere, second-line, or garbage.
 A prompt that starts with "# Verify" follows the next scenario in FAKE_VERIFY: verified, failed, missing, edit, cache, or garbage.
 A test-writing prompt writes tests/test_hello.txt, plus notes.txt when FAKE_TESTS is "source".
@@ -119,7 +119,11 @@ def main() -> int:
         work = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True,
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         Path.home().joinpath(".fake-task-work").write_text(str(work.pid), encoding="utf-8")
-    if scenario in ("hang", "hang-detach"):
+    if scenario == "hang-chain":  # A chained command through a shell in its own group whose marker cannot be read, as macOS's zsh hides it.
+        wrapper = subprocess.Popen(["env", "-u", "HEARTH_RUN", "/bin/sh", "-c", "until [ -e go ]; do sleep 0.1; done; touch ran-after"], start_new_session=True,
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        Path.home().joinpath(".fake-task-work").write_text(str(wrapper.pid), encoding="utf-8")
+    if scenario in ("hang", "hang-detach", "hang-chain"):
         time.sleep(60)
     if scenario == "fail":
         finish("The provider failed.", error=True)
