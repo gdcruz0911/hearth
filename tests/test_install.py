@@ -234,6 +234,24 @@ class CommandLineTests(unittest.TestCase):
         self.assertEqual(code, 0)
         runtime.assert_called_once_with(Path("/repo"), "v1", "/python", Path("/runtimes"))
 
+    def test_an_update_to_a_missing_tag_prints_what_to_do_not_a_traceback(self) -> None:
+        source = Path(install.__file__).parents[1]
+        with tempfile.TemporaryDirectory() as scratch:
+            env = {**os.environ, "HEARTH_HOME": scratch, "PYTHONPATH": str(source)}
+            env.pop("HEARTH_TASK", None)
+            # Run as a module, as the person does: update raises from the imported hearth.install, not from __main__.
+            result = subprocess.run([sys.executable, "-m", "hearth.install", "--repo", str(source.parent), "update", "--ref", "v0.0.0-missing",
+                                     "--base", BASE, "--root", str(Path(scratch) / "runtimes")], env=env, capture_output=True, text=True, timeout=60)
+
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertIn("v0.0.0-missing is not a commit or tag", result.stderr)
+        self.assertIn("Next:", result.stderr)
+
+    def test_a_folder_that_is_not_a_checkout_keeps_gits_own_error(self) -> None:
+        with tempfile.TemporaryDirectory() as scratch, self.assertRaisesRegex(install.InstallError, "not a git repository"):
+            install._commit(Path(scratch), "v1")
+
 
 if __name__ == "__main__":
     unittest.main()

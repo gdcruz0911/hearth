@@ -88,7 +88,7 @@ class AlreadyInstalled(InstallError):
 def install(repo: Path, ref: str, base: str, root: Path = ROOT, pip_options: tuple[str, ...] = (), make_current: bool = True) -> Path:
     """Build a runtime from `ref`, check that its backend starts, then make it current unless `make_current` is False; returns its folder."""
     interpreter = base_python(base)
-    commit = _run(["git", "-C", str(repo), "rev-parse", "--verify", f"{ref}^{{commit}}"]).stdout.strip()
+    commit = _commit(repo, ref)
     # Named for the base Python's version and path too, so rebuilding after that Python is upgraded, or replaced by one at
     # another path, makes a new runtime beside the old one instead of meeting it.
     identity = hashlib.sha256(interpreter["path"].encode()).hexdigest()[:8]
@@ -132,7 +132,7 @@ def runtime(repo: Path, ref: str, base: str, root: Path = ROOT, pip_options: tup
     from .runtime import hearth_home
 
     with update.only_update(hearth_home()):  # Never beside an update, which could otherwise build or remove the same runtime.
-        commit = _run(["git", "-C", str(repo), "rev-parse", "--verify", f"{ref}^{{commit}}"]).stdout.strip()
+        commit = _commit(repo, ref)
         current = root / "current"
         if current.exists() or current.is_symlink():
             try:
@@ -144,6 +144,17 @@ def runtime(repo: Path, ref: str, base: str, root: Path = ROOT, pip_options: tup
                                    "through an update, which backs up and checks your data first.\n"
                                    f"Next: quit the Hearth app, then run .venv/bin/python -m hearth.install update --ref {ref}")
         return install(repo, ref, base, root, pip_options)
+
+
+def _commit(repo: Path, ref: str) -> str:
+    result = subprocess.run(["git", "-C", str(repo), "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"],
+                            capture_output=True, text=True, env=clean_environment())
+    if result.returncode == 1 and not result.stderr.strip():  # --quiet: the name is not there.
+        raise InstallError(f"{ref} is not a commit or tag in {repo}.\n"
+                           f"Next: check the name with git -C {repo} tag, or tag the release commit first")
+    if result.returncode != 0:  # Anything else, such as a folder that is not a checkout, keeps git's own words.
+        raise InstallError(f"git -C {repo} rev-parse {ref} failed:\n{result.stderr.strip()[-2000:]}")
+    return result.stdout.strip()
 
 
 def _export(repo: Path, commit: str, destination: Path) -> None:
@@ -278,4 +289,7 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    # Run the imported module's main, not this __main__ copy: update imports hearth.install, and only that copy's
+    # InstallError is the one main catches.
+    from hearth.install import main as imported_main
+    sys.exit(imported_main())
