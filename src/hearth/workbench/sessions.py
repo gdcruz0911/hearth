@@ -8,6 +8,7 @@ them, and a turn found without its backend is stopped and marked interrupted, ne
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -27,9 +28,12 @@ SEND_ID = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
 TIMEOUT_SECONDS = 1800
 UNTRACKED_LIMIT = 200  # New files the Changes view lists; more are counted, not shown.
 WARNINGS = re.compile(r"\[claude-code:[a-z_]+\][^\n]*|unrecognized_model[^\n]*")
+CHECK = "check"  # ADR-0047: the role of the run in which Hearth runs the project's check after a Codex turn, outside the sandbox.
+SUMMARY_LINES = 20  # Lines of that check's output that open the keeper's next message.
 
-_active: dict[str, subprocess.Popen] = {}  # Session ID to the turn this backend is running for it.
+_active: dict[str, subprocess.Popen] = {}  # Session ID to the turn, or the check after it, this backend is running for it.
 _active_lock = threading.Lock()
+_quitting = False  # Set under _active_lock when the backend stops, so no check starts after stop_all has looked.
 
 
 class SessionError(Exception):
@@ -106,6 +110,8 @@ def send(session_id: str, message: str, send_id: str, draft_at: int | None = Non
         if repeat is not None:
             return summary(task)  # Recorded already, in whatever state it is in, including interrupted: never relaunched.
         if task["runs"] and not task["runs"][-1].get("finished"):
+            if task["runs"][-1]["role"] == CHECK:
+                raise SessionError("Hearth is still running the project's check after the last turn. Next: wait for it, or stop it.", 409)
             raise SessionError("A turn is still running in this conversation. Next: wait for it, or stop it.", 409)
         settings = task["session"]
         tampered = tasks._tampered(task, task_dir)  # The same refusal as a task's: agent-written settings, or an unlinked sign-in.
@@ -120,9 +126,22 @@ def send(session_id: str, message: str, send_id: str, draft_at: int | None = Non
             raise SessionError(f"{settings['provider']} is at {tasks.HEADROOM_LIMIT}% or more of a plan limit. Next: hearth usage, or wait for it to reset.", 409)
         run_dir = f"{len(task['runs']) + 1:02d}-session-{settings['provider']}"
         (task_dir / "runs" / run_dir).mkdir(parents=True)
-        (task_dir / "runs" / run_dir / "prompt.md").write_text(message, encoding="utf-8")
         record = {"dir": run_dir, "role": KIND, "provider": settings["provider"], "model": settings["model"], "effort": settings["effort"],
                   "started": tasks._now(), "finished": None, "pid": None, "send_id": send_id, "message": message, "resumed": settings["cli_session"]}
+        prompt, instructions = message, None
+        if settings["provider"] == "codex" and settings["mode"] == "edit":
+            project = tasks._projects().get(task["project"], {})
+            last = task["runs"][-1] if task["runs"] else {}
+            if last.get("role") == CHECK:  # Its result, once, ahead of the keeper's words (ADR-0046); `message` keeps theirs only.
+                prompt = _check_note(task_dir, last) + message
+                record["check_note"] = last["dir"]
+            if not settings["cli_session"] and project.get("check"):
+                # A resumed Codex turn ignores new developer instructions (probe, 2026-10-23), so only the first turn gets them.
+                instructions = _instructions(project["check"], project.get("turn_check"))
+                settings["turn_check"] = project.get("turn_check")  # What Codex was told, for the commands note.
+                (task_dir / "runs" / run_dir / "developer_instructions.md").write_text(instructions, encoding="utf-8")
+            record.update(fingerprint=_fingerprint(task), host_check=project.get("check"))  # Taken now: settling never reads projects.json.
+        (task_dir / "runs" / run_dir / "prompt.md").write_text(prompt, encoding="utf-8")  # ADR-0024: exactly what goes on stdin.
         task["runs"].append(record)  # Recorded before launch, so a retry after a crash finds it and never sends twice.
         if task["goal"] == "New conversation":
             words = " ".join(message.split())
@@ -130,7 +149,7 @@ def send(session_id: str, message: str, send_id: str, draft_at: int | None = Non
         task["status"] = "running"
         tasks._write(task_dir, task)
         try:
-            process = _launch(task, task_dir, record, message)
+            process = _launch(task, task_dir, record, prompt, instructions)
         except OSError as exc:
             record.update(finished=tasks._now(), outcome="failed", error=f"The {settings['provider']} command could not start: {exc}")
             task["status"] = "done"
@@ -183,7 +202,9 @@ def stop(session_id: str, run: str) -> dict:
 
 def stop_all() -> None:
     """When the backend stops, stop every turn it started (ADR-0041), keeping their output; nothing is resent later."""
+    global _quitting
     with _active_lock:
+        _quitting = True
         running = list(_active.items())
     for session_id, process in running:
         try:
@@ -239,19 +260,14 @@ def save_draft(session_id: str, text: str, at: int) -> dict:
 def changes(session_id: str) -> dict:
     """What the session's worktree changed since its base, in the task diff's shape: git read commands only, without the index lock."""
     task = tasks._read(_dir(session_id))
-    def git(*args: str) -> subprocess.CompletedProcess:
-        # No optional locks, so an agent's own git add or commit never meets Hearth's lock; no external diff or textconv programs.
-        return subprocess.run(["git", "--no-optional-locks", "-c", "core.fsmonitor=false", "-C", task["worktree"], *args],
-                              capture_output=True, timeout=30)
+    git = lambda *args: _git(task, *args)  # noqa: E731
     tracked = git("diff", "--no-color", "--no-ext-diff", "--no-textconv", task["base"])
     names = git("diff", "--name-status", "-z", "--no-renames", task["base"])
     if tracked.returncode or names.returncode:
         raise SessionError("Hearth could not read this conversation's changes. Next: check that its worktree still exists.", 409)
     fields = names.stdout.decode("utf-8", errors="replace").split("\0")
     files = [{"path": path, "status": status} for status, path in zip(fields[0::2], fields[1::2]) if path]
-    # Not the agent's work, as for a task's uncommitted files: Hearth's own folder, run caches, and the guidance Hearth copied in.
-    mine = [":(exclude).hearth", ":(exclude,glob)**/__pycache__/**", *[f":(exclude){name}" for name in tasks._copied(task)]]
-    untracked = [name for name in git("ls-files", "--others", "--exclude-standard", "-z", "--", ".", *mine).stdout
+    untracked = [name for name in git("ls-files", "--others", "--exclude-standard", "-z", "--", ".", *_mine(task)).stdout
                  .decode("utf-8", errors="replace").split("\0") if name]
     raw = tracked.stdout
     for name in untracked[:UNTRACKED_LIMIT]:
@@ -266,6 +282,17 @@ def changes(session_id: str) -> dict:
             "added": sum(line.startswith("+") and not line.startswith("+++") for line in lines),
             "removed": sum(line.startswith("-") and not line.startswith("---") for line in lines),
             "truncated": len(raw) > tasks.DIFF_LIMIT}
+
+
+def _git(task: dict, *args: str, check: bool = False) -> subprocess.CompletedProcess:
+    # No optional locks, so an agent's own git add or commit never meets Hearth's lock; no external diff or textconv programs.
+    return subprocess.run(["git", "--no-optional-locks", "-c", "core.fsmonitor=false", "-C", task["worktree"], *args],
+                          capture_output=True, timeout=30, check=check)
+
+
+def _mine(task: dict) -> list[str]:
+    # Not the agent's work, as for a task's uncommitted files: Hearth's own folder, run caches, and the guidance Hearth copied in.
+    return [":(exclude).hearth", ":(exclude,glob)**/__pycache__/**", *[f":(exclude){name}" for name in tasks._copied(task)]]
 
 
 def open_folder(session_id: str) -> dict:
@@ -288,11 +315,12 @@ def open_folder(session_id: str) -> dict:
 def summary(task: dict, turns: bool = False) -> dict:
     last = task["runs"][-1] if task["runs"] else None
     running = bool(last and not last.get("finished"))
+    replies = [run for run in task["runs"] if run["role"] != CHECK]  # The check Hearth runs after a turn is shown with that turn.
     found = {"id": task["id"], "project": task["project"], "title": task["goal"], "created": task["created"],
-             # CLI-5's words: running during a turn, otherwise how the last turn ended; None before the first turn.
-             "status": ("running" if task["status"] == "running" else "interrupted") if running else (last or {}).get("outcome"),
+             # CLI-5's words: running during a turn or its check, otherwise how the last turn ended; None before the first turn.
+             "status": ("running" if task["status"] == "running" else "interrupted") if running else (replies[-1] if replies else {}).get("outcome"),
              "provider": task["session"]["provider"], "mode": task["session"]["mode"], "model": task["session"]["model"],
-             "effort": task["session"]["effort"], "resumable": bool(task["session"]["cli_session"]), "turn_count": len(task["runs"]),
+             "effort": task["session"]["effort"], "resumable": bool(task["session"]["cli_session"]), "turn_count": len(replies),
              "updated": (last or {}).get("finished") or (last or {}).get("started") or task["created"], "worktree": task["worktree"]}
     if turns:
         if found["provider"] == "claude":
@@ -303,18 +331,37 @@ def summary(task: dict, turns: bool = False) -> dict:
             sandbox = "workspace-write" if found["mode"] == "edit" else "read-only"
             description = f"Shell commands run within Codex's {sandbox} sandbox."
         found["commands"] = {"description": description, "check": check}
-        found["turns"] = [{key: run.get(key) for key in ("dir", "message", "model", "effort", "started", "finished", "outcome", "exit_code",
-                                                          "model_used", "sandbox_used", "warnings", "error", "session_id", "resumed", "stopped_by",
-                                                          "left_running", "left_in_folder", "cleanup_unchecked")}
-                          for run in task["runs"]]
+        if found["provider"] == "codex" and found["mode"] == "edit":
+            # What Codex was told at its first turn, which later edits to projects.json do not reach (ADR-0047).
+            found["commands"].update(turn_check=task["session"].get("turn_check"),
+                                     host_check=tasks._projects().get(task["project"], {}).get("check"))
+        found["turns"] = []
+        for run in task["runs"]:
+            shown = {key: run.get(key) for key in ("dir", "message", "model", "effort", "started", "finished", "outcome", "exit_code",
+                                                   "model_used", "sandbox_used", "warnings", "error", "session_id", "resumed", "stopped_by",
+                                                   "left_running", "left_in_folder", "cleanup_unchecked")}
+            if run["role"] != CHECK:
+                found["turns"].append({**shown, "check": None})
+            elif found["turns"]:
+                found["turns"][-1]["check"] = {**shown, "command": run.get("command"), "tail": _tail(tasks._home() / "tasks" / task["id"], run)}
     return found
 
 
-def _launch(task: dict, task_dir: Path, record: dict, message: str) -> subprocess.Popen:
+def _tail(task_dir: Path, record: dict) -> str | None:
+    """The last lines of a finished check's output, as its summary gives them; None while it runs."""
+    output = task_dir / "runs" / record["dir"] / "output.txt"
+    if not record.get("finished") or not output.exists():
+        return None
+    return "\n".join(output.read_text(encoding="utf-8", errors="replace").splitlines()[-SUMMARY_LINES:])
+
+
+def _launch(task: dict, task_dir: Path, record: dict, message: str, instructions: str | None = None) -> subprocess.Popen:
     settings, project = task["session"], tasks._projects()[task["project"]]
     template = getattr(tasks, MODES[settings["mode"]])[settings["provider"]]
     argv = tasks._argv(template, settings["provider"], message, project.get("check") or "true", settings["model"], settings["effort"],
                        settings=tasks._claude_settings(Path(task["worktree"])))
+    if instructions:
+        argv[argv.index("--json") + 1:argv.index("--json") + 1] = ["-c", f"developer_instructions={json.dumps(instructions)}"]  # A TOML string.
     argv = _resumable(argv, settings["provider"], settings["cli_session"])
     record["argv"] = argv  # It holds no message text, which goes on stdin.
     run_dir = task_dir / "runs" / record["dir"]
@@ -393,6 +440,12 @@ def _settle(task_dir: Path, exit_code: int | None = None) -> None:
         owned = exit_code is not None
         if not owned and record.get("pid"):
             tasks.note_cleanup(record, tasks._stop_pid(record, task["worktree"])[1])  # The leader only while it still is that turn.
+        if record["role"] == CHECK:
+            outcome = "cancelled" if record.get("stopping") else "interrupted" if not owned else "done" if exit_code == 0 else "failed"
+            record.update(finished=tasks._now(), exit_code=exit_code, outcome=outcome, stopped_by=record.pop("stopping", None))
+            task["status"] = "done"
+            tasks._write(task_dir, task)
+            return
         run_dir = task_dir / "runs" / record["dir"]
         text = (run_dir / "events.jsonl").read_text(encoding="utf-8", errors="replace") if (run_dir / "events.jsonl").exists() else ""
         parsed = tasks.parse_events(record["provider"], text)
@@ -416,7 +469,77 @@ def _settle(task_dir: Path, exit_code: int | None = None) -> None:
         if parsed["session_id"] and not task["session"]["cli_session"]:
             task["session"]["cli_session"] = parsed["session_id"]
         task["status"] = "done"  # Between turns a session is ready, never waiting or queued, so an update is not refused.
+        check = record.get("host_check") if outcome == "done" else None
+        after = _fingerprint(task) if check else None
+        if check and (after is None or after != record["fingerprint"]):  # When Git cannot say, the check runs.
+            _start_check(task, task_dir, check)  # Recorded as running in this same lock, so no send slips in before it.
         tasks._write(task_dir, task)
+
+
+def _start_check(task: dict, task_dir: Path, check: str) -> None:
+    """ADR-0047: run the project's check after a Codex turn that changed the worktree, outside the sandbox, launched like a
+    turn (its own group, the run's marker, its identity, the timeout) so Stop, Quit, the timeout and recovery end it as one."""
+    run_dir = f"{len(task['runs']) + 1:02d}-{CHECK}"
+    (task_dir / "runs" / run_dir).mkdir(parents=True)
+    record = {"dir": run_dir, "role": CHECK, "provider": "hearth", "command": check, "started": tasks._now(), "finished": None,
+              "pid": None, "marker": tasks._new_marker(), "descendants": str(task_dir / "runs" / run_dir / "descendants")}
+    task["runs"].append(record)
+    task["status"] = "running"
+    tasks._write(task_dir, task)  # Recorded before launch, as a turn is: a crash before it starts leaves an interrupted check, not none.
+    env = {**os.environ, **tasks.NO_BYTECODE, "HEARTH_TASK": task["id"], tasks.RUN_MARKER: record["marker"]}
+    with _active_lock:
+        if _quitting:  # stop_all has already looked, so a check started now would outlive the backend.
+            record.update(finished=tasks._now(), exit_code=None, outcome="cancelled", stopped_by="quit")
+            task["status"] = "done"
+            return
+        try:
+            with (task_dir / "runs" / run_dir / "output.txt").open("w", encoding="utf-8") as output:
+                process = subprocess.Popen(["/bin/sh", "-c", check], cwd=task["worktree"], stdin=subprocess.DEVNULL, stdout=output,
+                                           stderr=subprocess.STDOUT, start_new_session=True, env=env)
+        except OSError as exc:
+            record.update(finished=tasks._now(), exit_code=None, outcome="failed", error=f"The check could not start: {exc}")
+            task["status"] = "done"
+            return
+        _active[task["id"]] = process
+    record.update(pid=process.pid, pid_identity=tasks._identity(process.pid), owner=os.getpid(), owner_identity=tasks._identity(os.getpid()))
+    tasks._track(record)  # /bin/sh hides its environment on macOS, so what it starts is known by this record after a crash.
+    threading.Thread(target=_wait, args=(task_dir, task["id"], process), daemon=True).start()
+
+
+def _check_note(task_dir: Path, record: dict) -> str:
+    """The labelled summary of the check Hearth ran after the last turn, which opens the next message."""
+    if record.get("outcome") in ("done", "failed") and record.get("exit_code") is not None:
+        result = f"It exited with code {record['exit_code']}. The last lines of its output:\n" + (_tail(task_dir, record) or "")
+    else:
+        result = "It did not finish, so there is no result."
+    return (f"[Hearth] After your last turn, Hearth ran the project's check, `{record['command']}`, outside your sandbox. {result}\n"
+            "[End of Hearth's note. The keeper's message follows.]\n\n")
+
+
+def _instructions(check: str, turn_check: str | None) -> str:
+    """What Codex is told about checks, as developer instructions on a conversation's first turn (ADR-0047)."""
+    told = (f"For your own checks during a turn, run `{turn_check}`, adding arguments at the end if you need fewer tests. "
+            if turn_check else "")
+    return (f"{told}Hearth runs the project's full check, `{check}`, after each of your turns that changes files, outside your sandbox, "
+            "because it may need what your sandbox does not allow. Do not run it yourself. Its result opens the keeper's next message.")
+
+
+def _fingerprint(task: dict) -> str | None:
+    """HEAD, the tracked diff against the base, and every untracked file's name and content, without Hearth's own files;
+    None when Git cannot say."""
+    mine = _mine(task)
+    try:
+        digest = hashlib.sha256()
+        for args in (("rev-parse", "HEAD"), ("diff", "--binary", "--no-ext-diff", "--no-textconv", task["base"], "--", ".", *mine)):
+            digest.update(_git(task, *args, check=True).stdout)
+        names = [name for name in _git(task, "ls-files", "--others", "--exclude-standard", "-z", "--", ".", *mine, check=True)
+                 .stdout.split(b"\0") if name]
+        for name in names:
+            path = Path(task["worktree"]) / os.fsdecode(name)
+            digest.update(name + b"\0" + (os.fsencode(os.readlink(path)) if path.is_symlink() else path.read_bytes() if path.is_file() else b""))
+        return digest.hexdigest()
+    except (OSError, subprocess.SubprocessError):
+        return None
 
 
 def _codex_context(task_dir: Path, thread: str | None) -> tuple[str | None, str | None]:

@@ -63,6 +63,10 @@ if scenario == "chain":
 if scenario == "fail":
     print("Not logged in. Run login.", file=sys.stderr)
     sys.exit(1)
+if scenario in ("edit", "edit-hang", "edit-go"):  # It changes a file in its worktree, as an editing turn does.
+    Path("edited.txt").write_text(prompt)
+while scenario == "edit-go" and not (Path.home() / ".fake-go").exists():  # Then finishes once the test says go.
+    time.sleep(0.05)
 if codex:
     thread = args[args.index("resume") + 1] if "resume" in args else "thread-0001"
     sandbox = args[args.index("--sandbox") + 1] if "--sandbox" in args else next(
@@ -72,7 +76,7 @@ if codex:
     rollout.parent.mkdir(parents=True, exist_ok=True)
     with rollout.open("a") as file:
         file.write(json.dumps({"type": "turn_context", "payload": {"model": model or "gpt-default", "sandbox_policy": {"type": sandbox}}}) + "\n")
-    if scenario in ("hang", "detach", "detach-wait", "term-spawn", "term-spawn-unmarked", "group-ignore", "chain"):
+    if scenario in ("hang", "detach", "detach-wait", "term-spawn", "term-spawn-unmarked", "group-ignore", "chain", "edit-hang"):
         time.sleep(60)
     emit({"type": "item.completed", "item": {"type": "agent_message", "text": "Hello from codex"}})
     emit({"type": "turn.completed", "usage": {}})
@@ -81,7 +85,7 @@ else:
     print('[claude-code:unrecognized_model] {"model":"%s"}' % model, file=sys.stderr, flush=True)
     emit({"type": "system", "subtype": "init", "model": model, "session_id": session})
     emit({"type": "stream_event", "event": {"type": "content_block_delta", "delta": {"type": "text_delta", "text": "Hel"}}, "session_id": session})
-    if scenario in ("hang", "detach", "detach-wait", "term-spawn", "term-spawn-unmarked", "group-ignore", "chain"):
+    if scenario in ("hang", "detach", "detach-wait", "term-spawn", "term-spawn-unmarked", "group-ignore", "chain", "edit-hang"):
         time.sleep(60)
     emit({"type": "stream_event", "event": {"type": "content_block_delta", "delta": {"type": "text_delta", "text": "lo"}}, "session_id": session})
     emit({"type": "assistant", "message": {"content": [{"type": "text", "text": "Hello"}]}, "session_id": session})
@@ -103,6 +107,9 @@ class SessionTestCase(TaskTestCase):
             for name in ("claude", "codex"):
                 table[name] = [str(bin_dir / name), *real[name][1:]]
         self.write_projects(check="true", providers=("claude", "codex", "antigravity"))
+        quitting = mock.patch.object(sessions, "_quitting", False)  # stop_all sets it for good, as the backend then exits.
+        quitting.start()
+        self.addCleanup(quitting.stop)
 
     def tearDown(self) -> None:
         self.report_failure()  # Before stopping, so it shows what the failure left running.
@@ -123,6 +130,16 @@ class SessionTestCase(TaskTestCase):
                 return detail
             time.sleep(0.05)
         self.fail("The turn did not finish.")
+
+    def orphan(self, *code: str) -> int:
+        """A process whose parent has already exited, as a crashed backend's turn is, so the system reaps it; it runs
+        Python `code` with its arguments, or sleeps."""
+        command = [sys.executable, "-c", *(code or ("import time; time.sleep(60)",))]
+        launcher = subprocess.run([sys.executable, "-c", f"import subprocess; print(subprocess.Popen({command!r}, start_new_session=True, "
+                                   "stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).pid)"], capture_output=True, text=True, check=True)
+        pid = int(launcher.stdout)
+        self.addCleanup(lambda: tasks._alive(pid) and os.kill(pid, 9))
+        return pid
 
     def started(self, session_id: str) -> None:
         events = lambda: sorted((self.home / ".hearth/tasks" / session_id / "runs").glob("*/events.jsonl"))[-1]  # noqa: E731
@@ -682,16 +699,6 @@ class SessionTests(SessionTestCase):
         """Still running as itself: listed, and neither ended but not yet reaped nor paused, which `_alive` cannot tell apart."""
         return (tasks._processes(tasks._cleanup()) or {}).get(pid, (0, 0, "Z", 0))[2][:1] not in ("Z", "T")
 
-    def orphan(self, *code: str) -> int:
-        """A process whose parent has already exited, as a crashed backend's turn is, so the system reaps it; it runs
-        Python `code` with its arguments, or sleeps."""
-        command = [sys.executable, "-c", *(code or ("import time; time.sleep(60)",))]
-        launcher = subprocess.run([sys.executable, "-c", f"import subprocess; print(subprocess.Popen({command!r}, start_new_session=True, "
-                                   "stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).pid)"], capture_output=True, text=True, check=True)
-        pid = int(launcher.stdout)
-        self.addCleanup(lambda: tasks._alive(pid) and os.kill(pid, 9))
-        return pid
-
     def test_recovery_leaves_a_turn_another_running_backend_owns(self) -> None:
         session_id, turn, owner = self.new(), self.orphan(), self.orphan()
         task_dir = self.home / ".hearth/tasks" / session_id
@@ -940,3 +947,211 @@ class TranscriptDeltaTests(SessionTestCase):
         self.assertEqual(transcript._claude({"type": "stream_event", "event": {"delta": {"type": "text_delta", "text": "Hi"}}}),
                          [{"kind": "delta", "text": "Hi"}])
         self.assertEqual(transcript._claude({"type": "stream_event", "event": {"delta": {"type": "input_json_delta", "partial_json": "{"}}}), [])
+
+
+class HostCheckTests(SessionTestCase):
+    """ADR-0047: Codex is told its turn_check at the first turn, and Hearth runs the project's check after a Codex turn that
+    changed files, outside the sandbox, launched and ended like a turn; its result opens the next message."""
+
+    def project(self, check: str, turn_check: str | None = "echo quick") -> None:
+        config = {"path": str(self.repo), "check": check, "providers": ["claude", "codex"], **({"turn_check": turn_check} if turn_check else {})}
+        (self.home / ".hearth/projects.json").write_text(json.dumps({"demo": config}), encoding="utf-8")
+
+    def check_record(self, session_id: str, finished: bool = True) -> dict:
+        for _ in range(200):
+            runs = tasks._read(self.home / ".hearth/tasks" / session_id)["runs"]
+            if runs[-1]["role"] == sessions.CHECK and (runs[-1].get("finished") if finished else runs[-1].get("pid")):
+                return runs[-1]
+            time.sleep(0.05)
+        self.fail("The check did not " + ("finish." if finished else "start."))
+
+    def test_a_changing_turn_runs_the_check_and_its_result_opens_the_next_message_once(self) -> None:
+        self.project("echo check-ran; exit 3")
+        os.environ["FAKE_SESSION"] = "edit"
+        session_id = self.new("codex")
+        sessions.send(session_id, "Change it", "send-0001")
+        record = self.check_record(session_id)
+
+        self.assertEqual((record["outcome"], record["exit_code"], record["command"]), ("failed", 3, "echo check-ran; exit 3"))
+        detail = sessions.detail(session_id)
+        self.assertEqual(len(detail["turns"]), 1)  # The check is shown with its turn, not as a turn.
+        self.assertEqual((detail["turns"][0]["check"]["tail"], detail["status"], detail["turn_count"]), ("check-ran", "done", 1))
+        self.assertEqual((detail["commands"]["turn_check"], detail["commands"]["host_check"]), ("echo quick", "echo check-ran; exit 3"))
+        first = self.calls()[0]
+        told = (self.home / ".hearth/tasks" / session_id / "runs/01-session-codex/developer_instructions.md").read_text(encoding="utf-8")
+        self.assertIn(f"developer_instructions={json.dumps(told)}", first["argv"])
+        self.assertIn("`echo quick`", told)
+        self.assertEqual(first["prompt"], "Change it")
+
+        os.environ["FAKE_SESSION"] = "reply"
+        sessions.send(session_id, "Next", "send-0002")
+        self.settled(session_id)
+        sessions.send(session_id, "Again", "send-0003")
+        self.settled(session_id)
+
+        second, third = self.calls()[1:]
+        task_dir = self.home / ".hearth/tasks" / session_id
+        self.assertTrue(second["prompt"].startswith("[Hearth] After your last turn"), second["prompt"])
+        self.assertIn("exited with code 3", second["prompt"])
+        self.assertIn("check-ran", second["prompt"])
+        self.assertTrue(second["prompt"].endswith("\n\nNext"))
+        self.assertEqual((task_dir / "runs/03-session-codex/prompt.md").read_text(encoding="utf-8"), second["prompt"])  # ADR-0024.
+        self.assertEqual(tasks._read(task_dir)["runs"][2]["message"], "Next")
+        self.assertFalse(any(part.startswith("developer_instructions=") for part in second["argv"]))  # Resumed turns ignore them.
+        self.assertEqual(third["prompt"], "Again")  # Delivered once.
+        self.assertEqual([turn["check"] for turn in sessions.detail(session_id)["turns"][1:]], [None, None])  # Nothing changed.
+
+    def test_no_check_after_a_stopped_turn_or_a_claude_turn(self) -> None:
+        self.project("echo check-ran")
+        os.environ["FAKE_SESSION"] = "edit-hang"
+        codex = self.new("codex")
+        sessions.send(codex, "Change it", "send-0001")
+        self.started(codex)
+        edited = Path(tasks._read(self.home / ".hearth/tasks" / codex)["worktree"]) / "edited.txt"
+        for _ in range(200):
+            if edited.exists():
+                break
+            time.sleep(0.05)
+        self.assertTrue(edited.exists())
+        sessions.stop(codex, "01-session-codex")
+        os.environ["FAKE_SESSION"] = "edit"
+        claude = self.new("claude")
+        sessions.send(claude, "Change it", "send-0002")
+        self.settled(claude)
+        time.sleep(0.5)
+
+        for session_id in (codex, claude):
+            self.assertEqual([run["role"] for run in tasks._read(self.home / ".hearth/tasks" / session_id)["runs"]], ["session"])
+        self.assertFalse(any(part.startswith("developer_instructions=") for part in self.calls()[1]["argv"]))
+        self.assertEqual(self.calls()[1]["prompt"], "Change it")
+
+    def test_no_check_after_a_failed_turn(self) -> None:
+        self.project("echo check-ran")
+        os.environ["FAKE_SESSION"] = "fail"
+        session_id = self.new("codex")
+        sessions.send(session_id, "Change it", "send-0001")
+        self.settled(session_id)
+        time.sleep(0.5)
+
+        self.assertEqual([run["role"] for run in tasks._read(self.home / ".hearth/tasks" / session_id)["runs"]], ["session"])
+
+    def test_a_turn_settles_and_its_check_runs_though_projects_json_breaks_during_it(self) -> None:
+        self.project("echo check-ran")
+        os.environ["FAKE_SESSION"] = "edit-go"
+        session_id = self.new("codex")
+        sessions.send(session_id, "Change it", "send-0001")
+        (self.home / ".hearth/projects.json").write_text("{half written", encoding="utf-8")
+        (self.home / ".fake-go").touch()
+        record = self.check_record(session_id)
+
+        runs = tasks._read(self.home / ".hearth/tasks" / session_id)["runs"]
+        self.assertTrue(runs[0]["finished"])
+        self.assertEqual((record["command"], record["outcome"]), ("echo check-ran", "done"))
+
+    def test_the_commands_note_names_no_turn_check_when_the_project_has_none(self) -> None:
+        self.project("echo check-ran", turn_check=None)
+        session_id = self.new("codex")
+        sessions.send(session_id, "Hi", "send-0001")
+        self.settled(session_id)
+
+        commands = sessions.detail(session_id)["commands"]
+        self.assertEqual((commands["turn_check"], commands["host_check"]), (None, "echo check-ran"))
+        told = (self.home / ".hearth/tasks" / session_id / "runs/01-session-codex/developer_instructions.md").read_text(encoding="utf-8")
+        self.assertNotIn("For your own checks", told)
+
+    def test_the_task_reviewer_and_verifier_argv_stay_unchanged(self) -> None:
+        tables = json.dumps([tasks.PROVIDERS, tasks.REVIEWERS, tasks.VERIFIERS])
+        self.project("echo check-ran")
+        os.environ["FAKE_SESSION"] = "edit"
+        session_id = self.new("codex")
+        sessions.send(session_id, "Change it", "send-0001")
+        self.check_record(session_id)
+
+        self.assertEqual(json.dumps([tasks.PROVIDERS, tasks.REVIEWERS, tasks.VERIFIERS]), tables)
+        self.assertNotIn("developer_instructions", tables)
+
+    def test_a_send_during_the_check_is_refused_and_stop_ends_the_check(self) -> None:
+        self.project("sleep 60")
+        os.environ["FAKE_SESSION"] = "edit"
+        session_id = self.new("codex")
+        sessions.send(session_id, "Change it", "send-0001")
+        record = self.check_record(session_id, finished=False)
+
+        with self.assertRaises(sessions.SessionError) as refused:
+            sessions.send(session_id, "Another", "send-0002")
+        self.assertEqual(refused.exception.status, 409)
+        self.assertIn("check", str(refused.exception))
+        sessions.stop(session_id, record["dir"])
+
+        check = sessions.detail(session_id)["turns"][0]["check"]
+        self.assertEqual((check["outcome"], check["stopped_by"]), ("cancelled", "keeper"))
+        self.assertFalse(tasks._alive(record["pid"]))
+        self.assertEqual(len(self.calls()), 1)
+
+    def test_quitting_during_the_check_ends_it(self) -> None:
+        self.project("sleep 60")
+        os.environ["FAKE_SESSION"] = "edit"
+        session_id = self.new("codex")
+        sessions.send(session_id, "Change it", "send-0001")
+        record = self.check_record(session_id, finished=False)
+
+        sessions.stop_all()
+
+        check = sessions.detail(session_id)["turns"][0]["check"]
+        self.assertEqual((check["outcome"], check["stopped_by"]), ("cancelled", "quit"))
+        self.assertFalse(tasks._alive(record["pid"]))
+        self.assertEqual(sessions._active, {})
+
+    def test_a_check_due_after_quitting_has_begun_never_starts(self) -> None:
+        self.project("touch started-anyway")
+        os.environ["FAKE_SESSION"] = "edit"
+        session_id = self.new("codex")
+        sessions._quitting = True  # As if stop_all has already looked when this turn ends.
+        sessions.send(session_id, "Change it", "send-0001")
+        record = self.check_record(session_id)
+
+        self.assertEqual((record["outcome"], record["stopped_by"], record["pid"]), ("cancelled", "quit", None))
+        self.assertFalse((Path(tasks._read(self.home / ".hearth/tasks" / session_id)["worktree"]) / "started-anyway").exists())
+        self.assertEqual(sessions._active, {})
+
+    def test_recovery_ends_a_check_left_by_a_crashed_backend(self) -> None:
+        session_id = self.new("codex")
+        task_dir = self.home / ".hearth/tasks" / session_id
+        orphan = self.orphan()
+        task = tasks._read(task_dir)
+        task["status"] = "running"
+        task["runs"] += [{"dir": "01-session-codex", "role": "session", "provider": "codex", "started": tasks._now(), "finished": tasks._now(),
+                          "outcome": "done", "send_id": "send-0001", "message": "Hi"},
+                         {"dir": "02-check", "role": "check", "provider": "hearth", "command": "sleep 60", "started": tasks._now(),
+                          "finished": None, "pid": orphan, "pid_identity": tasks._identity(orphan)}]
+        (task_dir / "runs/02-check").mkdir(parents=True)
+        tasks._write(task_dir, task)
+
+        sessions.recover()
+
+        self.assertEqual(sessions.detail(session_id)["turns"][0]["check"]["outcome"], "interrupted")
+        self.assertFalse(tasks._alive(orphan))
+        self.assertEqual(self.calls(), [])
+
+    def test_the_check_runs_when_git_cannot_say_whether_the_turn_changed_anything(self) -> None:
+        self.project("echo check-ran")
+        session_id = self.new("codex")
+        with mock.patch.object(sessions, "_fingerprint", return_value=None):
+            sessions.send(session_id, "Hi", "send-0001")
+            record = self.check_record(session_id)
+
+        self.assertEqual(record["outcome"], "done")
+
+    def test_the_fingerprint_sees_every_untracked_file_and_ignores_hearths_own(self) -> None:
+        session_id = self.new("codex")
+        task = tasks._read(self.home / ".hearth/tasks" / session_id)
+        worktree = Path(task["worktree"])
+        for number in range(sessions.UNTRACKED_LIMIT + 1):
+            (worktree / f"new-{number:03d}.txt").write_text("a", encoding="utf-8")
+        before = sessions._fingerprint(task)
+        (worktree / ".hearth").mkdir(exist_ok=True)
+        (worktree / ".hearth/scratch").write_text("hearth's own", encoding="utf-8")
+        self.assertEqual(sessions._fingerprint(task), before)
+        (worktree / f"new-{sessions.UNTRACKED_LIMIT:03d}.txt").write_text("b", encoding="utf-8")  # Past the Changes view's limit.
+        self.assertNotEqual(sessions._fingerprint(task), before)
+        self.assertIsNotNone(before)

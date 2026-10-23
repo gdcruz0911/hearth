@@ -413,3 +413,40 @@ test("the new-conversation form starts in the project of the conversation just v
   await open("#/sessions/new");
   await formShows("alpha");  // The conversation just viewed, not the earlier pick.
 });
+
+// ADR-0047: after a Codex turn that changed files, Hearth runs the project's check outside the sandbox; the page shows it running,
+// stops it like a turn, and shows its result with the turn, and the commands note says what Codex was told.
+test("the check Hearth runs after a Codex turn shows as running, with Stop, and then with its result", async (t) => {
+  const home = scratch();
+  conversation(home, "request-check-00");
+  const env = { PATH: "/usr/bin:/bin", HOME: join(home.dir, "home"), HEARTH_HOME: join(home.dir, "hearth"), PYTHONPATH: join(repo, "src") };
+  writeFileSync(join(home.dir, "hearth/projects.json"), JSON.stringify({ demo: { path: join(home.dir, "project"), check: "sleep 3; echo all-good",
+    turn_check: "echo quick", providers: ["claude", "codex"] } }));
+  const id = execFileSync(python, ["-c", "from hearth.workbench import sessions; print(sessions.create('demo', 'codex', 'edit', None, 'medium', 'request-check-01')['id'])"],
+                          { env }).toString().trim();
+  const bin = join(home.dir, "home/.local/bin");
+  mkdirSync(bin, { recursive: true });
+  writeFileSync(join(bin, "codex"), `#!/bin/sh
+cat > /dev/null
+echo changed > edited.txt
+echo '{"type": "thread.started", "thread_id": "thread-1"}'
+echo '{"type": "item.completed", "item": {"type": "agent_message", "text": "Changed it"}}'
+echo '{"type": "turn.completed", "usage": {}}'
+`);
+  chmodSync(join(bin, "codex"), 0o755);
+  const { app } = await openApp(t, home, realBackend(home.dir), { env: { PATH: "/usr/bin:/bin" } });
+  const page = await windowShowing(app, "Live ·");
+  await page.evaluate((session) => void (window.location.hash = `#/sessions/${session}`), id);
+  await page.locator("#convo-message").fill("Change it");
+  await page.locator("#convo-message").blur();
+  await page.getByRole("button", { name: "Send to Codex" }).click();
+
+  await page.getByText("Hearth is running", { exact: false }).waitFor({ timeout: 20_000 });
+  assert.ok(await page.locator("#convo-stop").isVisible(), "Stop is offered while the check runs");
+  await page.locator("#convo-log pre.step-output", { hasText: "all-good" }).waitFor({ timeout: 20_000 });
+  const text = await page.locator("#convo-log").textContent();
+  assert.match(text ?? "", /Hearth ran sleep 3; echo all-good · exit code 0/);
+  assert.match(text ?? "", /Your next message to the agent starts with this result\./);
+  assert.match(await page.locator("#convo-commands").textContent() ?? "", /Codex was told to run echo quick for its own checks\. After a turn that changes files, Hearth runs sleep 3; echo all-good outside the sandbox\./);
+  await page.locator("#convo-stop").waitFor({ state: "hidden" });
+});
