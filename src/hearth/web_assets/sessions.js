@@ -5,7 +5,7 @@
   const $ = (id) => document.getElementById(id);
   const AGENTS = { claude: "Claude Code", codex: "Codex" };
   const state = { visible: false, selected: null, options: null, sessions: [], detail: null, turns: new Map(), sending: null, timer: 0, said: "",
-                  drafts: new Map(), saving: new Set(), seq: 0, places: new Map(), place: null, changesKey: "" };
+                  drafts: new Map(), saving: new Set(), seq: 0, places: new Map(), place: null, changesKey: "", formProject: null };
 
   function say(text) {
     // One polite live region for the conversation's state, announced only when it changes.
@@ -42,6 +42,12 @@
   // ---------- the new-conversation form ----------
 
   function showForm() {
+    // As in Claude's and Codex's own apps, a new conversation starts where the keeper just was: the conversation they were
+    // viewing, or else the latest one. Never a pick left from an earlier form, which sent two proof conversations astray.
+    if ($("convo-form").hidden) {  // Only when the form opens: a second route to it while open keeps what it shows.
+      const from = state.sessions.find((item) => item.id === state.selected);
+      state.formProject = from ? from.project : null;
+    }
     select(null);
     $("convo-pane").hidden = true;
     $("convo-form").hidden = false;
@@ -54,9 +60,9 @@
     const options = state.options || { projects: {}, efforts: [] };
     const select = $("convo-project");
     const names = Object.keys(options.projects);
-    const keep = select.value;
+    const want = state.formProject || (state.sessions[0] || {}).project;
     select.replaceChildren(...names.map((name) => { const o = el("option", "", name); o.value = name; return o; }));
-    if (names.includes(keep)) select.value = keep;
+    if (names.includes(want)) select.value = want;
     $("convo-form-error").hidden = names.length > 0;
     if (!names.length) {
       $("convo-form-error").textContent = "No projects yet. Next: add one to ~/.hearth/projects.json, then reopen this form.";
@@ -546,7 +552,7 @@
     $("convo-form").hidden = true;
     window.location.hash = "#/sessions";
   });
-  $("convo-project").addEventListener("change", fillAgents);
+  $("convo-project").addEventListener("change", () => { state.formProject = $("convo-project").value; fillAgents(); });
   $("convo-agents").addEventListener("change", fillModel);
   $("convo-form").addEventListener("submit", start);
   $("convo-composer").addEventListener("submit", send);
