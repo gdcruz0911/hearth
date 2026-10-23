@@ -206,7 +206,10 @@
 
   function running() {
     const turns = (state.detail && state.detail.turns) || [];
-    return turns.length && !turns[turns.length - 1].finished ? turns[turns.length - 1] : null;
+    const last = turns[turns.length - 1];
+    if (!last) return null;
+    if (!last.finished) return last;
+    return last.check && !last.check.finished ? last.check : null; // The check Hearth runs after a turn stops like a turn.
   }
 
   function renderDetail() {
@@ -222,6 +225,8 @@
     const commands = $("convo-commands");
     commands.replaceChildren(el("span", "", session.commands?.description || "Command permissions not reported."));
     if (session.commands?.check) commands.append(" ", el("code", "", session.commands.check), " may run.");
+    if (session.commands?.turn_check) commands.append(" Codex was told to run ", el("code", "", session.commands.turn_check), " for its own checks.");
+    if (session.commands?.host_check) commands.append(" After a turn that changes files, Hearth runs ", el("code", "", session.commands.host_check), " outside the sandbox.");
     commands.append(" Hearth cannot approve extra commands here.");
     $("convo-badge").replaceChildren(session.status ? badge(session.status) : el("span", "badge other", "new"));
     const finished = session.turns.filter((turn) => turn.finished).length;
@@ -264,7 +269,7 @@
   function footer(view) {
     const { turn } = view;
     const key = JSON.stringify([turn.finished, turn.outcome, turn.model_used, turn.warnings, turn.error, Boolean(view.draft),
-      turn.left_running, turn.left_in_folder, turn.cleanup_unchecked]);
+      turn.left_running, turn.left_in_folder, turn.cleanup_unchecked, turn.check]);
     if (key === view.footKey) return;
     view.footKey = key;
     const parts = [];
@@ -302,9 +307,32 @@
         parts.push(el("p", "turn-note failed", "Hearth stopped this reply when it quit or lost its backend. Nothing was resent; send again to continue."));
       }
       if (turn.outcome === "failed") parts.push(el("p", "turn-note failed", shown(turn.error)));
+      if (turn.check) parts.push(checkView(turn.check));
     }
     if (view.draft && turn.finished) view.draft.classList.add("partial");
     view.foot.replaceChildren(...parts);
+  }
+
+  function checkView(check) {
+    // ADR-0047: the project's check Hearth ran after this turn, outside the sandbox; its result opens the next message.
+    const box = el("div", "turn-foot");
+    const line = el("p", check.finished ? "turn-meta" : "turn-live");
+    if (!check.finished) {
+      line.append(el("span", "pulse"), el("span", "", "Hearth is running "), el("code", "", check.command), el("span", "", " outside the sandbox…"));
+      box.append(line);
+      return box;
+    }
+    line.append(badge(check.outcome), el("span", "", "Hearth ran "), el("code", "", check.command),
+      el("span", "", check.exit_code === null ? "" : ` · exit code ${check.exit_code}`));
+    box.append(line);
+    if (check.outcome === "cancelled") {
+      box.append(el("p", "turn-note", { keeper: "You stopped the check.", quit: "Hearth stopped the check when it quit." }[check.stopped_by] || "Stop reason not recorded."));
+    }
+    if (check.outcome === "interrupted") box.append(el("p", "turn-note failed", "Hearth stopped the check when it lost its backend."));
+    if (check.error) box.append(el("p", "turn-note failed", check.error));
+    if (check.tail) box.append(el("pre", "step-output", check.tail));
+    box.append(el("p", "turn-note", "Your next message to the agent starts with this result."));
+    return box;
   }
 
   async function readTurn(view) {
