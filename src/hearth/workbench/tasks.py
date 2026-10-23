@@ -49,7 +49,7 @@ INTERACTIVE = {
 # Read-only invocations for review runs; each is confirmed against the installed version before first use (TEST-6).
 REVIEWERS = {
     "claude": ["claude", "{options}", "-p", "--output-format", "stream-json", "--verbose", "--setting-sources", "", "--settings", "{settings}", "--strict-mcp-config",
-               "--tools", "Read,Grep,Glob", "--allowedTools", "Read", "Grep", "Glob"],
+               "--tools", "Read,Grep,Glob"],  # No --allowedTools: it would pre-allow reads outside the worktree; default mode allows only inside.
     "codex": ["codex", "exec", "{options}", "--json", "--ignore-user-config", "-c", "project_doc_max_bytes=0", "-c", "memories.generate_memories=false", "-c", "memories.use_memories=false", "--sandbox", "read-only", "-"],
     "antigravity": ["agy", "{options}", "--output-format", "stream-json", "--mode", "plan", "-p", "{prompt}"],
 }

@@ -45,6 +45,17 @@ class WorkerIsolationTests(unittest.TestCase):
                 self.assertIn("--strict-mcp-config", argv)
                 self.assertEqual(argv[argv.index("--tools") + 1], tools)
 
+    def test_claude_readers_pre_allow_nothing_so_reads_outside_the_worktree_are_refused(self) -> None:
+        # 2026-10-21: --allowedTools Read pre-allowed a Read of any path; without it, only the worktree is readable (checked with the real CLI).
+        argv = tasks._argv(tasks.REVIEWERS["claude"], "claude", "prompt", "check", "m", "low", settings="{}")
+
+        self.assertEqual(argv, ["claude", "--model", "m", "--effort", "low", "-p", "--output-format", "stream-json", "--verbose", "--setting-sources", "",
+                                "--settings", "{}", "--strict-mcp-config", "--tools", "Read,Grep,Glob"])
+        settings = json.loads(tasks._claude_settings(Path.home() / ".hearth/worktrees/demo/20261009-000000"))
+        self.assertFalse({"permissions", "additionalDirectories"} & settings.keys())  # Nor may Hearth's own settings allow a read.
+        for table in (tasks.PROVIDERS, tasks.VERIFIERS):  # Writers keep their command pre-allow.
+            self.assertIn("--allowedTools", tasks._argv(table["claude"], "claude", "prompt", "check", None, None))
+
     def test_claude_workers_skip_personal_and_ancestor_instructions_and_auto_memory(self) -> None:
         worktree = Path.home() / ".hearth/worktrees/demo/20261009-000000"
 
