@@ -1025,6 +1025,17 @@ class HostCheckTests(SessionTestCase):
         self.assertFalse(any(part.startswith("developer_instructions=") for part in self.calls()[1]["argv"]))
         self.assertEqual(self.calls()[1]["prompt"], "Change it")
 
+    def test_the_check_runs_with_the_backends_environment_and_the_runs_marker_not_as_an_agents_shell(self) -> None:
+        self.project("env")
+        os.environ["FAKE_SESSION"] = "edit"
+        session_id = self.new("codex")
+        sessions.send(session_id, "Change it", "send-0001")
+        record = self.check_record(session_id)
+
+        lines = (self.home / ".hearth/tasks" / session_id / "runs" / record["dir"] / "output.txt").read_text(encoding="utf-8").splitlines()
+        self.assertIn(f"{tasks.RUN_MARKER}={record['marker']}", lines)
+        self.assertFalse(any(line.startswith(("HEARTH_TASK=", "CODEX_HOME=")) for line in lines))
+
     def test_no_check_after_a_failed_turn(self) -> None:
         self.project("echo check-ran")
         os.environ["FAKE_SESSION"] = "fail"

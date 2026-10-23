@@ -486,7 +486,9 @@ def _start_check(task: dict, task_dir: Path, check: str) -> None:
     task["runs"].append(record)
     task["status"] = "running"
     tasks._write(task_dir, task)  # Recorded before launch, as a turn is: a crash before it starts leaves an interrupted check, not none.
-    env = {**os.environ, **tasks.NO_BYTECODE, "HEARTH_TASK": task["id"], tasks.RUN_MARKER: record["marker"]}
+    # As a task's check gets it: without HEARTH_TASK, which marks an agent's shell and stops Hearth's own suite (agent_check) from
+    # starting a backend. Keeper-only commands then no longer refuse inside the check, as in a task's check.
+    env = {**os.environ, **tasks.NO_BYTECODE, tasks.RUN_MARKER: record["marker"]}
     with _active_lock:
         if _quitting:  # stop_all has already looked, so a check started now would outlive the backend.
             record.update(finished=tasks._now(), exit_code=None, outcome="cancelled", stopped_by="quit")
