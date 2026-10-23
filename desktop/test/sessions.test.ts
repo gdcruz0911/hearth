@@ -366,3 +366,50 @@ test("what a stop left behind shows in its reply even when it is recorded after 
       && text.includes("not stopped by Hearth: 4343") && text.includes("Hearth could not list processes");
   }, null, { timeout: 15_000 });
 });
+
+// Found in the slice 2 proof: the form kept the last project picked, or else the first in projects.json, so two conversations
+// started in the wrong project. As in Claude's and Codex's own apps, a new conversation starts where the keeper just was.
+test("the new-conversation form starts in the project of the conversation just viewed, or else the latest one", async (t) => {
+  const home = scratch();
+  const env = { PATH: "/usr/bin:/bin", HOME: join(home.dir, "home"), HEARTH_HOME: join(home.dir, "hearth"), PYTHONPATH: join(repo, "src"),
+                GIT_AUTHOR_NAME: "Person", GIT_AUTHOR_EMAIL: "person@example.com", GIT_COMMITTER_NAME: "Person", GIT_COMMITTER_EMAIL: "person@example.com" };
+  const projects: Record<string, unknown> = {};
+  for (const name of ["alpha", "beta"]) {  // alpha is first in projects.json.
+    const folder = join(home.dir, name);
+    mkdirSync(folder);
+    const git = (...args: string[]) => execFileSync("git", ["-C", folder, ...args], { env });
+    git("init", "-q", "-b", "main");
+    writeFileSync(join(folder, "README.md"), `# ${name}\n`);
+    git("add", "README.md");
+    git("commit", "-q", "-m", "init");
+    projects[name] = { path: folder, check: "true", providers: ["claude", "codex"] };
+  }
+  mkdirSync(join(home.dir, "hearth"), { recursive: true });
+  writeFileSync(join(home.dir, "hearth/projects.json"), JSON.stringify(projects));
+  const create = (project: string, request: string) => execFileSync(python, ["-c",
+    `from hearth.workbench import sessions; print(sessions.create('${project}', 'claude', 'edit', None, 'medium', '${request}')['id'])`], { env }).toString().trim();
+  const alpha = create("alpha", "request-form-alpha");
+  create("beta", "request-form-beta");  // The latest conversation.
+
+  const { app } = await openApp(t, home, realBackend(home.dir));
+  const page = await windowShowing(app, "Live ·");
+  const formShows = async (project: string) => {
+    await page.locator("#convo-form").waitFor({ state: "visible" });
+    await page.waitForFunction((want) => (document.getElementById("convo-project") as HTMLSelectElement).value === want, project, { timeout: 10_000 })
+      .catch(() => undefined);
+    assert.equal(await page.locator("#convo-project").inputValue(), project);
+  };
+  const open = async (hash: string) => page.evaluate((to) => void (window.location.hash = to), hash);
+
+  await open("#/sessions/new");  // Straight to the form after opening Hearth.
+  await formShows("beta");
+  await open(`#/sessions/${alpha}`);
+  await page.locator("#convo-message").waitFor();
+  await open("#/sessions/new");
+  await formShows("alpha");
+  await page.locator("#convo-project").selectOption("beta");  // Picked by hand, then left without starting.
+  await open(`#/sessions/${alpha}`);
+  await page.locator("#convo-message").waitFor();
+  await open("#/sessions/new");
+  await formShows("alpha");  // The conversation just viewed, not the earlier pick.
+});
