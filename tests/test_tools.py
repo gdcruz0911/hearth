@@ -36,8 +36,10 @@ class ToolDiscoveryTests(unittest.TestCase):
         script.chmod(0o755)
 
     def run_tools(self, *argv: str) -> tuple[int, str, str]:
+        # No test here imports MLX: inside an agent's sandbox the import aborts, and macOS shows a crash dialog.
         output, errors = io.StringIO(), io.StringIO()
         with mock.patch.dict(os.environ, {"PATH": BARE, "HEARTH_HOME": str(self.root / "hearth")}), \
+                mock.patch.object(tools, "_inference", return_value={"mlx": True, "error": None, "models": {}}), \
                 contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
             status = main(["tools", *argv])
             path = os.environ["PATH"]
@@ -74,11 +76,12 @@ class ToolDiscoveryTests(unittest.TestCase):
         on_disk = self.root / "embedding"
         on_disk.mkdir()
 
-        found = tools._inference(on_disk, self.root / "reranker")  # Not report(): that would run whatever agents PATH reaches.
+        with mock.patch.object(tools.subprocess, "run", return_value=mock.Mock(returncode=0, stderr="")):
+            found = tools._inference(on_disk, self.root / "reranker")  # Not report(): that would run whatever agents PATH reaches.
 
         self.assertEqual(found["models"], {"embedding": {"path": str(on_disk), "on_disk": True},
                                            "reranker": {"path": str(self.root / "reranker"), "on_disk": False}})
-        self.assertIsInstance(found["mlx"], bool)
+        self.assertIs(found["mlx"], True)
 
     def test_a_broken_inference_install_is_reported_not_raised(self) -> None:
         with mock.patch.object(tools.subprocess, "run", return_value=mock.Mock(returncode=1, stderr="ModuleNotFoundError: No module named 'mlx'")):
