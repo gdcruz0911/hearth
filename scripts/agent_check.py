@@ -88,8 +88,12 @@ class Check:
         subprocess.run(["git", "-C", str(self.project), "checkout", "-q", "--detach", self.report["commit"]], check=True)
         self.home.mkdir(parents=True)
         self.check = f"PYTHONPATH=src {shlex.quote(sys.executable)} {TEST_ARGS}"
+        # Codex is told not to run the project's check itself (ADR-0047), so it is asked for its turn_check: the same full
+        # run, worded differently so it is not that check, and as long, so it is still running when Stop and Quit come.
+        self.turn_check = f"{self.check} -p 'test_*.py'"
         (self.home / "projects.json").write_text(json.dumps(
-            {"hearth": {"path": str(self.project), "check": self.check, "providers": list(AGENTS), "pr": False}}), encoding="utf-8")
+            {"hearth": {"path": str(self.project), "check": self.check, "turn_check": self.turn_check, "providers": list(AGENTS),
+                        "pr": False}}), encoding="utf-8")
         models = Path.home() / ".hearth/models.json"  # The person's default models, so the check uses what they use.
         if models.is_file():
             shutil.copy(models, self.home / "models.json")
@@ -172,12 +176,12 @@ class Check:
         return captured
 
     def round_a(self) -> None:
-        message = f"Run the full check exactly once: `{self.check}`. Do not change any files. Reply with its final summary line only."
         self.sessions = {agent: self.api("POST", "sessions", {"project": "hearth", "provider": agent, "mode": "edit", "effort": "medium",
                                                               "request": f"agent-check-{agent}-{time.time_ns()}"})["session"]["id"]
                          for agent in AGENTS}
-        for session in self.sessions.values():
-            self.send(session, message)
+        for agent, session in self.sessions.items():
+            check = self.turn_check if agent == "codex" else self.check
+            self.send(session, f"Run the full check exactly once: `{check}`. Do not change any files. Reply with its final summary line only.")
         tests = self.wait_tests(*AGENTS)
         claude, codex = self.sessions["claude"], self.sessions["codex"]
         claude_agent, captured = self.run_record(claude), self.captured("codex")
@@ -200,7 +204,7 @@ class Check:
 
     def round_b(self) -> None:
         codex = self.sessions["codex"]
-        self.send(codex, f"Run the full check exactly once more: `{self.check}`. Do not change any files. Reply with its final summary line only.")
+        self.send(codex, f"Run the full check exactly once more: `{self.turn_check}`. Do not change any files. Reply with its final summary line only.")
         tests = self.wait_tests("codex")
         captured = self.captured("codex") + self.captured("claude")
         before = _snapshot(self.out)
