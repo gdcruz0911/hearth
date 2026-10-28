@@ -16,27 +16,39 @@
     return AGENTS[provider] || shown(provider);
   }
 
-  function card(item) {
-    const li = el("li", "card-item");
-    const link = el("a", `card${item.id === state.selected ? " current" : ""}`);
-    link.href = `#/sessions/${encodeURIComponent(item.id)}`;
-    if (item.id === state.selected) link.setAttribute("aria-current", "page");
-    const top = el("div", "row-top");
-    if (item.status === "running") top.append(el("span", "pulse"));
-    top.append(el("span", "goal", shown(item.title)), item.status ? badge(item.status) : el("span", "badge other", "new"));
-    const place = el("div", "card-place");
-    place.append(el("span", "project-tag", shown(item.project)), el("span", "id", `${agent(item.provider)} · ${item.model || "CLI default"}`));
-    const foot = el("div", "card-runs");
-    foot.append(el("span", "card-last", `${item.turn_count} turn${item.turn_count === 1 ? "" : "s"} · ${item.mode === "edit" ? "edits its worktree" : "read only"}`),
-      el("span", "card-age", window.Hearth.ago ? window.Hearth.ago(item.updated) : ""));
-    link.append(top, place, foot);
-    li.append(link);
-    return li;
+  function icon(name) {
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    const use = document.createElementNS("http://www.w3.org/2000/svg", "use");
+    use.setAttribute("href", `#i-${name}`);
+    svg.setAttribute("aria-hidden", "true");
+    svg.append(use);
+    return svg;
+  }
+
+  function dot(status) {
+    // One dot per conversation state; the words beside it, or its label, carry the meaning too.
+    const node = el("span", `state-dot ${status || "new"}`);
+    node.setAttribute("role", "img");
+    node.setAttribute("aria-label", status || "no turn yet");
+    return node;
   }
 
   function renderList() {
-    const list = $("convo-cards");
-    list.replaceChildren(...(state.sessions.length ? state.sessions.map(card) : [el("li", "empty", "No conversations yet.")]));
+    // The other conversations in this one's project, as compact tabs; the sidebar (shell.js) lists them all.
+    const tabs = $("convo-tabs");
+    const project = state.detail ? state.detail.project : null;
+    const mine = state.sessions.filter((item) => item.project === project);
+    tabs.replaceChildren(...mine.map((item) => {
+      const tab = el("a", "convo-tab");
+      tab.href = `#/sessions/${encodeURIComponent(item.id)}`;
+      if (item.id === state.selected) tab.setAttribute("aria-current", "page");
+      tab.title = `${agent(item.provider)} · ${shown(item.title)}`;
+      tab.append(dot(item.status), el("span", "", `${agent(item.provider)} · ${shown(item.title)}`));
+      return tab;
+    }));
+    const add = el("a", "convo-tab new", "+ New conversation");
+    add.href = `#/sessions/new`;
+    tabs.append(add);
   }
 
   // ---------- the new-conversation form ----------
@@ -135,15 +147,16 @@
     if (id === state.selected) return;
     if (state.selected) {
       saveDraft(state.selected); // Saved on every switch, not only after the pause.
-      const scroller = $("convo-scroll");
-      state.places.set(state.selected, { top: scroller.scrollTop, bottom: scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 80 });
-    }
+    } // The reading position is kept by the scroll listener: here the view may have just been unhidden, with its offset lost.
     state.selected = id;
     state.place = id ? state.places.get(id) || { bottom: true } : null;
     state.changesKey = "";
-    $("convo-changes").open = false;
     $("convo-changes-count").textContent = "";
-    $("convo-changes-body").replaceChildren();
+    $("convo-changes-card").hidden = true;
+    $("convo-changes-body").replaceChildren(el("p", "empty", id ? "Reading this conversation's changes…" : "Open a conversation to see what it changed."));
+    $("convo-meta").replaceChildren(el("p", "empty", id ? "" : "Open a conversation to see how it runs."));
+    $("convo-commands").replaceChildren();
+    $("convo-open").disabled = !id;
     state.detail = null;
     state.turns = new Map();
     state.sending = null;
@@ -216,12 +229,21 @@
     const session = state.detail;
     if (!session) return;
     $("convo-title").textContent = shown(session.title);
-    const meta = $("convo-meta");
-    meta.replaceChildren(
-      el("span", "project-tag", session.project),
-      el("span", "", `${agent(session.provider)} · ${session.model || "CLI default"} · ${session.effort} effort`),
-      el("span", "", session.mode === "edit" ? "Edits its own worktree" : "Read only"),
-      el("span", "id", session.worktree));
+    $("convo-project-name").textContent = session.project;
+    const field = (label, value) => {
+      const row = el("div", "field");
+      row.append(el("span", "field-label", label), el("span", "field-value", shown(value)));
+      return row;
+    };
+    $("convo-meta").replaceChildren(field("Agent", agent(session.provider)), field("Model asked for", session.model || "the CLI's default"),
+      field("Effort", session.effort), field("May", session.mode === "edit" ? "edit its own worktree" : "read only"),
+      field("Agent session kept", session.resumable ? "yes, the next message resumes it" : "not yet"), field("Work folder", session.worktree));
+    $("convo-meta").lastElementChild.lastElementChild.classList.add("path");
+    $("convo-mode").replaceChildren(icon("shield"), el("span", "", session.mode === "edit" ? "Own worktree" : "Read only"));
+    // The recipient is fixed for a conversation: another agent is another conversation.
+    $("convo-recipient").replaceChildren(icon("flame"), el("span", "", "To "), el("strong", "", agent(session.provider)),
+      el("span", "", `· ${session.model || "CLI default"} · ${session.effort}`));
+    renderList();
     const commands = $("convo-commands");
     commands.replaceChildren(el("span", "", session.commands?.description || "Command permissions not reported."));
     if (session.commands?.check) commands.append(" ", el("code", "", session.commands.check), " may run.");
@@ -255,15 +277,30 @@
 
   function turnView(turn) {
     const node = el("li", "convo-turn");
-    const mine = el("div", "said");
-    mine.append(el("span", "turn-kind", "You"), el("p", "said-text", turn.message));
-    const reply = el("div", "reply");
-    reply.append(el("span", "turn-kind", agent(state.detail.provider)));
+    const clock = (value) => {
+      const at = window.Hearth.time(value);
+      return el("time", "", at ? at.toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : "");
+    };
+    const mine = el("div", "message mine");
+    const myHead = el("div", "message-head", "You");
+    myHead.append(clock(turn.started));
+    const myBody = el("div");
+    myBody.append(myHead, el("p", "said-text", turn.message));
+    const me = el("span", "avatar you");
+    me.append(icon("user"));
+    mine.append(me, myBody);
+    const reply = el("div", "message reply");
+    const head = el("div", "message-head", agent(state.detail.provider));
+    head.append(clock(turn.started), el("small", "", "agent output"));
     const items = el("ol", "reply-items");
     const foot = el("div", "turn-foot");
-    reply.append(items, foot);
+    const body = el("div");
+    body.append(head, items, foot);
+    const avatar = el("span", "avatar agent");
+    avatar.append(icon("flame"));
+    reply.append(avatar, body);
     node.append(mine, reply);
-    return { node, items, foot, turn, offset: 0, done: false, draft: null, tool: null, footKey: "" };
+    return { node, items, foot, turn, offset: 0, done: false, draft: null, tool: null, footKey: "", work: null, steps: 0, failed: 0 };
   }
 
   function footer(view) {
@@ -279,7 +316,8 @@
       parts.push(line);
     } else {
       const line = el("p", "turn-meta");
-      line.append(badge(turn.outcome), el("span", "", `asked for ${turn.model || "the CLI's default"} · reported ${shown(turn.model_used)}`));
+      const took = window.Hearth.span(turn.started, turn.finished);
+      line.append(badge(turn.outcome), ...(took ? [el("span", "", took)] : []), el("span", "", `asked for ${turn.model || "the CLI's default"} · reported ${shown(turn.model_used)}`));
       if (turn.sandbox_used) line.append(el("span", "", `sandbox ${turn.sandbox_used}`));
       parts.push(line);
       if ((turn.warnings || []).some((warning) => warning.includes("unrecognized_model"))) {
@@ -310,6 +348,7 @@
       if (turn.check) parts.push(checkView(turn.check));
     }
     if (view.draft && turn.finished) view.draft.classList.add("partial");
+    workLine(view);
     view.foot.replaceChildren(...parts);
   }
 
@@ -372,7 +411,9 @@
     } else if (item.kind === "message") {
       if (view.draft) view.draft.remove();
       view.draft = null;
-      view.items.append(el("li", "reply-text", item.text));
+      const text = el("li", "reply-text md");
+      text.append(...window.Hearth.rich(item.text));
+      view.items.append(text);
     } else if (item.kind === "tool") {
       const step = el("li", "reply-step");
       const details = el("details");
@@ -380,15 +421,51 @@
       summary.append(el("span", "step-tool", item.tool || "tool"), el("span", "step-arg", item.text));
       details.append(summary);
       step.append(details);
-      view.items.append(step);
+      steps(view).append(step);
       view.tool = details;
+      view.steps += 1;
+      workLine(view);
     } else if (item.kind === "output") {
       const pre = el("pre", `step-output${item.error ? " error" : ""}`, item.text || "(no output)");
-      if (view.tool) view.tool.append(pre); else view.items.append(el("li", "reply-step")).append(pre);
-      if (item.error && view.tool) view.tool.classList.add("error");
+      if (view.tool) view.tool.append(pre);
+      else {  // Output with no tool line before it; append() returns nothing, so it cannot be chained.
+        const step = el("li", "reply-step");
+        step.append(pre);
+        steps(view).append(step);
+      }
+      if (item.error) {
+        view.tool?.classList.remove("done");
+        view.tool?.classList.add("error");
+        if (view.tool) view.tool.open = true;
+        view.failed += 1;
+        view.work.open = true; // Folding never hides a failed step.
+        workLine(view);
+      } else if (!view.tool?.classList.contains("error")) view.tool?.classList.add("done");
     } else if (item.kind === "error" || (item.kind === "result" && item.error)) {
       view.items.append(el("li", "reply-text failed", shown(item.text)));
     }
+  }
+
+  function steps(view) {
+    // A turn's tool work folds into one line where it began, so the reply reads as text; opening it shows every step.
+    if (!view.work) {
+      view.work = el("details", "work-steps");
+      view.work.append(el("summary"), el("ol", "work-list"));
+      const holder = el("li", "reply-work");
+      holder.append(view.work);
+      view.items.append(holder);
+    }
+    return view.work.lastElementChild;
+  }
+
+  function workLine(view) {
+    if (!view.work) return;
+    const { turn } = view;
+    const took = turn.finished && window.Hearth.span(turn.started, turn.finished);
+    const words = [took ? `Worked for ${took}` : turn.finished ? "Worked" : "Working", `${view.steps} step${view.steps === 1 ? "" : "s"}`];
+    if (view.failed) words.push(`${view.failed} failed`);
+    view.work.firstElementChild.textContent = words.join(" · ");
+    view.work.classList.toggle("error", view.failed > 0);
   }
 
   function restorePlace() {
@@ -406,8 +483,11 @@
       const { changes } = await api(`sessions/${encodeURIComponent(id)}/changes`);
       if (key !== state.changesKey) return;
       const count = changes.files.length + changes.untracked_hidden;
-      $("convo-changes-count").textContent = count ? `${count} file${count === 1 ? "" : "s"} · +${changes.added} −${changes.removed}` : "none yet";
-      const parts = [];
+      $("convo-changes-count").textContent = count ? String(count) : "";
+      $("convo-changes-card").hidden = !count;
+      $("convo-changes-line").replaceChildren(el("strong", "", `${count} changed file${count === 1 ? "" : "s"}`),
+        el("span", "diff-count add", `+${changes.added}`), el("span", "diff-count del", `−${changes.removed}`), el("span", "meta", "in this conversation's worktree"));
+      const parts = [el("p", "meta", count ? `${count} file${count === 1 ? "" : "s"} · +${changes.added} −${changes.removed} since the conversation began` : "")];
       if (changes.files.length) {
         const list = el("ul", "changed-files");
         const names = { M: "changed", A: "added", D: "deleted", T: "type changed", "?": "new, not committed" };
@@ -453,7 +533,8 @@
     const turn = running();
     const busy = Boolean(turn) || Boolean(state.sending);
     $("convo-send").disabled = busy || !$("convo-message").value.trim();
-    $("convo-send").textContent = state.sending ? "Sending…" : state.detail ? `Send to ${agent(state.detail.provider)}` : "Send";
+    $("convo-send").setAttribute("aria-label", state.sending ? "Sending…" : state.detail ? `Send to ${agent(state.detail.provider)}` : "Send");
+    $("convo-send").title = $("convo-send").getAttribute("aria-label");
     $("convo-stop").hidden = !turn;
     $("convo-message").placeholder = state.detail ? `Message ${agent(state.detail.provider)}` : "";
     // Without a queue, text written during a reply waits here: say so, so it is never taken for sent.
@@ -463,7 +544,7 @@
       : mine.failed ? "Draft not saved: Hearth did not answer. It stays here and is saved again as you type."
       : turn && $("convo-message").value.trim()
       ? "Not sent: Hearth does not queue messages. Send it when this reply finishes · Esc stops the reply"
-      : turn ? "Esc stops the reply · its output so far is kept" : "⌘↩ sends";
+      : turn ? "Esc stops the reply · its output so far is kept" : "Drafts stay with their conversation · ⌘↩ sends";
     if (turn) say(`${agent(state.detail.provider)} is replying.`);
     else if (state.detail && state.detail.status === "done") say("Reply finished.");
     else if (state.detail && state.detail.status === "cancelled") say("Stopped. What arrived before Stop is kept here.");
@@ -533,26 +614,28 @@
   // ---------- refresh ----------
 
   async function tick() {
+    // The listing refreshes in every view, for the sidebar and the Inbox; a conversation is read only while it is shown.
     clearTimeout(state.timer);
-    if (!state.visible) return;
     try {
       const listing = await api("sessions");
-      if (!state.visible) return; // The keeper left Sessions while this was loading: never pull them back.
       state.sessions = listing.sessions;
-      const changed = JSON.stringify(listing.options) !== JSON.stringify(state.options);
-      state.options = listing.options;
-      renderList();
-      if (changed && !$("convo-form").hidden) fillForm(); // Never rebuilt under the keeper's pointer for nothing.
+      document.dispatchEvent(new CustomEvent("hearth:sessions", { detail: listing }));
+      if (state.visible) {
+        const changed = JSON.stringify(listing.options) !== JSON.stringify(state.options);
+        state.options = listing.options;
+        renderList();
+        if (changed && !$("convo-form").hidden) fillForm(); // Never rebuilt under the keeper's pointer for nothing.
+      }
       // Read from the address, not state.visible: the keeper may have just left, and the page hears of it only after this runs.
       const [view, id] = window.location.hash.replace(/^#\//, "").split("/");
-      if (!state.selected && $("convo-form").hidden && !id && (view === "sessions" || (view === "" && !$("convo-view").hidden))) {
+      if (state.visible && !state.selected && $("convo-form").hidden && !id && (view === "sessions" || (view === "" && !$("convo-view").hidden))) {
         // Sessions alone opens the latest conversation, or the form when there is none yet.
         window.location.replace(state.sessions.length ? `#/sessions/${encodeURIComponent(state.sessions[0].id)}` : "#/sessions/new");
       }
-      if (state.selected) {
+      if (state.visible && state.selected) {
         const id = state.selected;
         const { session } = await api(`sessions/${encodeURIComponent(id)}`);
-        if (id === state.selected) {
+        if (id === state.selected && state.visible) {
           state.detail = session;
           adoptDraft(session);
           renderDetail();
@@ -564,18 +647,29 @@
       $("convo-send-error").hidden = false;
       $("convo-send-error").textContent = failure.message;
     }
-    state.timer = setTimeout(tick, running() ? 700 : 4000);
+    state.timer = setTimeout(tick, state.visible && running() ? 700 : 4000);
   }
 
   function route() {
-    const [view, id] = window.location.hash.replace(/^#\//, "").split("/").map(decodeURIComponent);
+    const [, id] = window.location.hash.replace(/^#\//, "").split("/").map(decodeURIComponent);
+    const was = state.visible;
     state.visible = !$("convo-view").hidden;
-    if (!state.visible) return clearTimeout(state.timer);
-    if (id === "new") showForm();
-    else select(id || null);
+    if (state.visible) {
+      if (!was && state.selected && (id || null) === state.selected) state.place = state.places.get(state.selected) || { bottom: true };
+      if (id === "new") showForm();
+      else select(id || null);
+      restorePlace();
+    }
     tick();
   }
 
+  $("convo-scroll").addEventListener("scroll", () => {
+    // Kept as the keeper reads: a view hidden for Tasks or the Inbox has already lost its offset when the route changes.
+    const scroller = $("convo-scroll");
+    if (state.selected && state.visible && scroller.clientHeight && !state.place) {
+      state.places.set(state.selected, { top: scroller.scrollTop, bottom: scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 80 });
+    }
+  }, { passive: true });
   $("convo-cancel").addEventListener("click", () => {
     $("convo-form").hidden = true;
     window.location.hash = "#/sessions";
@@ -586,6 +680,7 @@
   $("convo-composer").addEventListener("submit", send);
   $("convo-stop").addEventListener("click", stop);
   $("convo-open").addEventListener("click", openFolder);
+  $("convo-changes-open").addEventListener("click", () => document.dispatchEvent(new CustomEvent("hearth:inspect", { detail: "changes" })));
   $("convo-message").addEventListener("input", () => {
     if (state.selected) typed(state.selected, $("convo-message").value);
     composer();

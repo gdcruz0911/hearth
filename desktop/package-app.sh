@@ -9,6 +9,7 @@ rm -rf dist/Hearth.app
 ditto node_modules/electron/dist/Electron.app dist/Hearth.app
 mkdir dist/Hearth.app/Contents/Resources/app
 cp package.json dist/Hearth.app/Contents/Resources/app/
+cp hearth.icns dist/Hearth.app/Contents/Resources/electron.icns  # Info.plist already names electron.icns.
 ditto out dist/Hearth.app/Contents/Resources/app/out
 plist=dist/Hearth.app/Contents/Info.plist
 plutil -replace CFBundleName -string Hearth "$plist"
