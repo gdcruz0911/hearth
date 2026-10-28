@@ -224,7 +224,7 @@
     }
   }
 
-  // On wide screens the graph starts right of the floating "Needs you" panel; on phones the panel sits below it.
+  // On wide screens the graph starts right of the floating Inbox panel; on phones the panel sits below it.
   function home() {
     return window.innerWidth > 900 ? { x: 120, y: 30, k: 1 } : { x: 0, y: -40, k: 0.85 };
   }
@@ -356,7 +356,7 @@
       head.append(el("span", "goal wrap", H().shown(task.goal)), H().badge(task.status));
       parts.push(head, field("Project", task.project), field("Stage", task.stage), field("Task", task.id));
       const why = H().reason(task);
-      if (why) parts.push(field("Needs you", why));
+      if (why) parts.push(field("Inbox", why));
       const agents = el("div", "chips");
       for (const run of task.runs || []) {
         const chip = el("button", "chip", `${run.role} · ${run.provider}`);
@@ -411,7 +411,7 @@
     } else if (node.type === "project") {
       const own = state.tasks.filter((task) => `project:${task.project}` === node.id);
       parts.push(field("Tasks", own.length), field("Running", own.filter((task) => task.status === "running").length),
-        field("Needs you", own.filter((task) => H().reason(task)).length));
+        field("In the Inbox", own.filter((task) => H().reason(task)).length));
     } else if (node.type === "knowledge") {
       parts.push(field("Documents", state.map ? state.map.documents.length : null),
         field("Shown", [...state.nodes.values()].filter((item) => item.type === "document").length),
@@ -446,21 +446,21 @@
     state.transcript = null;
   }
 
-  // ---------- "Needs you", floating over the graph ----------
+  // ---------- the Inbox, floating over the graph: shell.js's list, so its count matches the sidebar's ----------
 
-  function needs() {
-    const urgent = state.tasks.filter((task) => H().reason(task));
+  function inbox(urgent) {
     document.getElementById("hub-needs-count").textContent = urgent.length ? String(urgent.length) : "";
     const list = document.getElementById("hub-needs");
-    list.replaceChildren(...(urgent.length ? urgent.slice(0, 4).map((task) => {
+    list.replaceChildren(...(urgent.length ? urgent.slice(0, 4).map((entry) => {
       const item = H().el("li");
-      const button = H().el("button", `mini-row ${statusClass(task.status)}`);
+      const button = H().el("button", `mini-row ${statusClass(entry.status)}`);
       button.type = "button";
-      button.append(H().el("span", "mini-dot"), H().el("span", "mini-goal", H().shown(task.goal)), H().el("span", "mini-why", H().reason(task)));
-      button.addEventListener("click", () => select(`task:${task.id}`));
+      button.append(H().el("span", "mini-dot"), H().el("span", "mini-goal", entry.title), H().el("span", "mini-why", entry.why));
+      // A task opens in the Hub's panel; a conversation has no node, so it opens in Conversations.
+      button.addEventListener("click", () => { if (entry.task) select(`task:${entry.task}`); else location.hash = `#/${entry.route}`; });
       item.append(button);
       return item;
-    }) : [H().el("li", "empty", "Nothing needs you.")]));
+    }) : [H().el("li", "empty", "Nothing in the Inbox.")]));
   }
 
   // ---------- wiring ----------
@@ -514,13 +514,13 @@
       const signature = tasks.map((task) => [task.id, task.status, task.active_run && task.active_run.dir, (task.runs || []).length,
         (task.recall || []).length, (task.questions || []).length].join(":")).join("|");
       state.tasks = tasks;
-      needs();
       if (signature === state.signature) return false;
       state.signature = signature;
       build();
       return true;
     };
     if (H().latest) take(H().latest);
+    document.addEventListener("hearth:inbox", (event) => inbox(event.detail));
     document.addEventListener("hearth:tasks", (event) => {
       if (!take(event.detail)) return;
       if (state.selected && state.nodes.has(state.selected) && state.nodes.get(state.selected).type === "task") {

@@ -8,7 +8,7 @@ const sessionToken = window.location.hash.startsWith("#session=") ? window.locat
 if (sessionToken) history.replaceState(null, "", window.location.pathname);
 const SESSION_LOST = "This dashboard session ended. Quit and reopen the Hearth app, or run hearth web in your terminal.";
 const KNOWN = new Set(["running", "queued", "waiting", "done", "failed", "cancelled", "interrupted"]);
-const VIEWS = ["sessions", "hub", "tasks", "knowledge"];
+const VIEWS = ["sessions", "attention", "hub", "tasks", "knowledge"];
 const DOTS = 8; // Run dots on a task card.
 const seen = new Map(); // Task id to its last status, so only real arrivals and changes move.
 let firstRender = true;
@@ -138,7 +138,7 @@ function render(data) {
   const needs = tasks.filter((task) => reason(task));
   const progress = tasks.filter((task) => !needs.includes(task) && (task.status === "running" || task.status === "queued"));
   const finished = tasks.filter((task) => !needs.includes(task) && !progress.includes(task));
-  fill(document.getElementById("needs"), needs, card, "Nothing needs you.");
+  fill(document.getElementById("needs"), needs, card, "Nothing in the Inbox.");
   fill(document.getElementById("progress"), progress, card, "No agent is working.");
   fill(document.getElementById("finished"), finished, card, "No finished tasks yet.");
   document.getElementById("finished-count").textContent = String(finished.length);
@@ -148,14 +148,6 @@ function render(data) {
   const slots = data.slots || {};
   document.getElementById("slots").textContent = Object.entries(slots)
     .map(([kind, use]) => `${kind} ${shown(use && use.busy)}/${shown(use && use.limit)}`).join(" · ");
-
-  const counts = new Map();
-  tasks.forEach((task) => counts.set(task.project, (counts.get(task.project) || 0) + 1));
-  document.getElementById("projects").replaceChildren(...[...counts].map(([name, count]) => {
-    const item = el("li");
-    item.append(el("span", "", name), el("span", "count", String(count)));
-    return item;
-  }));
   detail(tasks.find((task) => task.id === selected.task) || needs[0] || progress[0] || finished[0] || null);
 }
 
@@ -333,7 +325,7 @@ function detail(task) {
   const why = reason(task);
   if (why) {
     const box = el("section", "needs-box");
-    box.append(el("h3", "group", "Needs you"), el("p", "", why));
+    box.append(el("h3", "group", "In your Inbox"), el("p", "", why));
     for (const [index, question] of (task.questions || []).entries()) {
       const asked = el("div", "question");
       asked.append(el("p", "meta", `${shown(question.from)} asks (${shown(question.kind)})`), el("p", "question-body", shown(question.body)));
@@ -435,15 +427,18 @@ function stopSession() {
 // An agent's session, read from its events as they arrive; the hub's panel uses the same reader.
 function session(taskId, run, list) {
   const state = { offset: 0, timer: 0, stopped: false };
-  const kinds = { start: "Started", message: "Said", tool: "Ran", output: "Output", result: "Result", error: "Error" };
+  const kinds = { start: "Started", message: "Said", delta: "Said", tool: "Ran", output: "Output", result: "Result", error: "Error" };
   const poll = async () => {
     try {
       const page = await api(`workbench/transcript/${encodeURIComponent(taskId)}/${encodeURIComponent(run)}/${state.offset}`);
       if (state.stopped) return;
       for (const item of page.items) {
+        // Streamed pieces join the entry before them, so a reply reads as one text.
+        const last = list.lastElementChild;
+        if (item.kind === "delta" && last && last.classList.contains("delta")) { last.lastElementChild.textContent += item.text; continue; }
         const entry = el("li", `turn ${item.kind}${item.error ? " error" : ""}`);
         entry.append(el("span", "turn-kind", item.tool ? `${kinds[item.kind] || item.kind} ${item.tool}` : kinds[item.kind] || item.kind),
-          el(item.kind === "message" || item.kind === "result" ? "p" : "pre", "turn-text", item.text));
+          el(["message", "delta", "result"].includes(item.kind) ? "p" : "pre", "turn-text", item.text));
         list.append(entry);
       }
       // Follow a live session as it grows; a finished one opens at its beginning.
@@ -485,10 +480,75 @@ async function diffPane(task) {
   }
 }
 
-function files(text) {
-  // A unified diff as one collapsible block per file, with line numbers from each hunk header.
+function markdown(text) {
+  // Agent text as blocks of plain-text runs for el() to build: a small Markdown subset, and no HTML is ever parsed (ADR-0037).
+  const inline = (line) => {
+    const runs = [];
+    let last = 0;
+    for (const match of line.matchAll(/`([^`\n]+)`|\*\*([^*\n]+)\*\*/g)) {
+      if (match.index > last) runs.push({ text: line.slice(last, match.index) });
+      runs.push(match[1] !== undefined ? { code: match[1] } : { strong: match[2] });
+      last = match.index + match[0].length;
+    }
+    if (last < line.length) runs.push({ text: line.slice(last) });
+    return runs;
+  };
   const blocks = [];
-  let body = null, oldLine = 0, newLine = 0;
+  const lines = String(text).split("\n");
+  let open = null; // The paragraph or list the next line may continue; a blank line closes it.
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (/^\s*```/.test(line)) {
+      const code = [];
+      for (index += 1; index < lines.length && !/^\s*```/.test(lines[index]); index += 1) code.push(lines[index]);
+      blocks.push({ kind: "code", text: code.join("\n") });
+      open = null;
+      continue;
+    }
+    const heading = line.match(/^#{1,6}\s+(.*)$/);
+    const item = line.match(/^\s*(?:[-*+]|(\d{1,9})[.)])\s+(.*)$/);
+    if (!line.trim()) open = null;
+    else if (heading) {
+      blocks.push({ kind: "heading", runs: inline(heading[1]) });
+      open = null;
+    } else if (item) {
+      const ordered = item[1] !== undefined;
+      if (!open || open.kind !== "list" || open.ordered !== ordered) {
+        open = { kind: "list", ordered, start: ordered ? Number(item[1]) : 1, items: [] };
+        blocks.push(open);
+      }
+      open.items.push(inline(item[2]));
+    } else if (open && open.kind === "paragraph") {
+      open.text += `\n${line}`;
+      open.runs = inline(open.text);
+    } else {
+      open = { kind: "paragraph", text: line, runs: inline(line) };
+      blocks.push(open);
+    }
+  }
+  return blocks;
+}
+
+function rich(text) {
+  const fill = (node, runs) => {
+    runs.forEach((run) => node.append(run.code !== undefined ? el("code", "", run.code) : run.strong !== undefined ? el("strong", "", run.strong) : run.text));
+    return node;
+  };
+  return markdown(text).map((block) => {
+    if (block.kind === "code") return el("pre", "md-code", block.text);
+    if (block.kind === "heading") return fill(el("h4", "md-heading"), block.runs);
+    if (block.kind === "paragraph") return fill(el("p", "md-p"), block.runs);
+    const list = el(block.ordered ? "ol" : "ul", "md-list");
+    if (block.ordered && block.start !== 1) list.start = block.start;
+    block.items.forEach((runs) => list.append(fill(el("li"), runs)));
+    return list;
+  });
+}
+
+function files(text) {
+  // A unified diff as one collapsible block per file, with old and new line numbers and the unchanged lines between hunks counted.
+  const blocks = [];
+  let body = null, oldLine = 0, newLine = 0, next = 1;
   for (const line of text.split("\n")) {
     if (line.startsWith("diff --git ")) {
       const file = el("details", "diff-file");
@@ -497,22 +557,26 @@ function files(text) {
       body = el("div", "diff-body");
       file.append(body);
       blocks.push(file);
+      next = 1;
       continue;
     }
-    if (!body || /^(index |--- |\+\+\+ |new file|deleted file|similarity|rename |old mode|new mode)/.test(line)) continue;
+    if (!body || line === "" || /^(index |--- |\+\+\+ |new file|deleted file|similarity|rename |old mode|new mode|\\ )/.test(line)) continue;
     const hunk = line.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)/);
     if (hunk) {
       oldLine = Number(hunk[1]);
       newLine = Number(hunk[2]);
-      body.append(el("div", "diff-line hunk", line));
+      const hidden = newLine - next;
+      if (hidden > 0) body.append(el("div", "diff-line hunk", `${hidden} unmodified line${hidden === 1 ? "" : "s"}`));
       continue;
     }
     const kind = line[0] === "+" ? "add" : line[0] === "-" ? "del" : "ctx";
     const row = el("div", `diff-line ${kind}`);
-    row.append(el("span", "diff-num", String(kind === "del" ? oldLine : newLine)), el("span", "diff-text", line.slice(1) || " "));
+    row.append(el("span", "diff-num", kind === "add" ? "" : String(oldLine)), el("span", "diff-num", kind === "del" ? "" : String(newLine)),
+      el("span", "diff-text", line.slice(1) || " "));
     body.append(row);
     if (kind !== "add") oldLine += 1;
     if (kind !== "del") newLine += 1;
+    next = newLine;
   }
   return blocks;
 }
@@ -708,7 +772,8 @@ function theme() {
   let light = stored("hearth-theme", system) === "light";
   const apply = () => {
     document.documentElement.classList.toggle("light", light);
-    button.textContent = light ? "Dark mode" : "Light mode";
+    button.setAttribute("aria-label", light ? "Switch to dark theme" : "Switch to light theme");
+    button.title = button.getAttribute("aria-label");
   };
   button.addEventListener("click", () => {
     light = !light;
@@ -719,7 +784,7 @@ function theme() {
 }
 
 // Shared with hub.js, which draws the same tasks as a graph.
-window.Hearth = { el, shown, badge, reason, command, api, session, root, loadKnowledge, ago, files, latest: null };
+window.Hearth = { el, shown, badge, reason, command, api, session, root, loadKnowledge, ago, time, span, files, rich, latest: null };
 
 theme();
 defaultView();

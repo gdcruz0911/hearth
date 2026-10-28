@@ -10,200 +10,253 @@
     <script defer src="assets/hub.js"></script>
     <script defer src="assets/knowledge.js"></script>
     <script defer src="assets/sessions.js"></script>
+    <script defer src="assets/shell.js"></script>
   </head>
   <body>
+    <svg class="sprite" aria-hidden="true"><defs>
+      <symbol id="i-flame" viewBox="0 0 24 24"><path d="M12 2.8c.6 3.4 4.3 5.3 5.4 8.9a5.6 5.6 0 0 1-5.4 8.5 5.6 5.6 0 0 1-5.5-6.6c.4-2 1.7-3.3 2.6-4.6.3 1.7 1.2 2.6 2.4 3.1-.3-3.2-.4-6.4.5-9.3Z"/><path d="M12 20.2c-1.5 0-2.6-1.1-2.6-2.6 0-1.6 1.4-2.4 2-3.7.9 1.2 3.2 2 3.2 3.9 0 1.4-1.2 2.4-2.6 2.4Z"/></symbol>
+      <symbol id="i-user" viewBox="0 0 24 24"><circle cx="12" cy="8.5" r="3.5"/><path d="M5 20c1.2-3.6 3.9-5.5 7-5.5s5.8 1.9 7 5.5"/></symbol>
+      <symbol id="i-search" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4.5 4.5"/></symbol>
+      <symbol id="i-chat" viewBox="0 0 24 24"><path d="M20 15a3 3 0 0 1-3 3H9l-5 3V6a3 3 0 0 1 3-3h10a3 3 0 0 1 3 3Z"/></symbol>
+      <symbol id="i-bell" viewBox="0 0 24 24"><path d="M5 17h14l-2-3V9a5 5 0 0 0-10 0v5Zm5 3h4"/></symbol>
+      <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+      <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m8 10 4 4 4-4"/></symbol>
+      <symbol id="i-panel" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M15 4v16"/></symbol>
+      <symbol id="i-sidebar" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16"/></symbol>
+      <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.5 1.5m11 11L19 19M5 19l1.5-1.5m11-11L19 5"/></symbol>
+      <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></symbol>
+      <symbol id="i-arrow" viewBox="0 0 24 24"><path d="M12 19V5m-5 5 5-5 5 5"/></symbol>
+      <symbol id="i-shield" viewBox="0 0 24 24"><path d="m12 3 8 3v6c0 5-8 9-8 9s-8-4-8-9V6Z"/><path d="m8 12 3 3 5-6"/></symbol>
+      <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 6h7l2 3h9v11H3Z"/></symbol>
+      <symbol id="i-book" viewBox="0 0 24 24"><path d="M12 5v16M3 3c4-1 6 0 9 2 3-2 5-3 9-2v16c-4-1-6 0-9 2-3-2-5-3-9-2Z"/></symbol>
+      <symbol id="i-tasks" viewBox="0 0 24 24"><path d="M9 6h11M9 12h11M9 18h11M4 6l1 1 2-2M4 12l1 1 2-2M4 18l1 1 2-2"/></symbol>
+      <symbol id="i-hub" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><circle cx="4.5" cy="6" r="2"/><circle cx="19.5" cy="6" r="2"/><circle cx="12" cy="20.5" r="2"/><path d="m6.2 7.2 3.4 3M17.8 7.2l-3.4 3M12 15v3.5"/></symbol>
+      <symbol id="i-close" viewBox="0 0 24 24"><path d="m6 6 12 12M6 18 18 6"/></symbol>
+    </defs></svg>
     <div class="app">
-      <aside class="side">
-        <h1 class="brand"><span class="ember-dot" aria-hidden="true"></span>Hearth</h1>
-        <nav aria-label="Views">
-          <a class="nav-item" href="#/sessions" data-view="sessions">Sessions</a>
-          <a class="nav-item" href="#/hub" data-view="hub">Hub</a>
-          <a class="nav-item" href="#/tasks" data-view="tasks">Tasks</a>
-          <a class="nav-item" href="#/knowledge" data-view="knowledge">Knowledge</a>
-        </nav>
-        <p id="live" class="live" title="Refreshes every 5 seconds"><span class="live-dot" aria-hidden="true"></span><span id="live-text">Connecting</span></p>
-        <h2 class="side-heading">Projects</h2>
-        <ul id="projects" class="projects"></ul>
-        <div class="settings">
-          <label class="setting">Open on
-            <select id="default-view">
-              <option value="last">Last view</option>
-              <option value="sessions">Sessions</option>
-              <option value="hub">Hub</option>
-              <option value="tasks">Tasks</option>
-              <option value="knowledge">Knowledge</option>
-            </select>
-          </label>
-          <button id="theme" class="theme" type="button">Light mode</button>
-        </div>
-      </aside>
-      <main class="main">
-        <p id="status" class="status" role="status" aria-live="polite" hidden></p>
+      <header class="titlebar">
+        <div class="brand"><button id="side-toggle" class="icon-button narrow-only" type="button" aria-label="Show projects and conversations" aria-expanded="false"><svg><use href="#i-sidebar"/></svg></button><svg class="brand-mark" viewBox="0 0 24 24" aria-hidden="true"><defs><linearGradient id="flame-fill" gradientUnits="userSpaceOnUse" x1="12" y1="2.5" x2="12" y2="21"><stop offset="0" stop-color="#f9d47c"/><stop offset=".5" stop-color="#e0873a"/><stop offset="1" stop-color="#4b7a46"/></linearGradient></defs><path fill="url(#flame-fill)" fill-rule="evenodd" d="M12 2.8c.6 3.4 4.3 5.3 5.4 8.9a5.6 5.6 0 0 1-5.4 8.5 5.6 5.6 0 0 1-5.5-6.6c.4-2 1.7-3.3 2.6-4.6.3 1.7 1.2 2.6 2.4 3.1-.3-3.2-.4-6.4.5-9.3ZM12 20.2c-1.5 0-2.6-1.1-2.6-2.6 0-1.6 1.4-2.4 2-3.7.9 1.2 3.2 2 3.2 3.9 0 1.4-1.2 2.4-2.6 2.4Z"/></svg><h1>Hearth</h1><small>Your work, together.</small></div>
+        <button id="find-open" class="find" type="button"><svg><use href="#i-search"/></svg><span>Find a conversation, project, or task</span><kbd>⌘ K</kbd></button>
+        <div class="title-actions"><button id="work-toggle" class="icon-button" type="button" aria-label="Show the work inspector" aria-expanded="false"><svg><use href="#i-panel"/></svg></button><button id="theme" class="icon-button" type="button" aria-label="Switch to light theme"><svg><use href="#i-sun"/></svg></button></div>
+      </header>
+      <div class="workspace">
+        <aside id="side" class="side" aria-label="Workspace navigation">
+          <nav class="primary-nav" aria-label="Views">
+            <a class="nav-item" href="#/sessions" data-view="sessions"><svg><use href="#i-chat"/></svg>Conversations</a>
+            <a class="nav-item attention" href="#/attention" data-view="attention"><svg><use href="#i-bell"/></svg>Inbox<span id="needs-count" class="nav-count"></span></a>
+          </nav>
+          <div class="section-label">Projects<a class="icon-button" href="#/sessions/new" aria-label="New conversation"><svg><use href="#i-plus"/></svg></a></div>
+          <div id="projects" class="projects"></div>
+          <div class="side-bottom">
+            <a class="nav-item" href="#/tasks" data-view="tasks"><svg><use href="#i-tasks"/></svg>Tasks</a>
+            <a class="nav-item" href="#/knowledge" data-view="knowledge"><svg><use href="#i-book"/></svg>Knowledge</a>
+            <a class="nav-item" href="#/hub" data-view="hub"><svg><use href="#i-hub"/></svg>Hub</a>
+            <label class="setting">Open on
+              <select id="default-view">
+                <option value="last">Last view</option>
+                <option value="sessions">Conversations</option>
+                <option value="attention">Inbox</option>
+                <option value="hub">Hub</option>
+                <option value="tasks">Tasks</option>
+                <option value="knowledge">Knowledge</option>
+              </select>
+            </label>
+          </div>
+        </aside>
+        <main class="main">
+          <p id="status" class="status" role="status" aria-live="polite" hidden></p>
 
-        <div id="convo-view" class="view sessions-view" data-view="sessions" hidden>
-          <div class="sessions-layout">
-            <nav class="task-list" aria-label="Conversations">
-              <div class="section-head">
-                <h2>Sessions</h2>
-                <a id="convo-new" class="btn primary small" href="#/sessions/new">New</a>
+          <div id="convo-view" class="view sessions-view" data-view="sessions" hidden>
+            <form id="convo-form" class="convo-form" aria-labelledby="convo-form-heading" hidden>
+              <h2 id="convo-form-heading">New conversation</h2>
+              <p class="meta">Starting a conversation runs nothing; your first message starts the agent. Quitting Hearth stops a reply in progress and keeps the conversation.</p>
+              <label class="form-row">Project <select id="convo-project"></select></label>
+              <fieldset class="form-row">
+                <legend>Agent</legend>
+                <div id="convo-agents" class="choices"></div>
+              </fieldset>
+              <fieldset class="form-row">
+                <legend>What it may do</legend>
+                <div class="choices">
+                  <label class="choice"><input type="radio" name="convo-mode" value="edit" checked><span>Edit files in its own worktree</span></label>
+                  <label class="choice"><input type="radio" name="convo-mode" value="read"><span>Read only</span></label>
+                </div>
+              </fieldset>
+              <div class="form-pair">
+                <label class="form-row">Model <input id="convo-model" type="text" autocomplete="off" spellcheck="false" aria-describedby="convo-model-help"></label>
+                <label class="form-row">Effort
+                  <select id="convo-effort"><option value="low">low</option><option value="medium" selected>medium</option><option value="high">high</option></select>
+                </label>
               </div>
-              <ul id="convo-cards" class="cards"></ul>
-            </nav>
-            <article class="convo-main">
-              <form id="convo-form" class="convo-form" aria-labelledby="convo-form-heading" hidden>
-                <h2 id="convo-form-heading">New conversation</h2>
-                <p class="meta">Starting a conversation runs nothing; your first message starts the agent. Quitting Hearth stops a reply in progress and keeps the conversation.</p>
-                <label class="form-row">Project <select id="convo-project"></select></label>
-                <fieldset class="form-row">
-                  <legend>Agent</legend>
-                  <div id="convo-agents" class="choices"></div>
-                </fieldset>
-                <fieldset class="form-row">
-                  <legend>What it may do</legend>
-                  <div class="choices">
-                    <label class="choice"><input type="radio" name="convo-mode" value="edit" checked><span>Edit files in its own worktree</span></label>
-                    <label class="choice"><input type="radio" name="convo-mode" value="read"><span>Read only</span></label>
-                  </div>
-                </fieldset>
-                <div class="form-pair">
-                  <label class="form-row">Model <input id="convo-model" type="text" autocomplete="off" spellcheck="false" aria-describedby="convo-model-help"></label>
-                  <label class="form-row">Effort
-                    <select id="convo-effort"><option value="low">low</option><option value="medium" selected>medium</option><option value="high">high</option></select>
-                  </label>
-                </div>
-                <p id="convo-model-help" class="meta">Hearth asks the CLI for this model and shows what the CLI reports for each reply. Model and effort stay fixed for the conversation.</p>
-                <p id="convo-form-error" class="status error" role="alert" hidden></p>
-                <div class="form-actions">
-                  <button id="convo-start" class="btn primary" type="submit">Start conversation</button>
-                  <button id="convo-cancel" class="btn" type="button">Cancel</button>
-                </div>
-              </form>
-              <div id="convo-pane" class="convo-pane" hidden>
-                <header class="convo-head">
-                  <div class="row-top"><h2 id="convo-title" class="task-goal"></h2><span id="convo-badge"></span><button id="convo-open" class="btn small" type="button">Open work folder</button></div>
-                  <p id="convo-meta" class="convo-meta"></p>
-                  <p id="convo-commands" class="convo-fixed meta"></p>
-                  <p class="convo-fixed meta">Model and effort are fixed for this conversation. For others, <a href="#/sessions/new">start a new conversation</a>; it begins without this one's context.</p>
-                </header>
-                <details id="convo-changes" class="convo-changes">
-                  <summary>Changes <span id="convo-changes-count" class="meta"></span></summary>
-                  <div id="convo-changes-body" class="convo-changes-body"></div>
-                </details>
-                <div id="convo-scroll" class="convo-scroll">
-                  <ol id="convo-log" class="convo-log" aria-label="Conversation"></ol>
-                </div>
+              <p id="convo-model-help" class="meta">Hearth asks the CLI for this model and shows what the CLI reports for each reply. Model and effort stay fixed for the conversation.</p>
+              <p id="convo-form-error" class="status error" role="alert" hidden></p>
+              <div class="form-actions">
+                <button id="convo-start" class="btn primary" type="submit">Start conversation</button>
+                <button id="convo-cancel" class="btn" type="button">Cancel</button>
+              </div>
+            </form>
+            <div id="convo-pane" class="convo-pane" hidden>
+              <header class="work-header">
+                <span id="convo-project-name" class="crumb"></span><span class="slash" aria-hidden="true">/</span><h2 id="convo-title"></h2><span id="convo-badge"></span>
+              </header>
+              <nav id="convo-tabs" class="convo-tabs" aria-label="Conversations in this project"></nav>
+              <div id="convo-scroll" class="convo-scroll">
+                <ol id="convo-log" class="convo-log" aria-label="Conversation"></ol>
+                <div id="convo-changes-card" class="changes-card" hidden><span id="convo-changes-line"></span><button id="convo-changes-open" class="btn small" type="button">Open changes</button></div>
+              </div>
+              <div class="composer-wrap">
                 <form id="convo-composer" class="composer">
                   <label for="convo-message" class="visually-hidden">Message</label>
-                  <textarea id="convo-message" rows="3"></textarea>
+                  <textarea id="convo-message" rows="2"></textarea>
                   <p id="convo-send-error" class="status error" role="alert" hidden></p>
                   <div class="composer-bar">
-                    <span id="convo-hint" class="meta"></span>
+                    <span id="convo-mode" class="capability"></span>
+                    <span id="convo-recipient" class="recipient"></span>
                     <button id="convo-stop" class="btn stop" type="button" hidden>Stop</button>
-                    <button id="convo-send" class="btn primary" type="submit" disabled>Send</button>
+                    <button id="convo-send" class="send" type="submit" aria-label="Send" disabled><svg><use href="#i-arrow"/></svg></button>
                   </div>
                 </form>
-                <p id="convo-status" class="visually-hidden" role="status" aria-live="polite"></p>
+                <p id="convo-hint" class="composer-hint"></p>
               </div>
-            </article>
+              <p id="convo-status" class="visually-hidden" role="status" aria-live="polite"></p>
+            </div>
           </div>
-        </div>
 
-        <div class="view hub-view" data-view="hub" hidden>
-          <div id="hub-stage" class="hub-stage" aria-label="How projects, tasks, agents, and knowledge connect">
-            <svg id="hub-svg" class="hub-svg" role="img" aria-labelledby="hub-title">
-              <title id="hub-title">Hearth hub graph</title>
-              <g id="hub-viewport"><g id="hub-links"></g><g id="hub-nodes"></g></g>
-            </svg>
-            <section class="needs-float" aria-labelledby="hub-needs-heading">
-              <h2 id="hub-needs-heading">Needs you <span id="hub-needs-count" class="count-pill"></span></h2>
-              <ul id="hub-needs" class="mini-rows"></ul>
+          <div class="view attention-view" data-view="attention" hidden>
+            <section class="inbox" aria-labelledby="attention-heading">
+              <h2 id="attention-heading">Inbox</h2>
+              <p id="attention-lead" class="meta"></p>
+              <ul id="attention-list" class="inbox-rows"></ul>
             </section>
-            <div class="hub-tools" role="group" aria-label="Show in the graph">
-              <button type="button" class="chip on" data-type="task" aria-pressed="true">Tasks</button>
-              <button type="button" class="chip on" data-type="run" aria-pressed="true">Agents</button>
-              <button type="button" class="chip on" data-type="document" aria-pressed="true">Knowledge</button>
-              <button type="button" class="chip" id="hub-reset" aria-label="Recenter the graph">Recenter</button>
-            </div>
-            <aside id="inspector" class="inspector" aria-labelledby="inspector-title" hidden>
-              <header class="inspector-head">
-                <h2 id="inspector-title"></h2>
-                <button type="button" id="inspector-close" class="icon-button" aria-label="Close">
-                  <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8"/></svg>
-                </button>
-              </header>
-              <div id="inspector-body" class="inspector-body"></div>
-            </aside>
           </div>
-        </div>
 
-        <div class="view tasks-view" data-view="tasks" hidden>
-          <div class="tasks-layout">
-            <nav class="task-list" aria-label="Tasks">
-              <div class="section-head">
-                <h2>Tasks</h2>
-                <p id="slots" class="slots"></p>
-              </div>
-              <h3 id="needs-heading" class="list-heading">Needs you</h3>
-              <ul id="needs" class="cards" aria-labelledby="needs-heading"></ul>
-              <h3 id="progress-heading" class="list-heading">In progress</h3>
-              <ul id="progress" class="cards" aria-labelledby="progress-heading"></ul>
-              <details id="finished-group" class="finished">
-                <summary class="list-heading">Finished <span id="finished-count" class="count"></span></summary>
-                <ul id="finished" class="cards"></ul>
-              </details>
-            </nav>
-            <article id="task-detail" class="task-detail">
-              <div id="task-summary"></div>
-              <section id="task-session" class="task-session" hidden>
-                <h3 id="session-heading" class="group"></h3>
-                <ol id="session-log" class="transcript" aria-live="polite"></ol>
+          <div class="view hub-view" data-view="hub" hidden>
+            <div id="hub-stage" class="hub-stage" aria-label="How projects, tasks, agents, and knowledge connect">
+              <svg id="hub-svg" class="hub-svg" role="img" aria-labelledby="hub-title">
+                <title id="hub-title">Hearth hub graph</title>
+                <g id="hub-viewport"><g id="hub-links"></g><g id="hub-nodes"></g></g>
+              </svg>
+              <section class="needs-float" aria-labelledby="hub-needs-heading">
+                <h2 id="hub-needs-heading">Inbox <span id="hub-needs-count" class="count-pill"></span></h2>
+                <ul id="hub-needs" class="mini-rows"></ul>
               </section>
-            </article>
-            <aside id="task-diff" class="task-diff" aria-label="Changes"></aside>
-          </div>
-        </div>
-
-        <div class="view" data-view="knowledge" hidden>
-          <section aria-labelledby="ask-heading">
-            <h2 id="ask-heading" class="visually-hidden">Ask</h2>
-            <form id="ask-form" class="ask">
-              <input id="ask-question" type="search" placeholder="What did we decide about recall scope?" aria-label="Question" autocomplete="off">
-              <label class="keyword"><input id="ask-keyword" type="checkbox"> Exact words</label>
-              <button type="submit">Ask</button>
-            </form>
-            <div id="ask-result" class="ask-result" aria-live="polite"></div>
-          </section>
-          <section aria-labelledby="health-heading">
-            <div class="section-head">
-              <h2 id="health-heading">Collection</h2>
-              <div class="toolbar">
-                <button id="kn-import" class="btn" type="button">Import a file</button>
-                <button id="kn-scan" class="btn" type="button" disabled>Review new files</button>
+              <div class="hub-tools" role="group" aria-label="Show in the graph">
+                <button type="button" class="chip on" data-type="task" aria-pressed="true">Tasks</button>
+                <button type="button" class="chip on" data-type="run" aria-pressed="true">Agents</button>
+                <button type="button" class="chip on" data-type="document" aria-pressed="true">Knowledge</button>
+                <button type="button" class="chip" id="hub-reset" aria-label="Recenter the graph">Recenter</button>
               </div>
+              <aside id="inspector" class="inspector" aria-labelledby="inspector-title" hidden>
+                <header class="inspector-head">
+                  <h2 id="inspector-title"></h2>
+                  <button type="button" id="inspector-close" class="icon-button" aria-label="Close">
+                    <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8"/></svg>
+                  </button>
+                </header>
+                <div id="inspector-body" class="inspector-body"></div>
+              </aside>
             </div>
-            <p id="health" class="meta"></p>
-            <p id="kn-folders" class="meta"></p>
-            <p id="kn-status" class="status" role="status" aria-live="polite" hidden></p>
-            <ul id="attention" class="rows"></ul>
-          </section>
-          <section id="kn-panel" class="kn-panel" aria-label="Review" aria-live="polite" hidden></section>
-          <section aria-labelledby="map-heading">
-            <h2 id="map-heading">Map</h2>
-            <svg id="kn-map" class="kmap" viewBox="0 0 640 340" role="group" aria-label="Interactive knowledge map"></svg>
-            <p id="kn-map-summary" class="meta"></p>
-          </section>
-          <section aria-labelledby="index-heading">
-            <h2 id="index-heading">Semantic index</h2>
-            <div id="kn-index" class="kn-index"></div>
-            <p id="kn-warning" class="status error" role="status" hidden></p>
-          </section>
-          <section aria-labelledby="sources-heading">
-            <h2 id="sources-heading">Sources</h2>
-            <input id="source-filter" type="search" placeholder="Filter sources" aria-label="Filter sources" class="filter">
-            <ul id="sources" class="sources"></ul>
-          </section>
-        </div>
-      </main>
+          </div>
+
+          <div class="view tasks-view" data-view="tasks" hidden>
+            <div class="tasks-layout">
+              <nav class="task-list" aria-label="Tasks">
+                <div class="section-head">
+                  <h2>Tasks</h2>
+                  <p id="slots" class="slots"></p>
+                </div>
+                <h3 id="needs-heading" class="list-heading">Inbox</h3>
+                <ul id="needs" class="cards" aria-labelledby="needs-heading"></ul>
+                <h3 id="progress-heading" class="list-heading">In progress</h3>
+                <ul id="progress" class="cards" aria-labelledby="progress-heading"></ul>
+                <details id="finished-group" class="finished">
+                  <summary class="list-heading">Finished <span id="finished-count" class="count"></span></summary>
+                  <ul id="finished" class="cards"></ul>
+                </details>
+              </nav>
+              <article id="task-detail" class="task-detail">
+                <div id="task-summary"></div>
+                <section id="task-session" class="task-session" hidden>
+                  <h3 id="session-heading" class="group"></h3>
+                  <ol id="session-log" class="transcript" aria-live="polite"></ol>
+                </section>
+              </article>
+              <aside id="task-diff" class="task-diff" aria-label="Changes"></aside>
+            </div>
+          </div>
+
+          <div class="view knowledge-view" data-view="knowledge" hidden>
+            <section aria-labelledby="ask-heading">
+              <h2 id="ask-heading" class="visually-hidden">Ask</h2>
+              <form id="ask-form" class="ask">
+                <input id="ask-question" type="search" placeholder="What did we decide about recall scope?" aria-label="Question" autocomplete="off">
+                <label class="keyword"><input id="ask-keyword" type="checkbox"> Exact words</label>
+                <button type="submit">Ask</button>
+              </form>
+              <div id="ask-result" class="ask-result" aria-live="polite"></div>
+            </section>
+            <section aria-labelledby="health-heading">
+              <div class="section-head">
+                <h2 id="health-heading">Collection</h2>
+                <div class="toolbar">
+                  <button id="kn-import" class="btn" type="button">Import a file</button>
+                  <button id="kn-scan" class="btn" type="button" disabled>Review new files</button>
+                </div>
+              </div>
+              <p id="health" class="meta"></p>
+              <p id="kn-folders" class="meta"></p>
+              <p id="kn-status" class="status" role="status" aria-live="polite" hidden></p>
+              <ul id="attention" class="rows"></ul>
+            </section>
+            <section id="kn-panel" class="kn-panel" aria-label="Review" aria-live="polite" hidden></section>
+            <section aria-labelledby="map-heading">
+              <h2 id="map-heading">Map</h2>
+              <svg id="kn-map" class="kmap" viewBox="0 0 640 340" role="group" aria-label="Interactive knowledge map"></svg>
+              <p id="kn-map-summary" class="meta"></p>
+            </section>
+            <section aria-labelledby="index-heading">
+              <h2 id="index-heading">Semantic index</h2>
+              <div id="kn-index" class="kn-index"></div>
+              <p id="kn-warning" class="status error" role="status" hidden></p>
+            </section>
+            <section aria-labelledby="sources-heading">
+              <h2 id="sources-heading">Sources</h2>
+              <input id="source-filter" type="search" placeholder="Filter sources" aria-label="Filter sources" class="filter">
+              <ul id="sources" class="sources"></ul>
+            </section>
+          </div>
+        </main>
+        <aside id="work" class="work" aria-label="Work inspector" hidden>
+          <header class="work-head">
+            <div class="work-tabs" role="tablist" aria-label="Inspect work">
+              <button id="work-tab-activity" class="work-tab" type="button" role="tab" aria-selected="true" aria-controls="work-activity" data-tab="activity">Activity</button>
+              <button id="work-tab-changes" class="work-tab" type="button" role="tab" aria-selected="false" aria-controls="work-changes" data-tab="changes">Changes <span id="convo-changes-count" class="meta"></span></button>
+              <button id="work-tab-details" class="work-tab" type="button" role="tab" aria-selected="false" aria-controls="work-details" data-tab="details">Details</button>
+            </div>
+            <button id="work-close" class="icon-button" type="button" aria-label="Close the work inspector"><svg><use href="#i-close"/></svg></button>
+          </header>
+          <div id="work-activity" class="work-body" role="tabpanel" aria-labelledby="work-tab-activity"></div>
+          <div id="work-changes" class="work-body" role="tabpanel" aria-labelledby="work-tab-changes" hidden>
+            <div id="convo-changes-body" class="convo-changes-body"><p class="empty">Open a conversation to see what it changed.</p></div>
+          </div>
+          <div id="work-details" class="work-body" role="tabpanel" aria-labelledby="work-tab-details" hidden>
+            <div id="convo-meta" class="convo-meta"><p class="empty">Open a conversation to see how it runs.</p></div>
+            <p id="convo-commands" class="convo-fixed meta"></p>
+            <p class="convo-fixed meta">Model and effort are fixed for this conversation. For others, <a href="#/sessions/new">start a new conversation</a>; it begins without this one's context.</p>
+            <button id="convo-open" class="btn" type="button" disabled><svg><use href="#i-folder"/></svg>Open work folder</button>
+          </div>
+        </aside>
+      </div>
+      <footer class="statusbar">
+        <span id="running-count" class="status-item"></span>
+        <span id="waiting-count" class="status-item"></span>
+        <p id="live" class="live" title="Refreshes every 5 seconds"><span class="live-dot" aria-hidden="true"></span><span id="live-text">Connecting</span></p>
+      </footer>
     </div>
+    <dialog id="find" class="find-dialog" aria-label="Find work">
+      <input id="find-input" type="search" placeholder="Find a conversation, project, or task" aria-label="Find work" autocomplete="off">
+      <ul id="find-results" class="find-results"></ul>
+      <p class="meta find-foot">Searches conversation titles, projects, agents, and task goals. Esc closes.</p>
+    </dialog>
   </body>
 </html>

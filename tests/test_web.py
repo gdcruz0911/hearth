@@ -1279,7 +1279,7 @@ class DashboardPageTests(unittest.TestCase):
     def test_the_home_page_is_the_dashboard_and_the_classic_knowledge_page_is_gone(self) -> None:
         home = self.call("GET", "/")
 
-        self.assertIn(b"Needs you", home.body)
+        self.assertIn(b"Inbox", home.body)
         for path in ("/knowledge", "/assets/app.js", "/assets/app.css"):
             with self.subTest(path=path):
                 self.assertEqual(self.call("GET", path).status, 404)
@@ -1305,16 +1305,18 @@ class DashboardPageTests(unittest.TestCase):
     def test_the_shell_has_hub_tasks_and_knowledge_views_and_a_default_view_setting(self) -> None:
         home = self.call("GET", "/").body.decode()
 
-        for view in ("hub", "tasks", "knowledge"):
+        for view in ("sessions", "attention", "hub", "tasks", "knowledge"):
             with self.subTest(view=view):
                 self.assertIn(f'href="#/{view}" data-view="{view}"', home)
                 self.assertRegex(home, f'class="view[^"]*" data-view="{view}"')
         self.assertIn('id="default-view"', home)
+        self.assertIn('src="assets/shell.js"', home)
         self.assertIn('id="hub-needs"', home)
 
     def test_dashboard_assets_load_nothing_from_another_host_and_never_insert_html(self) -> None:
         for name, kind in (("assets/dashboard.css", "text/css"), ("assets/dashboard.js", "application/javascript"),
-                           ("assets/hub.js", "application/javascript"), ("assets/knowledge.js", "application/javascript")):
+                           ("assets/hub.js", "application/javascript"), ("assets/knowledge.js", "application/javascript"),
+                           ("assets/sessions.js", "application/javascript"), ("assets/shell.js", "application/javascript")):
             with self.subTest(asset=name):
                 response = self.call("GET", f"/{name}")
                 self.assertEqual((response.status, response.content_type.split(";")[0]), (200, kind))
@@ -1364,6 +1366,21 @@ class HostileContentTests(unittest.TestCase):
         result = subprocess.run(["node", "-e", program], capture_output=True, text=True, check=True)
 
         self.assertEqual(json.loads(result.stdout), [None] * len(HOSTILE_URLS) + ["https://github.com/gdcruz0911/hearth/pull/68"])
+
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js runs the Markdown check when it is installed (TEST-4).")
+    def test_agent_markdown_becomes_text_runs_and_markup_stays_text(self) -> None:
+        source = re.search(r"^function markdown\(.*?^}", (ASSETS / "dashboard.js").read_text(encoding="utf-8"), re.M | re.S)
+        self.assertIsNotNone(source, "dashboard.js defines markdown")
+        text = "Run **all** of `a<b>`\nnext\n\n## Done\n- one\n2. two\n```\n<script>x</script>\n```\n<img src=x onerror=y>"
+        program = f"{source.group(0)}\nconsole.log(JSON.stringify(markdown({json.dumps(text)})));"
+        blocks = json.loads(subprocess.run(["node", "-e", program], capture_output=True, text=True, check=True).stdout)
+
+        self.assertEqual([block["kind"] for block in blocks], ["paragraph", "heading", "list", "list", "code", "paragraph"])
+        self.assertEqual(blocks[0]["runs"], [{"text": "Run "}, {"strong": "all"}, {"text": " of "}, {"code": "a<b>"}, {"text": "\nnext"}])
+        self.assertEqual((blocks[3]["ordered"], blocks[3]["start"]), (True, 2))
+        self.assertEqual(blocks[4]["text"], "<script>x</script>")
+        self.assertEqual(blocks[5]["runs"], [{"text": "<img src=x onerror=y>"}])
 
 
 @unittest.skipUnless(shutil.which("node"), "Node.js checks the dashboard's scripts when it is installed (TEST-4).")

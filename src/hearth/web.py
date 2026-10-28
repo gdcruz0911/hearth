@@ -245,6 +245,8 @@ class HearthWebApplication:
             return self._asset("hub.js", "application/javascript; charset=utf-8")
         if relative_path == "assets/sessions.js":
             return self._asset("sessions.js", "application/javascript; charset=utf-8")
+        if relative_path == "assets/shell.js":
+            return self._asset("shell.js", "application/javascript; charset=utf-8")
         if relative_path == "assets/knowledge.js":
             return self._asset("knowledge.js", "application/javascript; charset=utf-8")
         if relative_path == "api/health":
