@@ -27,6 +27,14 @@ if os.environ.get("FAKE_SESSION") == "detach-unmarked":
                     "start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)"],
                    env={key: value for key, value in os.environ.items() if key != "HEARTH_RUN"})
     os.environ["FAKE_SESSION"] = "check"
+if os.environ.get("FAKE_SESSION") == "codex-limit":
+    if Path(sys.argv[0]).name == "codex":  # A failed turn, as Codex's usage limit ends one.
+        sys.stdin.read()
+        for event in ({"type": "thread.started", "thread_id": "limit-1"}, {"type": "error", "message": "You've hit your usage limit."},
+                      {"type": "turn.failed", "error": {"message": "You've hit your usage limit."}}):
+            print(json.dumps(event), flush=True)
+        sys.exit(1)
+    os.environ["FAKE_SESSION"] = "check"
 if os.environ.get("FAKE_SESSION") == "check":
     helper = start("mcp-helper")
     time.sleep(3)
@@ -49,6 +57,7 @@ class AgentCheckTests(unittest.TestCase):
             (bin_dir / name).chmod(0o755)
         environment = {**os.environ, "HOME": str(self.folder), "PATH": f"{bin_dir}:/usr/bin:/bin:/usr/sbin", "FAKE_SESSION": scenario}
         environment.pop("HEARTH_HOME", None)
+        environment.pop("HEARTH_TASK", None)  # Inherited inside an agent's turn, it makes the scratch backend refuse to start.
         shown = subprocess.run([sys.executable, str(SCRIPT), *args, "--out", out or str(self.folder / "out")], env=environment, cwd=self.folder,
                                capture_output=True, text=True, timeout=420)  # Longer than the script's own wait, so it cleans up.
         return shown, self.folder / "out"
@@ -96,6 +105,15 @@ class AgentCheckTests(unittest.TestCase):
         self.assertIn("FAIL nothing of Codex's runs in its worktree", shown.stdout)
         self.assertTrue(report["left_after"])  # Found after the backend quit, and ended by the check.
         self.assertEqual(subprocess.run(["pgrep", "-f", str(out)], capture_output=True).stdout, b"")
+
+    def test_an_agent_whose_turn_fails_is_reported_in_its_own_words_without_waiting(self) -> None:
+        started = time.monotonic()
+        shown, out = self.run_check("--yes", scenario="codex-limit")
+        report = json.loads((out / "report.json").read_text(encoding="utf-8"))
+        self.assertEqual(shown.returncode, 1, shown.stdout + shown.stderr)
+        self.assertIn("codex's turn ended failed", report["error"])
+        self.assertIn("You've hit your usage limit.", report["error"])
+        self.assertLess(time.monotonic() - started, agent_check.WAIT_SECONDS)  # Not the full wait for a check that cannot start.
 
     def test_cleanup_ends_a_captured_command_still_running_outside_the_scratch_folder(self) -> None:
         out = Path(self.enterContext(tempfile.TemporaryDirectory()))

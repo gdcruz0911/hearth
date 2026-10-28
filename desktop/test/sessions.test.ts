@@ -367,6 +367,44 @@ test("what a stop left behind shows in its reply even when it is recorded after 
   }, null, { timeout: 15_000 });
 });
 
+// Found in the v0.5.2 release: a stopped reply reopened later said "No output had arrived" though its message or command showed above.
+for (const [what, event, shows] of [
+  ["a message", { type: "item.completed", item: { type: "agent_message", text: "Looking now" } }, "Looking now"],
+  ["only a command", { type: "item.started", item: { type: "command_execution", command: "ls -la" } }, "ls -la"],
+] as const) {
+  test(`a stopped reply that had shown ${what} still says so after reopening`, async (t) => {
+    const home = scratch();
+    conversation(home, `request-stopped-${what.length}`);
+    const env = { PATH: "/usr/bin:/bin", HOME: join(home.dir, "home"), HEARTH_HOME: join(home.dir, "hearth"), PYTHONPATH: join(repo, "src") };
+    const id = execFileSync(python, ["-c", `from hearth.workbench import sessions; print(sessions.create('demo', 'codex', 'edit', None, 'medium', 'request-stop-codex-${what.length}')['id'])`],
+                            { env }).toString().trim();
+    const bin = join(home.dir, "home/.local/bin");
+    mkdirSync(bin, { recursive: true });
+    writeFileSync(join(bin, "codex"), `#!/bin/sh
+cat > /dev/null
+echo '{"type": "thread.started", "thread_id": "thread-1"}'
+echo '${JSON.stringify(event)}'
+exec sleep 60
+`);
+    chmodSync(join(bin, "codex"), 0o755);
+    const { app } = await openApp(t, home, realBackend(home.dir), { env: { PATH: "/usr/bin:/bin" } });
+    const page = await windowShowing(app, "Live ·");
+    await page.evaluate((session) => void (window.location.hash = `#/sessions/${session}`), id);
+    await page.locator("#convo-message").fill("Look");
+    await page.locator("#convo-message").blur();
+    await page.getByRole("button", { name: "Send to Codex" }).click();
+    await page.locator("#convo-log", { hasText: shows }).waitFor({ timeout: 20_000 });
+    await page.locator("#convo-stop").click();
+    await page.getByText("You stopped this reply.", { exact: false }).waitFor({ timeout: 20_000 });
+
+    await page.reload();
+    await page.evaluate((session) => void (window.location.hash = `#/sessions/${session}`), id);
+    await page.locator("#convo-log", { hasText: shows }).waitFor({ timeout: 20_000 });
+    await page.getByText("Hearth keeps what arrived above", { exact: false }).waitFor({ timeout: 10_000 });
+    assert.doesNotMatch(await page.locator("#convo-log").textContent() ?? "", /No output had arrived/);
+  });
+}
+
 // Found in the slice 2 proof: the form kept the last project picked, or else the first in projects.json, so two conversations
 // started in the wrong project. As in Claude's and Codex's own apps, a new conversation starts where the keeper just was.
 test("the new-conversation form starts in the project of the conversation just viewed, or else the latest one", async (t) => {
