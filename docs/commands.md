@@ -29,7 +29,7 @@ A running `hearth web` holds an update off until it stops.
 | `hearth evaluate <corpus>` | Run a synthetic or public evaluation corpus. |
 | `hearth evaluate-questions <question-set> --out <records.jsonl>` | Record every retrieval stage for a labeled question set against the current collection, scoring only supported and unsupported cases. |
 | `hearth profile create <path> --database <file>` | Create a private runtime profile, never over an existing one. `--database` must be an existing, current Hearth database, checked read-only and left unchanged; add `--create-database` to create a new, empty knowledge base at a path where nothing exists yet. `<HEARTH_HOME>/profile.json` (normally `~/.hearth/profile.json`, and it may be a link) is every command's default profile, so the app and every terminal use the same data; `--profile` and options such as `--database` still take precedence, and a default that is present but broken is reported instead of replaced by another database. |
-| `hearth usage` | Show five-hour and weekly plan use for Claude, Codex, and Antigravity. |
+| `hearth usage` | Show five-hour and weekly plan use for Claude and Codex. |
 | `hearth usage statusline` | Record Claude's limits from its status line JSON. |
 | `hearth task new <project> "<goal>"` | Run one agent on the goal in a new worktree, with receipts; `--attach FILE` adds files or images, and `--issue N` starts from a GitHub issue. |
 | `hearth task list` | List tasks, newest first. Add `--json` for one object with every task's status, stage, open questions, queue state, failure reason, delivered recall without excerpt text, and artifact paths, plus slot use. |
