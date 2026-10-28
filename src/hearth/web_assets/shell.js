@@ -120,6 +120,7 @@
   function row(item, className) {
     const link = el("a", className);
     link.href = `#/${item.route}`;
+    link.dataset.key = `${className}:${item.route}`; // A failed conversation is in Activity twice, under Inbox and Recent.
     const words = el("span");
     words.append(el("strong", "", item.title), el("small", "", item.why));
     if (item.command) words.append(el("code", "", item.command)); // UI-9: the command where the dashboard has no control yet.
