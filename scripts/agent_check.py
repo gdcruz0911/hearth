@@ -39,7 +39,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "src"))
-from hearth.workbench import tasks  # noqa: E402
+from hearth.workbench import tasks, transcript  # noqa: E402
 
 AGENTS = ("claude", "codex")
 TEST_ARGS = "-m unittest discover -s tests"  # The requested check, as its Python process's command line shows it.
@@ -159,11 +159,27 @@ class Check:
                     return {"pid": pid, "identity": identity, "program": Path(program).name}
         return None
 
+    def ended(self, agent: str) -> str | None:
+        """How the agent's turn ended, in its own words, or None while it runs; a usage limit or an expired sign-in then reads
+        as what it is, not as a check that never started."""
+        session = self.sessions[agent]
+        run = self.run_record(session)
+        if not run.get("finished"):
+            return None
+        events = self.home / "tasks" / session / "runs" / run["dir"] / "events.jsonl"
+        said = [item["text"] for line in (events.read_text(encoding="utf-8", errors="replace").splitlines() if events.exists() else [])
+                for item in transcript._items(run["provider"], line) if item["kind"] in ("message", "error") and item["text"]]
+        return f"{agent}'s turn ended {run.get('outcome')}" + (f" ({run['error']})" if run.get("error") else "") + \
+            (f", saying: {said[-1]}" if said else ", saying nothing")
+
     def wait_tests(self, *agents: str) -> dict:
         for _ in range(WAIT_SECONDS):
             found = {agent: self.test_command(self.sessions[agent]) for agent in agents}
             if all(found.values()):
                 return found
+            ended = [why for agent in agents if not found[agent] and (why := self.ended(agent))]
+            if ended:  # It will not start now, so waiting longer would only hide why.
+                raise Failed("The requested check did not start: " + "; ".join(ended))
             time.sleep(1)
         others = {agent: list(_programs(self.escaped(self.sessions[agent])).values()) for agent in agents}
         raise Failed(f"The requested check did not start within {WAIT_SECONDS} seconds; other commands below the agents: {others}")

@@ -268,8 +268,9 @@
 
   function footer(view) {
     const { turn } = view;
+    // Whether anything arrived is part of the key: on reopening, the footer is drawn before the transcript is read.
     const key = JSON.stringify([turn.finished, turn.outcome, turn.model_used, turn.warnings, turn.error, Boolean(view.draft),
-      turn.left_running, turn.left_in_folder, turn.cleanup_unchecked, turn.check]);
+      view.items.children.length > 0, turn.left_running, turn.left_in_folder, turn.cleanup_unchecked, turn.check]);
     if (key === view.footKey) return;
     view.footKey = key;
     const parts = [];

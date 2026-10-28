@@ -103,20 +103,12 @@ class WorkerIsolationTests(unittest.TestCase):
 
 
 def working_in(folder: Path) -> set[int]:
-    """Processes whose working folder is inside the folder; their paths are only compared, never shown."""
-    root, found = os.path.realpath(folder), set()
-    if Path("/proc").is_dir():
-        for entry in Path("/proc").iterdir():
-            with contextlib.suppress(OSError):
-                if entry.name.isdigit() and (os.readlink(entry / "cwd") + "/").startswith(root + "/"):
-                    found.add(int(entry.name))
-        return found
-    pid = None
-    for line in subprocess.run(["lsof", "-a", "-d", "cwd", "-Fpn"], capture_output=True, text=True, errors="surrogateescape").stdout.splitlines():
-        if line.startswith("p"):
-            pid = int(line[1:])
-        elif line.startswith("n") and (line[1:] + "/").startswith(root + "/"):
-            found.add(pid)
+    """Processes whose working folder is inside the folder, by Hearth's own check; raises when processes could not be listed,
+    so an empty answer always means none."""
+    cleanup = tasks._cleanup()
+    found = set(tasks._in_folder(folder, 0, cleanup))
+    if cleanup["unchecked"]:
+        raise RuntimeError("could not list processes")
     return found
 
 
@@ -190,7 +182,10 @@ class TaskTestCase(unittest.TestCase):
                 if pid not in relevant:
                     relevant.add(pid)
                     todo += [child for child, row in rows.items() if row[0] == pid or row[1] == pid]
-            relevant |= working_in(self.home) & rows.keys()  # And what still works in the test's folder, as escaped commands do.
+            try:
+                relevant |= working_in(self.home) & rows.keys()  # And what still works in the test's folder, as escaped commands do.
+            except RuntimeError:
+                lines.append("(could not list what works in the test's folder)")
             lines += ["process pid ppid pgid stat"] + [f"process {pid} {rows[pid][0]} {rows[pid][1]} {rows[pid][2]}" for pid in sorted(relevant)]
         except Exception as error:  # A report that cannot be made must not hide the failure it reports.
             lines.append(f"(could not report: {type(error).__name__})")
