@@ -1,4 +1,4 @@
-"""Plan limits for the three providers, read from logs the provider tools already write."""
+"""Plan limits for Claude and Codex, read from logs the provider tools already write."""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ DAY = 86_400
 
 
 def add_parser(subcommands: argparse._SubParsersAction) -> None:
-    parser = subcommands.add_parser("usage", help="Show five-hour and weekly plan use for Claude, Codex, and Antigravity.")
+    parser = subcommands.add_parser("usage", help="Show five-hour and weekly plan use for Claude and Codex.")
     parser.add_argument("--json", action="store_true", help="Print one JSON list instead of a table.")
     actions = parser.add_subparsers(dest="usage_command")
     actions.add_parser("statusline", help="Record Claude Code status line JSON from standard input and print one line.")
@@ -80,8 +80,6 @@ def report(codex: dict | None, claude: dict | None, now: float | None = None) ->
     return [
         _row("claude", "pro", claude.get("five_hour"), claude.get("seven_day"), "used_percentage", now),
         _row("codex", codex.get("plan_type") or "plus", codex.get("primary"), codex.get("secondary"), "used_percent", now),
-        # agy writes no plan limits Hearth can read yet.
-        _row("antigravity", "ai pro", None, None, "", now),
     ]
 
 
@@ -110,7 +108,7 @@ def _print_table(rows: list[dict]) -> None:
             f"{row['provider']:<13}{row['plan']:<8}{_percent(row['five_hour']):>7}{_percent(row['week']):>7}"
             f"  {resets:<18}{_percent(row['remaining_per_day']):>12}"
         )
-    missing = [row["provider"] for row in rows if row["week"] is None and row["provider"] != "antigravity"]
+    missing = [row["provider"] for row in rows if row["week"] is None]
     if missing:
         print(f"Next: use {' and '.join(missing)} once to record a current sample.", file=sys.stderr)
 

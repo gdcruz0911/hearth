@@ -97,7 +97,6 @@ class UsageTests(unittest.TestCase):
         self.assertEqual(by_provider["codex"]["remaining_per_day"], 20.0)
         self.assertEqual(by_provider["claude"]["remaining_per_day"], 25.0)
         self.assertEqual(by_provider["codex"]["five_hour"], 24)
-        self.assertIsNone(by_provider["antigravity"]["week"])
 
     def test_report_blanks_a_window_that_has_reset_since_the_sample(self) -> None:
         limits = _claude_status(12, 50)["rate_limits"]
@@ -108,7 +107,7 @@ class UsageTests(unittest.TestCase):
         self.assertIsNone(row["week"])
         self.assertIsNone(row["remaining_per_day"])
 
-    def test_cli_prints_one_json_value_for_all_three_providers(self) -> None:
+    def test_cli_prints_one_json_value_for_both_providers(self) -> None:
         self._session("newer.jsonl", [_codex_line(_codex_limits(10, 40))], NOW)
         output = io.StringIO()
 
@@ -116,7 +115,7 @@ class UsageTests(unittest.TestCase):
             status = main(["usage", "--json"])
 
         self.assertEqual(status, 0)
-        self.assertEqual([row["provider"] for row in json.loads(output.getvalue())], ["claude", "codex", "antigravity"])
+        self.assertEqual([row["provider"] for row in json.loads(output.getvalue())], ["claude", "codex"])
 
     def test_cli_table_keeps_a_gap_after_every_provider_name(self) -> None:
         output = io.StringIO()
@@ -124,7 +123,7 @@ class UsageTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"HOME": str(self.home)}), contextlib.redirect_stdout(output):
             main(["usage"])
 
-        for line, provider in zip(output.getvalue().splitlines()[1:], ["claude", "codex", "antigravity"]):
+        for line, provider in zip(output.getvalue().splitlines()[1:], ["claude", "codex"]):
             self.assertTrue(line.startswith(provider + " "), line)
 
     def test_cli_statusline_records_stdin_and_prints_one_line(self) -> None:
