@@ -29,7 +29,8 @@ codex = Path(sys.argv[0]).name == "codex"
 prompt = sys.stdin.read()
 scenario = os.environ.get("FAKE_SESSION", "reply")
 with open(Path.home() / ".fake-session-calls.jsonl", "a") as log:
-    log.write(json.dumps({"argv": sys.argv[1:], "cwd": os.getcwd(), "prompt": prompt, "codex_home": os.environ.get("CODEX_HOME")}) + "\n")
+    log.write(json.dumps({"argv": sys.argv[1:], "cwd": os.getcwd(), "prompt": prompt, "codex_home": os.environ.get("CODEX_HOME"),
+                          "no_memory": os.environ.get("CLAUDE_CODE_DISABLE_AUTO_MEMORY")}) + "\n")
 def emit(event):
     print(json.dumps(event), flush=True)
 args = sys.argv[1:]
@@ -106,6 +107,9 @@ class SessionTestCase(TaskTestCase):
         for table, real in ((tasks.PROVIDERS, PROVIDERS), (tasks.REVIEWERS, REVIEWERS)):
             for name in ("claude", "codex"):
                 table[name] = [str(bin_dir / name), *real[name][1:]]
+        conversation = mock.patch.dict(sessions.CONVERSATION, {"claude": [str(bin_dir / "claude"), *CONVERSATION["claude"][1:]]})
+        conversation.start()
+        self.addCleanup(conversation.stop)
         self.write_projects(check="true", providers=("claude", "codex", "antigravity"))
         quitting = mock.patch.object(sessions, "_quitting", False)  # stop_all sets it for good, as the backend then exits.
         quitting.start()
@@ -160,6 +164,7 @@ DETACHED = (
 )
 FAKE = FAKE.replace("DETACHED", repr(DETACHED))
 PROVIDERS, REVIEWERS = dict(tasks.PROVIDERS), dict(tasks.REVIEWERS)  # Taken at import, before any test patches the tables.
+CONVERSATION = dict(sessions.CONVERSATION)
 
 
 class SessionTests(SessionTestCase):
@@ -754,6 +759,128 @@ class SessionTests(SessionTestCase):
         with mock.patch.dict(tasks.SLOTS, {"implement": 1}), self.assertRaises(sessions.SessionError) as full:
             sessions.send(self.new(), "Wait", "send-0001")
         self.assertIn("slots", str(full.exception))
+
+
+class FullSetupTests(SessionTestCase):
+    """ADR-0049: a Claude conversation that edits runs with the keeper's own Claude setup, and @codex asks Codex to check it."""
+
+    def test_an_editing_claude_conversation_runs_with_the_keepers_own_setup_and_resumes_it(self) -> None:
+        session_id = self.new()
+        sessions.send(session_id, "One", "send-0001")
+        self.settled(session_id)
+        sessions.send(session_id, "Two", "send-0002")
+        self.settled(session_id)
+
+        first, second = self.calls()
+        for flag in ("--setting-sources", "--strict-mcp-config", "--tools", "--settings"):
+            self.assertNotIn(flag, first["argv"])
+        self.assertEqual(first["argv"][first["argv"].index("--permission-mode") + 1], "acceptEdits")
+        self.assertIn("Bash(true *)", first["argv"])
+        self.assertIn("PushNotification", first["argv"][first["argv"].index("--disallowedTools") + 1].split(","))
+        self.assertIsNone(first["no_memory"])
+        self.assertEqual(second["argv"][:2], ["--resume", "claude-session-1"])
+
+    def test_read_only_claude_and_codex_conversations_keep_their_restrictions(self) -> None:
+        for provider in ("claude", "codex"):
+            session_id = self.new(provider, "read")
+            sessions.send(session_id, "One", "send-0001")
+            self.settled(session_id)
+        claude, codex = self.calls()
+        self.assertIn("--strict-mcp-config", claude["argv"])
+        self.assertEqual(claude["no_memory"], "1")
+        self.assertIn("--ignore-user-config", codex["argv"])
+
+    def test_codex_checks_the_changes_read_only_and_nothing_reaches_claude_unless_sent(self) -> None:
+        os.environ["FAKE_SESSION"] = "edit"
+        session_id = self.new()
+        sessions.send(session_id, "Write a file", "send-0001")
+        self.settled(session_id)
+        os.environ["FAKE_SESSION"] = "reply"
+        sessions.send(session_id, "@codex is this right?", "send-0002")
+        detail = self.settled(session_id)
+        sessions.send(session_id, "Carry on", "send-0003")
+        detail = self.settled(session_id)
+
+        _, ask, after = self.calls()
+        self.assertEqual(ask["argv"][ask["argv"].index("--sandbox") + 1], "read-only")
+        self.assertEqual(Path(ask["cwd"]).resolve(), Path(detail["worktree"]).resolve())
+        for part in ("The keeper's question: is this right?", "Claude's last reply:\nHello", "New files: edited.txt"):
+            self.assertIn(part, ask["prompt"])
+        turn = detail["turns"][1]
+        self.assertEqual((turn["role"], turn["provider"], turn["reply"]), ("ask", "codex", "Hello from codex"))
+        self.assertEqual(after["argv"][:2], ["--resume", "claude-session-1"])  # Claude's own session, untouched by the ask.
+        self.assertEqual(after["prompt"], "Carry on")
+        self.assertNotIn("check", [run["role"] for run in self.only_task()["runs"]])
+
+    def test_an_ask_before_claude_has_replied_does_not_become_the_conversations_session(self) -> None:
+        session_id = self.new()
+        sessions.send(session_id, "@codex", "send-0001")
+        self.settled(session_id)
+        sessions.send(session_id, "Hello", "send-0002")
+        self.settled(session_id)
+
+        ask, first = self.calls()
+        self.assertIn("Check these changes for bugs", ask["prompt"])
+        self.assertNotIn("--resume", first["argv"])
+        self.assertEqual(self.only_task()["session"]["cli_session"], "claude-session-1")
+
+    def test_an_ask_in_a_project_that_does_not_allow_codex_is_refused_and_sends_nothing(self) -> None:
+        self.write_projects(check="true", providers=("claude",))
+        session_id = self.new()
+        with self.assertRaises(sessions.SessionError) as refused:
+            sessions.send(session_id, "@codex check", "send-0001")
+        self.assertIn("add codex to demo's providers", str(refused.exception))
+        self.assertEqual((self.calls(), self.only_task()["runs"]), ([], []))
+
+    def test_a_subagents_partial_text_never_joins_the_reply_draft(self) -> None:
+        delta = {"type": "stream_event", "event": {"delta": {"type": "text_delta", "text": "inner"}}}
+        self.assertEqual(transcript._items("claude", json.dumps({**delta, "parent_tool_use_id": "toolu_01"})), [])
+        self.assertEqual([item["text"] for item in transcript._items("claude", json.dumps(delta))], ["inner"])
+
+    def test_a_retried_ask_starts_codex_once(self) -> None:
+        session_id = self.new()
+        sessions.send(session_id, "@codex check", "send-0001")
+        sessions.send(session_id, "@codex check", "send-0001")
+        self.settled(session_id)
+        self.assertEqual(len(self.calls()), 1)
+
+    def test_codex_and_read_only_conversations_send_at_codex_as_an_ordinary_message(self) -> None:
+        for provider, mode in (("codex", "edit"), ("claude", "read")):
+            session_id = self.new(provider, mode)
+            sessions.send(session_id, "@codex hello", "send-0001")
+            self.assertEqual(self.settled(session_id)["turns"][0]["role"], "session")
+        self.assertEqual([call["prompt"] for call in self.calls()], ["@codex hello", "@codex hello"])
+
+    def test_claude_configuration_the_agent_changed_stops_the_conversation(self) -> None:
+        for path in (".claude/agents/helper.md", ".mcp.json"):
+            with self.subTest(path=path):
+                session_id = self.new()
+                changed = Path(sessions.detail(session_id)["worktree"], path)
+                changed.parent.mkdir(parents=True, exist_ok=True)
+                changed.write_text("{}", encoding="utf-8")
+                with self.assertRaises(sessions.SessionError) as refused:
+                    sessions.send(session_id, "Hello", "send-0001")
+                self.assertEqual(refused.exception.status, 409)
+                self.assertIn(path, str(refused.exception))
+        self.assertEqual(self.calls(), [])
+
+    def test_tools_nobody_could_approve_are_recorded_from_the_result(self) -> None:
+        text = (FIXTURES / "claude-print-2.1.283-denied.jsonl").read_text(encoding="utf-8")
+        self.assertEqual(sessions._denied(text), ["mcp__claude_ai_Notion__notion-search (hearth)"])
+        refused = json.dumps({"type": "result", "permission_denials": [{"tool_name": "Bash", "tool_input": {"command": "python3 -c 1"}},
+                                                                       {"tool_name": "Bash", "tool_input": {"command": "python3 -c 1"}},
+                                                                       {"tool_name": "Read", "tool_input": {"file_path": "/etc/hosts"}}]})
+        self.assertEqual(sessions._denied(refused), ["Bash (python3 -c 1)", "Read (/etc/hosts)"])
+        self.assertIsNone(sessions._denied((FIXTURES / "claude-print-2.1.283-subagent.jsonl").read_text(encoding="utf-8")))
+
+    def test_a_subagents_and_a_skills_text_is_shown_as_tool_output_not_as_the_reply(self) -> None:
+        items = [item for line in (FIXTURES / "claude-print-2.1.283-subagent.jsonl").read_text(encoding="utf-8").splitlines()
+                 for item in transcript._items("claude", line)]
+        self.assertEqual([item["text"].split()[0] for item in items if item["kind"] == "message"], ["DONE"])
+        self.assertEqual([item["tool"] for item in items if item.get("subagent")], ["Write"])
+
+
+FIXTURES = Path(__file__).with_name("fixtures") / "public/providers"
 
 
 class ReleasedReaderTests(SessionTestCase):

@@ -454,6 +454,37 @@ test("the new-conversation form starts in the project of the conversation just v
 
 // ADR-0047: after a Codex turn that changed files, Hearth runs the project's check outside the sandbox; the page shows it running,
 // stops it like a turn, and shows its result with the turn, and the commands note says what Codex was told.
+test("@codex shows Codex's check as its own reply, and Send to Claude only fills the message box", async (t) => {
+  const home = scratch();
+  const id = conversation(home, "request-ask-01");
+  const bin = join(home.dir, "home/.local/bin");
+  mkdirSync(bin, { recursive: true });
+  writeFileSync(join(bin, "codex"), `#!/bin/sh
+cat > /dev/null
+echo launch >> "$HOME/codex-launches.log"
+echo '{"type": "thread.started", "thread_id": "thread-1"}'
+echo '{"type": "item.completed", "item": {"type": "agent_message", "text": "Line 3 is off by one"}}'
+echo '{"type": "turn.completed", "usage": {}}'
+`);
+  chmodSync(join(bin, "codex"), 0o755);
+  fakeClaude(home);
+  const { app } = await openApp(t, home, realBackend(home.dir), { env: { PATH: "/usr/bin:/bin" } });
+  const page = await windowShowing(app, "Live ·");
+  await page.evaluate((session) => void (window.location.hash = `#/sessions/${session}`), id);
+  assert.match(await page.locator("#convo-hint").textContent() ?? "", /^Start with @codex/);
+  await page.locator("#convo-message").fill("@codex is this right?");
+  await page.locator("#convo-message").blur();
+  await page.getByRole("button", { name: "Send to Claude Code" }).click();
+
+  const reply = page.locator("#convo-log .message.reply", { hasText: "Line 3 is off by one" });
+  await reply.waitFor({ timeout: 20_000 });
+  assert.match(await reply.locator(".message-head").textContent() ?? "", /^Codex.*checking Claude's changes, read only/);
+  await page.getByRole("button", { name: "Send to Claude", exact: true }).click();
+  assert.equal(await page.locator("#convo-message").inputValue(), "Codex reviewed your changes and said:\n\nLine 3 is off by one\n\n");
+  await pause(1_000);
+  assert.ok(!existsSync(join(home.dir, "home/launches.log")), "Claude was not started");
+});
+
 test("the check Hearth runs after a Codex turn shows as running, with Stop, and then with its result", async (t) => {
   const home = scratch();
   conversation(home, "request-check-00");
