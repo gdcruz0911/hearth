@@ -76,17 +76,21 @@ def _claude(event: dict) -> list[dict]:
         return [{"kind": "result", "text": event.get("result"), "error": bool(event.get("is_error"))}]
     if kind == "stream_event":  # --include-partial-messages: text as it arrives, replaced by the whole message when it lands.
         delta = (event.get("event") or {}).get("delta") or {}
-        return [{"kind": "delta", "text": delta["text"]}] if delta.get("type") == "text_delta" and delta.get("text") else []
+        own = delta.get("type") == "text_delta" and delta.get("text") and not event.get("parent_tool_use_id")  # Never a subagent's draft.
+        return [{"kind": "delta", "text": delta["text"]}] if own else []
     items = []
+    # A subagent's events carry the tool call that started it; only the main agent's own text is the reply. A user event's text
+    # is what a tool handed back, such as a loaded skill or a subagent's prompt, so it is shown as that tool's output.
+    subagent = bool(event.get("parent_tool_use_id"))
     for part in ((event.get("message") or {}).get("content") or []) if kind in ("assistant", "user") else []:
         if not isinstance(part, dict):
             continue
         if part.get("type") == "text":
-            items.append({"kind": "message", "text": part.get("text")})
+            items.append({"kind": "message" if kind == "assistant" and not subagent else "output", "text": part.get("text")})
         elif part.get("type") == "tool_use":
             arguments = part.get("input") or {}
-            items.append({"kind": "tool", "tool": part.get("name"),
-                          "text": arguments.get("command") or arguments.get("file_path") or json.dumps(arguments)})
+            items.append({"kind": "tool", "tool": part.get("name"), "subagent": subagent,
+                          "text": arguments.get("command") or arguments.get("file_path") or arguments.get("description") or json.dumps(arguments)})
         elif part.get("type") == "tool_result":
             content = part.get("content")
             if isinstance(content, list):
