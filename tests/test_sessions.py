@@ -14,7 +14,7 @@ from pathlib import Path
 from unittest import mock
 
 from hearth.workbench import sessions, stats, tasks, transcript
-from test_tasks import TaskTestCase
+from test_tasks import TaskTestCase, git
 
 # A stand-in for both CLIs: it logs how it was called, then prints that CLI's events. FAKE_SESSION picks the
 # scenario: reply (default), hang (some partial text, then waits to be stopped), detach (hang after starting work in its
@@ -878,6 +878,51 @@ class FullSetupTests(SessionTestCase):
                  for item in transcript._items("claude", line)]
         self.assertEqual([item["text"].split()[0] for item in items if item["kind"] == "message"], ["DONE"])
         self.assertEqual([item["tool"] for item in items if item.get("subagent")], ["Write"])
+        report = next(item for item in items if item["kind"] == "output" and "hand-back" in item["text"])
+        prompt = next(item for item in items if item.get("note"))
+        self.assertEqual((report["for"], prompt["for"]), ("toolu_01", "toolu_01"))  # The Agent call, not the subagent's Write.
+        self.assertEqual([item["id"] for item in items if item["kind"] == "tool"], ["toolu_01", "toolu_02", "toolu_03"])
+
+    def track_configuration(self) -> None:
+        (self.repo / ".claude").mkdir()
+        (self.repo / ".claude/run.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+        (self.repo / ".claude/run.sh").chmod(0o755)
+        (self.repo / ".mcp.json").write_text("{}", encoding="utf-8")
+        git(self.repo, "add", ".claude", ".mcp.json")
+        git(self.repo, "commit", "-q", "-m", "configuration")
+
+    def test_configuration_hidden_from_git_by_an_index_flag_still_stops_the_conversation(self) -> None:
+        self.track_configuration()
+        for flag in ("--skip-worktree", "--assume-unchanged"):
+            with self.subTest(flag=flag):
+                session_id = self.new()
+                worktree = sessions.detail(session_id)["worktree"]
+                subprocess.run(["git", "-C", worktree, "update-index", flag, ".mcp.json"], check=True)
+                Path(worktree, ".mcp.json").write_text('{"mcpServers": {"x": {"command": "x"}}}', encoding="utf-8")
+                self.assertEqual(subprocess.run(["git", "-C", worktree, "status", "--porcelain"], capture_output=True).stdout, b"")
+                with self.assertRaises(sessions.SessionError) as refused:
+                    sessions.send(session_id, "Hello", "send-0001")
+                self.assertIn(".mcp.json", str(refused.exception))
+        self.assertEqual(self.calls(), [])
+
+    def test_unchanged_tracked_configuration_lets_the_conversation_run(self) -> None:
+        self.track_configuration()
+        session_id = self.new()
+        os.chmod(Path(sessions.detail(session_id)["worktree"], ".claude/run.sh"), 0o644)
+        with self.assertRaises(sessions.SessionError):  # A mode change counts.
+            sessions.send(session_id, "Hello", "send-0001")
+        os.chmod(Path(sessions.detail(session_id)["worktree"], ".claude/run.sh"), 0o755)
+        sessions.send(session_id, "Hello", "send-0001")
+        self.settled(session_id)
+        self.assertEqual(len(self.calls()), 1)
+
+    def test_a_running_ask_takes_the_support_slot_not_an_editing_one(self) -> None:
+        os.environ["FAKE_SESSION"] = "hang"
+        sessions.send(self.new(), "@codex check", "send-0001")
+        self.assertEqual((tasks._busy("implement"), tasks._busy("support")), (0, 1))
+        with self.assertRaises(sessions.SessionError) as full:
+            sessions.send(self.new(), "@codex check", "send-0001")
+        self.assertIn("support slots", str(full.exception))
 
 
 FIXTURES = Path(__file__).with_name("fixtures") / "public/providers"

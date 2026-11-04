@@ -445,24 +445,28 @@
       step.append(details);
       steps(view).append(step);
       view.tool = details;
+      if (item.id) (view.calls ||= {})[item.id] = details;
       view.steps += 1;
       workLine(view);
     } else if (item.kind === "output") {
+      // A result goes to the call it answers: a subagent's own steps run between its start and its report.
+      const tool = (item.for && view.calls?.[item.for]) || view.tool;
       const pre = el("pre", `step-output${item.error ? " error" : ""}`, item.text || "(no output)");
-      if (view.tool) view.tool.append(pre);
+      if (tool) tool.append(pre);
       else {  // Output with no tool line before it; append() returns nothing, so it cannot be chained.
         const step = el("li", "reply-step");
         step.append(pre);
         steps(view).append(step);
       }
+      if (item.note) return;  // A prompt or loaded text, not a result: it settles nothing.
       if (item.error) {
-        view.tool?.classList.remove("done");
-        view.tool?.classList.add("error");
-        if (view.tool) view.tool.open = true;
+        tool?.classList.remove("done");
+        tool?.classList.add("error");
+        if (tool) tool.open = true;
         view.failed += 1;
         view.work.open = true; // Folding never hides a failed step.
         workLine(view);
-      } else if (!view.tool?.classList.contains("error")) view.tool?.classList.add("done");
+      } else if (!tool?.classList.contains("error")) tool?.classList.add("done");
     } else if (item.kind === "error" || (item.kind === "result" && item.error)) {
       view.items.append(el("li", "reply-text failed", shown(item.text)));
     }

@@ -86,16 +86,19 @@ def _claude(event: dict) -> list[dict]:
         if not isinstance(part, dict):
             continue
         if part.get("type") == "text":
-            items.append({"kind": "message" if kind == "assistant" and not subagent else "output", "text": part.get("text")})
+            if kind == "assistant" and not subagent:
+                items.append({"kind": "message", "text": part.get("text")})
+            else:  # Shown under the tool that started it, without settling it: only that tool's own result does.
+                items.append({"kind": "output", "text": part.get("text"), "for": event.get("parent_tool_use_id"), "note": True})
         elif part.get("type") == "tool_use":
             arguments = part.get("input") or {}
-            items.append({"kind": "tool", "tool": part.get("name"), "subagent": subagent,
+            items.append({"kind": "tool", "tool": part.get("name"), "id": part.get("id"), "subagent": subagent,
                           "text": arguments.get("command") or arguments.get("file_path") or arguments.get("description") or json.dumps(arguments)})
         elif part.get("type") == "tool_result":
             content = part.get("content")
             if isinstance(content, list):
                 content = "\n".join(piece.get("text", "") for piece in content if isinstance(piece, dict))
-            items.append({"kind": "output", "text": content, "error": bool(part.get("is_error"))})
+            items.append({"kind": "output", "text": content, "for": part.get("tool_use_id"), "error": bool(part.get("is_error"))})
     return items
 
 

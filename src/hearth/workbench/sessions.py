@@ -306,10 +306,10 @@ def changes(session_id: str) -> dict:
             "truncated": len(raw) > tasks.DIFF_LIMIT}
 
 
-def _git(task: dict, *args: str, check: bool = False) -> subprocess.CompletedProcess:
+def _git(task: dict, *args: str, check: bool = False, input: bytes | None = None) -> subprocess.CompletedProcess:
     # No optional locks, so an agent's own git add or commit never meets Hearth's lock; no external diff or textconv programs.
     return subprocess.run(["git", "--no-optional-locks", "-c", "core.fsmonitor=false", "-C", task["worktree"], *args],
-                          capture_output=True, timeout=30, check=check)
+                          capture_output=True, timeout=30, check=check, input=input)
 
 
 def _mine(task: dict) -> list[str]:
@@ -561,14 +561,38 @@ def _full_setup(settings: dict) -> bool:
 
 
 def _config_changed(task: dict) -> str | None:
-    """The first Claude configuration path the agent changed, added, or removed against the base, ignored files included;
-    when Git cannot say, the paths themselves, so the turn is refused rather than run on unknown configuration."""
+    """The first Claude configuration path whose contents or mode on disk differ from the base commit, ignored files included;
+    when Hearth cannot say, the paths themselves, so the turn is refused rather than run on unknown configuration. It reads the
+    files, not Git's index, so an index flag such as skip-worktree or assume-unchanged cannot hide a change."""
+    worktree = Path(task["worktree"])
     try:
-        names = _git(task, "diff", "--name-only", "-z", task["base"], "--", *AGENT_CONFIG, check=True).stdout.split(b"\0")
-        names += _git(task, "ls-files", "--others", "-z", "--", *AGENT_CONFIG, check=True).stdout.split(b"\0")
-    except (OSError, subprocess.SubprocessError):
+        base = {}
+        for entry in _git(task, "ls-tree", "-r", "-z", task["base"], "--", *AGENT_CONFIG, check=True).stdout.split(b"\0"):
+            if entry:
+                meta, name = entry.split(b"\t", 1)
+                mode, _, blob = meta.split(b" ")
+                base[os.fsdecode(name)] = (mode.decode(), blob.decode())
+        disk, files, pending = {}, [], [worktree / name for name in AGENT_CONFIG]
+        while pending:
+            path = pending.pop()
+            name = path.relative_to(worktree).as_posix()
+            if path.is_symlink():  # Git stores a link as a blob of its target.
+                target = os.fsencode(os.readlink(path))
+                disk[name] = ("120000", _git(task, "hash-object", "--stdin", check=True, input=target).stdout.decode().strip())
+            elif path.is_dir():
+                pending += path.iterdir()
+            elif path.is_file():
+                files.append(name)
+                disk[name] = ("100755" if path.stat().st_mode & 0o100 else "100644", None)
+            elif os.path.lexists(path):
+                disk[name] = ("other", None)
+        if files:  # Raw bytes, no filters: attributes in the worktree are the agent's to change.
+            hashes = _git(task, "hash-object", "--no-filters", "--stdin-paths", check=True, input="\n".join(files).encode()).stdout.split()
+            for name, blob in zip(files, hashes, strict=True):
+                disk[name] = (disk[name][0], blob.decode())
+    except (OSError, subprocess.SubprocessError, ValueError):
         return " or ".join(AGENT_CONFIG)
-    return next((os.fsdecode(name) for name in names if name), None)
+    return next((name for name in sorted(base.keys() | disk.keys()) if base.get(name) != disk.get(name)), None)
 
 
 def _ask_prompt(task: dict, task_dir: Path, question: str) -> str:

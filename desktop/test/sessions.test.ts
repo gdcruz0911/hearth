@@ -452,8 +452,6 @@ test("the new-conversation form starts in the project of the conversation just v
   await formShows("alpha");  // The conversation just viewed, not the earlier pick.
 });
 
-// ADR-0047: after a Codex turn that changed files, Hearth runs the project's check outside the sandbox; the page shows it running,
-// stops it like a turn, and shows its result with the turn, and the commands note says what Codex was told.
 test("@codex shows Codex's check as its own reply, and Send to Claude only fills the message box", async (t) => {
   const home = scratch();
   const id = conversation(home, "request-ask-01");
@@ -485,6 +483,39 @@ echo '{"type": "turn.completed", "usage": {}}'
   assert.ok(!existsSync(join(home.dir, "home/launches.log")), "Claude was not started");
 });
 
+// ADR-0049: a subagent's own steps arrive between its start and its report, so each result goes to the call it answers, and the
+// subagent's prompt settles nothing.
+test("a subagent's report lands on its own step, which stays open until the report arrives", async (t) => {
+  const home = scratch();
+  const id = conversation(home, "request-agent-01");
+  const fixture = join(repo, "tests/fixtures/public/providers/claude-print-2.1.283-subagent.jsonl");
+  const bin = join(home.dir, "home/.local/bin");
+  mkdirSync(bin, { recursive: true });
+  writeFileSync(join(bin, "claude"), `#!/bin/sh
+cat > /dev/null
+head -n 4 '${fixture}'
+sleep 4
+tail -n +5 '${fixture}'
+`);
+  chmodSync(join(bin, "claude"), 0o755);
+  const { app } = await openApp(t, home, realBackend(home.dir), { env: { PATH: "/usr/bin:/bin" } });
+  const page = await windowShowing(app, "Live ·");
+  await page.evaluate((session) => void (window.location.hash = `#/sessions/${session}`), id);
+  await page.locator("#convo-message").fill("Delegate it");
+  await page.locator("#convo-message").blur();
+  await page.getByRole("button", { name: "Send to Claude Code" }).click();
+
+  const agent = page.locator("#convo-log li.reply-step > details", { has: page.locator("summary .step-tool", { hasText: /^Agent$/ }) });
+  await agent.locator("pre.step-output").first().waitFor({ state: "attached", timeout: 20_000 });  // Folded away; the subagent's prompt, while it works.
+  assert.doesNotMatch(await agent.getAttribute("class") ?? "", /done/);
+  await agent.locator("pre.step-output", { hasText: "Subagent hand-back" }).waitFor({ state: "attached", timeout: 20_000 });
+  assert.match(await agent.getAttribute("class") ?? "", /done/);
+  const write = page.locator("#convo-log li.reply-step > details", { has: page.locator("summary .step-tool", { hasText: "subagent · Write" }) });
+  assert.doesNotMatch(await write.textContent() ?? "", /Subagent hand-back/);
+});
+
+// ADR-0047: after a Codex turn that changed files, Hearth runs the project's check outside the sandbox; the page shows it running,
+// stops it like a turn, and shows its result with the turn, and the commands note says what Codex was told.
 test("the check Hearth runs after a Codex turn shows as running, with Stop, and then with its result", async (t) => {
   const home = scratch();
   conversation(home, "request-check-00");
