@@ -43,7 +43,7 @@ python3 -m venv .venv
 Check every change with:
 
 ```bash
-PYTHONPATH=src .venv/bin/python -m unittest discover -s tests
+.venv/bin/python scripts/run_tests.py
 ```
 
 ## Commands

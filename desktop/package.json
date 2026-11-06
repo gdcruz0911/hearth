@@ -7,7 +7,7 @@
   "scripts": {
     "build": "tsc",
     "start": "tsc && electron .",
-    "test": "tsc && node --test --test-concurrency=1 \"test/*.test.ts\""
+    "test": "tsc && node test/run-all.mjs"
   },
   "devDependencies": {
     "@types/node": "24.13.6",
