@@ -238,11 +238,11 @@
     const mine = state.detail ? row(state.detail.provider) : {};
     const over = [["5-hour", mine.five_hour], ["weekly", mine.week]].filter(([, value]) => typeof value === "number" && value >= level);
     const warning = $("convo-usage-warning");
-    warning.hidden = !over.length;
-    warning.textContent = over.length
+    const text = over.length
       ? `${agent(state.detail.provider)} has used ${over.map(([name, value]) => `${percent(value)} of its ${name} limit`).join(" and ")}. Sending still works.`
       : "";
-    if (over.length) say(warning.textContent);
+    warning.hidden = !over.length;
+    if (warning.textContent !== text) warning.textContent = text; // Its own live region: unchanged text is not announced again.
   }
 
   function renderDetail() {
