@@ -31,7 +31,9 @@ def run(args: argparse.Namespace) -> int:
             record_statusline(status, samples)  # Skipped during an update; the statusline itself must never fail.
         print(_statusline(status.get("rate_limits") or {}))
         return 0
-    rows = report(codex_limits(*codex_sessions()), claude_limits(samples))
+    codex, codex_at = _codex_sample(*codex_sessions())
+    claude, claude_at = _claude_sample(samples)
+    rows = report(codex, claude, codex_at=codex_at, claude_at=claude_at)
     if args.json:
         print(json.dumps(rows))
     else:
@@ -46,22 +48,34 @@ def codex_sessions() -> list[Path]:
 
 def codex_limits(*sessions: Path) -> dict | None:
     """Return `rate_limits` from the newest Codex `token_count` event that has them, across the given session folders."""
+    return _codex_sample(*sessions)[0]
+
+
+def _codex_sample(*sessions: Path) -> tuple[dict | None, int | None]:
     for path in sorted((path for folder in sessions for path in folder.rglob("*.jsonl")), key=lambda p: p.stat().st_mtime, reverse=True):
         for line in reversed(path.read_text(encoding="utf-8").splitlines()):
             if '"token_count"' not in line:
                 continue
             try:
-                payload = json.loads(line).get("payload") or {}
+                event = json.loads(line)
             except json.JSONDecodeError:  # Codex may be mid-write on its newest line.
                 continue
+            payload = event.get("payload") or {}
             if payload.get("type") == "token_count" and payload.get("rate_limits"):
-                return payload["rate_limits"]
-    return None
+                return payload["rate_limits"], _epoch(event.get("timestamp"))
+    return None, None
 
 
 def claude_limits(samples: Path) -> dict | None:
+    return _claude_sample(samples)[0]
+
+
+def _claude_sample(samples: Path) -> tuple[dict | None, int | None]:
     line = _last_line(samples)
-    return json.loads(line)["rate_limits"] if line else None
+    if not line:
+        return None, None
+    sample = json.loads(line)
+    return sample["rate_limits"], sample.get("at")
 
 
 def record_statusline(status: dict, samples: Path, now: float | None = None) -> None:
@@ -73,19 +87,21 @@ def record_statusline(status: dict, samples: Path, now: float | None = None) -> 
         file.write(json.dumps({"at": int(now if now is not None else time.time()), "rate_limits": limits}) + "\n")
 
 
-def report(codex: dict | None, claude: dict | None, now: float | None = None) -> list[dict]:
+def report(codex: dict | None, claude: dict | None, now: float | None = None, codex_at: int | None = None, claude_at: int | None = None) -> list[dict]:
     now = now if now is not None else time.time()
     claude = claude or {}
     codex = codex or {}
     return [
-        _row("claude", "pro", claude.get("five_hour"), claude.get("seven_day"), "used_percentage", now),
-        _row("codex", codex.get("plan_type") or "plus", codex.get("primary"), codex.get("secondary"), "used_percent", now),
+        _row("claude", "pro", claude.get("five_hour"), claude.get("seven_day"), "used_percentage", now, claude_at),
+        _row("codex", codex.get("plan_type") or "plus", codex.get("primary"), codex.get("secondary"), "used_percent", now, codex_at),
     ]
 
 
-def _row(provider: str, plan: str, five_hour: dict | None, week: dict | None, key: str, now: float) -> dict:
-    five_hour = five_hour if five_hour and five_hour["resets_at"] > now else None
-    week = week if week and week["resets_at"] > now else None
+def _row(provider: str, plan: str, five_hour: dict | None, week: dict | None, key: str, now: float, sampled_at: int | None) -> dict:
+    # A window the sample lacks is left out; one that has reset since the sample stays listed, with its numbers unknown.
+    windows = [_window(label, _current(window, now), key, sampled_at) for label, window in (("5-hour", five_hour), ("week", week)) if window]
+    five_hour = _current(five_hour, now)
+    week = _current(week, now)
     remaining = None
     if week:
         days_left = max((week["resets_at"] - now) / DAY, 1)
@@ -97,7 +113,28 @@ def _row(provider: str, plan: str, five_hour: dict | None, week: dict | None, ke
         "week": week[key] if week else None,
         "week_resets_at": week["resets_at"] if week else None,
         "remaining_per_day": remaining,
+        "windows": windows,
     }
+
+
+def _current(window: dict | None, now: float) -> dict | None:
+    return window if window and window["resets_at"] > now else None
+
+
+def _window(label: str, current: dict | None, key: str, sampled_at: int | None) -> dict:
+    return {
+        "label": label,
+        "used_percent": current[key] if current else None,
+        "resets_at": current["resets_at"] if current else None,
+        "sampled_at": sampled_at,
+    }
+
+
+def _epoch(timestamp: str | None) -> int | None:
+    try:
+        return int(datetime.fromisoformat(timestamp).timestamp())
+    except (TypeError, ValueError):
+        return None
 
 
 def _print_table(rows: list[dict]) -> None:

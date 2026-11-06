@@ -6,6 +6,7 @@ import io
 import json
 import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -106,6 +107,85 @@ class UsageTests(unittest.TestCase):
         self.assertIsNone(row["five_hour"])
         self.assertIsNone(row["week"])
         self.assertIsNone(row["remaining_per_day"])
+
+    def test_report_windows_when_everything_is_known(self) -> None:
+        claude, codex = usage.report(_codex_limits(24, 0), _claude_status(12, 50)["rate_limits"], now=NOW, codex_at=NOW - 5, claude_at=NOW - 9)
+
+        self.assertEqual(claude["windows"], [
+            {"label": "5-hour", "used_percent": 12, "resets_at": NOW + 3600, "sampled_at": NOW - 9},
+            {"label": "week", "used_percent": 50, "resets_at": NOW + 2 * DAY, "sampled_at": NOW - 9},
+        ])
+        self.assertEqual(codex["windows"], [
+            {"label": "5-hour", "used_percent": 24, "resets_at": NOW + 3600, "sampled_at": NOW - 5},
+            {"label": "week", "used_percent": 0, "resets_at": NOW + 4 * DAY, "sampled_at": NOW - 5},  # A real 0 stays 0.
+        ])
+
+    def test_report_windows_when_some_values_are_unknown(self) -> None:
+        limits = _claude_status(12, 50)["rate_limits"]
+
+        reset = usage.report(None, limits, now=NOW + DAY, claude_at=NOW)[0]
+        self.assertEqual(reset["windows"], [
+            {"label": "5-hour", "used_percent": None, "resets_at": None, "sampled_at": NOW},
+            {"label": "week", "used_percent": 50, "resets_at": NOW + 2 * DAY, "sampled_at": NOW},
+        ])
+
+        only_five_hour = usage.report(None, {"five_hour": limits["five_hour"], "seven_day": None}, now=NOW)[0]
+        self.assertEqual(only_five_hour["windows"], [
+            {"label": "5-hour", "used_percent": 12, "resets_at": NOW + 3600, "sampled_at": None},
+        ])
+
+    def test_report_windows_are_empty_without_data(self) -> None:
+        self.assertEqual([row["windows"] for row in usage.report(None, None, now=NOW)], [[], []])
+        self.assertEqual(usage.report({"primary": None, "secondary": None}, {}, now=NOW)[1]["windows"], [])
+
+    def test_report_keeps_the_old_fields_beside_windows(self) -> None:
+        rows = usage.report(_codex_limits(24, 20), _claude_status(12, 50)["rate_limits"], now=NOW)
+        empty = usage.report(None, None, now=NOW)
+
+        for row in rows + empty:
+            del row["windows"]
+        self.assertEqual(rows, [
+            {"provider": "claude", "plan": "pro", "five_hour": 12, "week": 50, "week_resets_at": NOW + 2 * DAY, "remaining_per_day": 25.0},
+            {"provider": "codex", "plan": "plus", "five_hour": 24, "week": 20, "week_resets_at": NOW + 4 * DAY, "remaining_per_day": 20.0},
+        ])
+        self.assertEqual(empty, [
+            {"provider": "claude", "plan": "pro", "five_hour": None, "week": None, "week_resets_at": None, "remaining_per_day": None},
+            {"provider": "codex", "plan": "plus", "five_hour": None, "week": None, "week_resets_at": None, "remaining_per_day": None},
+        ])
+
+    def _usage_json(self) -> list[dict]:
+        output = io.StringIO()
+        with mock.patch.dict(os.environ, {"HOME": str(self.home)}), contextlib.redirect_stdout(output):
+            os.environ.pop("HEARTH_HOME", None)  # Restored by the patch; a set HEARTH_HOME would move the samples.
+            self.assertEqual(main(["usage", "--json"]), 0)
+        return json.loads(output.getvalue())
+
+    def test_cli_windows_say_when_each_provider_was_sampled(self) -> None:
+        now = int(time.time())
+        status = {"rate_limits": {"five_hour": {"used_percentage": 12, "resets_at": now + 3600}}}
+        usage.record_statusline(status, self.samples, now=now - 60)
+        event = json.loads(_codex_line({"primary": {"used_percent": 10, "resets_at": now + 3600}}))
+        event["timestamp"] = "2026-11-06T20:37:26.819Z"
+        self._session("newer.jsonl", [json.dumps(event)], now)
+
+        claude, codex = self._usage_json()
+
+        self.assertEqual(claude["windows"][0]["sampled_at"], now - 60)
+        self.assertEqual(codex["windows"][0]["sampled_at"], 1793997446)
+
+    def test_cli_sampled_at_is_null_when_a_log_does_not_say(self) -> None:
+        now = int(time.time())
+        self.samples.parent.mkdir(parents=True)
+        self.samples.write_text(json.dumps({"rate_limits": {"five_hour": {"used_percentage": 12, "resets_at": now + 3600}}}) + "\n", encoding="utf-8")
+        limits = {"primary": {"used_percent": 10, "resets_at": now + 3600}}
+        for name, timestamp in (("missing.jsonl", {}), ("null.jsonl", {"timestamp": None}), ("garbled.jsonl", {"timestamp": "yesterday"})):
+            self._session(name, [json.dumps({**json.loads(_codex_line(limits)), **timestamp})], now)
+
+            claude, codex = self._usage_json()
+
+            self.assertIsNone(claude["windows"][0]["sampled_at"])
+            self.assertIsNone(codex["windows"][0]["sampled_at"], name)
+            (self.sessions / "2026/09/26" / name).unlink()
 
     def test_cli_prints_one_json_value_for_both_providers(self) -> None:
         self._session("newer.jsonl", [_codex_line(_codex_limits(10, 40))], NOW)
