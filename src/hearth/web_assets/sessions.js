@@ -1,7 +1,7 @@
 // The Sessions view (ADR-0041): direct conversations with one CLI, from api/sessions, with each turn's events read
 // through the same transcript endpoint as tasks. Every value is written with textContent.
 (() => {
-  const { el, shown, badge, api } = window.Hearth;
+  const { el, shown, badge, api, stored, store } = window.Hearth;
   const $ = (id) => document.getElementById(id);
   const AGENTS = { claude: "Claude Code", codex: "Codex" };
   const state = { visible: false, selected: null, options: null, sessions: [], detail: null, turns: new Map(), sending: null, timer: 0, said: "",
@@ -225,9 +225,30 @@
     return last.check && !last.check.finished ? last.check : null; // The check Hearth runs after a turn stops like a turn.
   }
 
+  function percent(value) {
+    return typeof value === "number" ? `${+value.toFixed(1)}%` : "not reported"; // UI-8: a missing number is never 0%.
+  }
+
+  function renderUsage() {
+    // Shown only: nothing here, or in the backend's send, stops a message at any level (ADR-0050).
+    const row = (provider) => (state.usage || []).find((item) => item.provider === provider) || {};
+    $("convo-usage").textContent = Object.keys(AGENTS)
+      .map((provider) => `${agent(provider)}: 5-hour ${percent(row(provider).five_hour)}, week ${percent(row(provider).week)}`).join(" · ");
+    const level = Number($("convo-usage-warn").value); // "Never" is NaN, which no number reaches.
+    const mine = state.detail ? row(state.detail.provider) : {};
+    const over = [["5-hour", mine.five_hour], ["weekly", mine.week]].filter(([, value]) => typeof value === "number" && value >= level);
+    const warning = $("convo-usage-warning");
+    warning.hidden = !over.length;
+    warning.textContent = over.length
+      ? `${agent(state.detail.provider)} has used ${over.map(([name, value]) => `${percent(value)} of its ${name} limit`).join(" and ")}. Sending still works.`
+      : "";
+    if (over.length) say(warning.textContent);
+  }
+
   function renderDetail() {
     const session = state.detail;
     if (!session) return;
+    renderUsage();
     $("convo-title").textContent = shown(session.title);
     $("convo-project-name").textContent = session.project;
     const field = (label, value) => {
@@ -627,11 +648,13 @@
     try {
       const listing = await api("sessions");
       state.sessions = listing.sessions;
+      state.usage = listing.usage;
       document.dispatchEvent(new CustomEvent("hearth:sessions", { detail: listing }));
       if (state.visible) {
         const changed = JSON.stringify(listing.options) !== JSON.stringify(state.options);
         state.options = listing.options;
         renderList();
+        renderUsage();
         if (changed && !$("convo-form").hidden) fillForm(); // Never rebuilt under the keeper's pointer for nothing.
       }
       // Read from the address, not state.visible: the keeper may have just left, and the page hears of it only after this runs.
@@ -688,6 +711,10 @@
   $("convo-composer").addEventListener("submit", send);
   $("convo-stop").addEventListener("click", stop);
   $("convo-open").addEventListener("click", openFolder);
+  // shortcut: the desktop app's storage lasts one launch, so a chosen level returns to 90%; move it to a file if that matters (ADR-0050).
+  $("convo-usage-warn").value = stored("hearth-usage-warn", "90");
+  if (!$("convo-usage-warn").value) $("convo-usage-warn").value = "90";
+  $("convo-usage-warn").addEventListener("change", () => { store("hearth-usage-warn", $("convo-usage-warn").value); renderUsage(); });
   $("convo-changes-open").addEventListener("click", () => document.dispatchEvent(new CustomEvent("hearth:inspect", { detail: "changes" })));
   $("convo-message").addEventListener("input", () => {
     if (state.selected) typed(state.selected, $("convo-message").value);

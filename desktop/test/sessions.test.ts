@@ -108,6 +108,59 @@ test("a draft typed just before reloading is saved, and is back after the reload
   assert.equal(JSON.parse(readFileSync(join(home.dir, "hearth/tasks", id, "draft.json"), "utf8")).text, "Typed, then reloaded");
 });
 
+async function setWarning(page: import("playwright").Page, level: string): Promise<void> {
+  await page.evaluate((value) => {
+    const node = document.getElementById("convo-usage-warn") as HTMLSelectElement;  // In the Details tab, which may be closed.
+    node.value = value;
+    node.dispatchEvent(new Event("change"));
+  }, level);
+}
+
+test("at full plan use a conversation warns at the set level and still sends", async (t) => {
+  const home = scratch();
+  const id = conversation(home);
+  fakeClaude(home);
+  const resets_at = Math.floor(Date.now() / 1000) + 3600;
+  mkdirSync(join(home.dir, "hearth/usage"), { recursive: true });
+  writeFileSync(join(home.dir, "hearth/usage/claude-limits.jsonl"),
+                JSON.stringify({ rate_limits: { five_hour: { used_percentage: 100, resets_at }, seven_day: { used_percentage: 95, resets_at } } }) + "\n");
+  const { app } = await openApp(t, home, realBackend(home.dir), { env: { PATH: "/usr/bin:/bin" } });
+  const page = await windowShowing(app, "Live ·");
+  await page.evaluate((session) => void (window.location.hash = `#/sessions/${session}`), id);
+
+  const warning = page.locator("#convo-usage-warning");
+  await warning.waitFor({ state: "visible" });
+  assert.match(await page.locator("#convo-usage").textContent() ?? "", /Claude Code: 5-hour 100%, week 95%/);
+  assert.match(await warning.textContent() ?? "", /100% of its 5-hour limit and 95% of its weekly limit\. Sending still works\.$/);
+
+  assert.equal(await page.locator("#convo-usage-warn").inputValue(), "90");
+  await setWarning(page, "100");  // Only the window that reaches the level is named.
+  assert.match(await warning.textContent() ?? "", /has used 100% of its 5-hour limit\. Sending/);
+  await setWarning(page, "off");
+  assert.equal(await warning.isHidden(), true);
+  await setWarning(page, "90");
+
+  await page.locator("#convo-message").fill("Send anyway");
+  await page.getByRole("button", { name: "Send to Claude Code" }).click();
+  await page.locator("#convo-stop").waitFor({ state: "visible" });
+  await page.locator("#convo-stop").waitFor({ state: "hidden", timeout: 20_000 });
+  assert.equal(readFileSync(join(home.dir, "home/launches.log"), "utf8"), "launch\n");
+  assert.equal(await page.locator("#convo-send-error").isHidden(), true);
+});
+
+test("plan use nobody reported reads as not reported, never as 0%, and warns about nothing", async (t) => {
+  const home = scratch();
+  const id = conversation(home);
+  const { app } = await openApp(t, home, realBackend(home.dir), { env: { PATH: "/usr/bin:/bin" } });
+  const page = await windowShowing(app, "Live ·");
+  await page.evaluate((session) => void (window.location.hash = `#/sessions/${session}`), id);
+  await page.waitForFunction(() => document.getElementById("convo-usage")?.textContent?.includes("Codex"));
+  assert.equal(await page.locator("#convo-usage").textContent(), "Claude Code: 5-hour not reported, week not reported · Codex: 5-hour not reported, week not reported");
+  assert.equal(await page.locator("#convo-usage-warning").isHidden(), true);
+  await setWarning(page, "50");
+  assert.equal(await page.locator("#convo-usage-warning").isHidden(), true);
+});
+
 test("text written while a reply runs stays editable, says it is not sent, and starts nothing", async (t) => {
   const home = scratch();
   const id = conversation(home);

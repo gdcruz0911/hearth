@@ -117,6 +117,8 @@
                   </div>
                 </form>
                 <p id="convo-hint" class="composer-hint"></p>
+                <p id="convo-usage-warning" class="composer-hint usage-warning" hidden></p>
+                <p id="convo-usage" class="composer-hint"></p>
               </div>
               <p id="convo-status" class="visually-hidden" role="status" aria-live="polite"></p>
             </div>
@@ -244,6 +246,17 @@
             <p id="convo-commands" class="convo-fixed meta"></p>
             <p class="convo-fixed meta">Model and effort are fixed for this conversation. For others, <a href="#/sessions/new">start a new conversation</a>; it begins without this one's context.</p>
             <button id="convo-open" class="btn" type="button" disabled><svg><use href="#i-folder"/></svg>Open work folder</button>
+            <label class="setting">Warn at plan use
+              <select id="convo-usage-warn">
+                <option value="off">Never</option>
+                <option value="50">50%</option>
+                <option value="70">70%</option>
+                <option value="80">80%</option>
+                <option value="90">90%</option>
+                <option value="95">95%</option>
+                <option value="100">100%</option>
+              </select>
+            </label>
           </div>
         </aside>
       </div>

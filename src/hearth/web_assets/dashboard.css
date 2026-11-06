@@ -438,6 +438,7 @@ pre.turn-text { font-family: var(--mono); font-size: 12px; background: var(--sof
 .send:disabled { opacity: .4; cursor: default; }
 @media (hover: hover) and (pointer: fine) { .send:not(:disabled):hover { background: var(--ember); } }
 .composer-hint { margin: 0; padding: 9px 3px 0; font-size: 11px; color: var(--muted); }
+.usage-warning { color: var(--attention); }
 
 /* ---------- the work inspector beside the conversation ---------- */
 .work { background: var(--panel); border: 1px solid var(--line); border-radius: 9px; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
