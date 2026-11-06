@@ -48,7 +48,7 @@
           <div class="section-label">Projects<a class="icon-button" href="#/sessions/new" aria-label="New conversation"><svg><use href="#i-plus"/></svg></a></div>
           <div id="projects" class="projects"></div>
           <div class="side-bottom">
-            <a class="nav-item" href="#/tasks" data-view="tasks"><svg><use href="#i-tasks"/></svg>Tasks</a>
+            <a id="tasks-link" class="nav-item" href="#/tasks" data-view="tasks" hidden><svg><use href="#i-tasks"/></svg>Tasks</a>
             <a class="nav-item" href="#/knowledge" data-view="knowledge"><svg><use href="#i-book"/></svg>Knowledge</a>
             <a class="nav-item" href="#/hub" data-view="hub"><svg><use href="#i-hub"/></svg>Hub</a>
             <label class="setting">Open on
@@ -57,7 +57,6 @@
                 <option value="sessions">Conversations</option>
                 <option value="attention">Inbox</option>
                 <option value="hub">Hub</option>
-                <option value="tasks">Tasks</option>
                 <option value="knowledge">Knowledge</option>
               </select>
             </label>
