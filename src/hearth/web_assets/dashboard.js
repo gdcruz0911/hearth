@@ -297,7 +297,7 @@ function detail(task) {
   const typing = document.activeElement;
   if (task && typing && typing.classList.contains("answer-input") && typing.dataset.task === task.id) return;  // Keep the cursor.
   if (!task) {
-    summary.replaceChildren(el("p", "empty", "No tasks yet. Start one with hearth task new."));
+    summary.replaceChildren(el("p", "empty", "No tasks yet."));
     sessionBox.hidden = true;
     stopSession();
     diffPane(null);
@@ -737,7 +737,9 @@ function route() {
   const [asked, task, run] = window.location.hash.replace(/^#\//, "").split("/").map(decodeURIComponent);
   // ADR-0041: the first launch opens on Sessions; later ones on the chosen view, or by default the last one used.
   const opening = stored("hearth-default-view", "last");
-  const view = VIEWS.includes(asked) ? asked : VIEWS.includes(opening) ? opening : stored("hearth-last-view", "sessions");
+  // ADR-0051: the task pipeline is hidden, so only its direct address opens it; an older saved choice of Tasks does not.
+  const start = [opening, stored("hearth-last-view", "sessions")].find((name) => name !== "tasks" && VIEWS.includes(name)) || "sessions";
+  const view = VIEWS.includes(asked) ? asked : start;
   store("hearth-last-view", view);
   selected.task = view === "tasks" && task ? task : null;
   selected.run = view === "tasks" && run ? run : null;
@@ -763,6 +765,7 @@ function route() {
 function defaultView() {
   const select = document.getElementById("default-view");
   select.value = stored("hearth-default-view", "last");
+  if (select.selectedIndex < 0) select.value = "last"; // An older saved choice of Tasks, which is no longer offered.
   select.addEventListener("change", () => store("hearth-default-view", select.value));
 }
 

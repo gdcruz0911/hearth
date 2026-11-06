@@ -73,6 +73,10 @@
     return [...sessions, ...tasks];
   }
 
+  // ADR-0051: Tasks shows in the sidebar only while a task is at work or waits on the keeper. Not reason() alone: it also
+  // names every stopped task for good, and those stay in the Inbox and Find.
+  const activeTask = (task) => task.questions?.length || (!task.failure && (reason(task) || task.status === "running" || task.status === "queued"));
+
   // ---------- sidebar ----------
 
   function sidebar() {
@@ -166,6 +170,7 @@
     attention(list);
     activity(list, busy);
     $("needs-count").textContent = list.length ? String(list.length) : "";
+    $("tasks-link").hidden = !state.tasks.some(activeTask);
     const count = (id, number, words, status) => {
       $(id).replaceChildren(...(number ? [dot(status), el("span", "", words)] : []));
     };

@@ -1310,6 +1310,8 @@ class DashboardPageTests(unittest.TestCase):
                 self.assertIn(f'href="#/{view}" data-view="{view}"', home)
                 self.assertRegex(home, f'class="view[^"]*" data-view="{view}"')
         self.assertIn('id="default-view"', home)
+        self.assertIn('<a id="tasks-link" class="nav-item" href="#/tasks" data-view="tasks" hidden>', home)
+        self.assertNotIn('<option value="tasks">', home)
         self.assertIn('src="assets/shell.js"', home)
         self.assertIn('id="hub-needs"', home)
 
