@@ -1,9 +1,10 @@
 """Direct agent sessions (ADR-0041, slice 1): one conversation with one official CLI, turn by turn, from the app.
 
 A session is a task record with `kind: "session"` and its own worktree; each turn is a run in its `runs` list, launched
-by the backend from the same tables as tasks (`PROVIDERS` to edit, `REVIEWERS` to read only), resumed with the CLI's own
-session, and stopped with the task's process group. Turns belong to the backend that started them: quitting Hearth stops
-them, and a turn found without its backend is stopped and marked interrupted, never resent.
+by the backend from the same tables as tasks (`PROVIDERS` to edit, `REVIEWERS` to read only), except that Claude edits with
+the keeper's own setup (`CONVERSATION`, ADR-0049), resumed with the CLI's own session, and stopped with the task's process
+group. Turns belong to the backend that started them: quitting Hearth stops them, and a turn found without its backend is
+stopped and marked interrupted, never resent.
 """
 
 from __future__ import annotations
@@ -30,6 +31,14 @@ UNTRACKED_LIMIT = 200  # New files the Changes view lists; more are counted, not
 WARNINGS = re.compile(r"\[claude-code:[a-z_]+\][^\n]*|unrecognized_model[^\n]*")
 CHECK = "check"  # ADR-0047: the role of the run in which Hearth runs the project's check after a Codex turn, outside the sandbox.
 SUMMARY_LINES = 20  # Lines of that check's output that open the keeper's next message.
+# ADR-0049: a Claude conversation that edits runs with the keeper's own Claude setup (settings, CLAUDE.md, skills, plugins, MCP,
+# memory, subagents), confined to its worktree by Claude Code's own working-folder rules; tasks keep their stripped tables.
+# Tools that act beyond this Mac on their own (publish, notify, schedule, message) are off; probed on 2026-10-31, web tools and
+# MCP calls are refused without approval, and these were not probed because trying them would act.
+CONVERSATION = {"claude": ["claude", "{options}", "-p", "--output-format", "stream-json", "--verbose", "--permission-mode", "acceptEdits",
+                           "--allowedTools", "Bash({check} *)", "--disallowedTools",
+                           "Artifact,ArtifactComments,ArtifactData,DesignSync,PushNotification,RemoteTrigger,CronCreate,CronDelete,ScheduleWakeup,SendMessage"]}
+AGENT_CONFIG = (".claude", ".mcp.json")  # What a full-setup turn loads from the worktree, so the agent must not change it.
 
 _active: dict[str, subprocess.Popen] = {}  # Session ID to the turn, or the check after it, this backend is running for it.
 _active_lock = threading.Lock()
@@ -117,6 +126,9 @@ def send(session_id: str, message: str, send_id: str, draft_at: int | None = Non
         tampered = tasks._tampered(task, task_dir)  # The same refusal as a task's: agent-written settings, or an unlinked sign-in.
         if tampered:
             raise SessionError(f"Hearth will not continue this conversation: {tampered[1]} Next: start a new conversation.", 409)
+        if _full_setup(settings) and (changed := _config_changed(task)):
+            raise SessionError(f"Hearth will not continue this conversation: {changed} in its worktree differs from the base commit, and "
+                               "Claude would load it as its own configuration. Next: start a new conversation.", 409)
         slot = "implement" if settings["mode"] == "edit" else "support"
         if tasks._busy(slot) >= tasks.SLOTS[slot]:
             raise SessionError(f"All {tasks.SLOTS[slot]} {slot} slots are in use. Next: wait for a run to finish, or stop one.", 409)
@@ -284,10 +296,10 @@ def changes(session_id: str) -> dict:
             "truncated": len(raw) > tasks.DIFF_LIMIT}
 
 
-def _git(task: dict, *args: str, check: bool = False) -> subprocess.CompletedProcess:
+def _git(task: dict, *args: str, check: bool = False, input: bytes | None = None) -> subprocess.CompletedProcess:
     # No optional locks, so an agent's own git add or commit never meets Hearth's lock; no external diff or textconv programs.
     return subprocess.run(["git", "--no-optional-locks", "-c", "core.fsmonitor=false", "-C", task["worktree"], *args],
-                          capture_output=True, timeout=30, check=check)
+                          capture_output=True, timeout=30, check=check, input=input)
 
 
 def _mine(task: dict) -> list[str]:
@@ -325,7 +337,8 @@ def summary(task: dict, turns: bool = False) -> dict:
     if turns:
         if found["provider"] == "claude":
             check = (tasks._projects().get(task["project"], {}).get("check") or "true") if found["mode"] == "edit" else None
-            description = "Only shell commands starting with" if check else "Read and search files only. Shell commands are unavailable."
+            description = ("Your own Claude setup, inside this worktree: read-only commands, and shell commands starting with" if check
+                           else "Read and search files only. Shell commands are unavailable.")
         else:
             check = None
             sandbox = "workspace-write" if found["mode"] == "edit" else "read-only"
@@ -339,7 +352,7 @@ def summary(task: dict, turns: bool = False) -> dict:
         for run in task["runs"]:
             shown = {key: run.get(key) for key in ("dir", "message", "model", "effort", "started", "finished", "outcome", "exit_code",
                                                    "model_used", "sandbox_used", "warnings", "error", "session_id", "resumed", "stopped_by",
-                                                   "left_running", "left_in_folder", "cleanup_unchecked")}
+                                                   "left_running", "left_in_folder", "cleanup_unchecked", "denied")}
             if run["role"] != CHECK:
                 found["turns"].append({**shown, "check": None})
             elif found["turns"]:
@@ -357,7 +370,8 @@ def _tail(task_dir: Path, record: dict) -> str | None:
 
 def _launch(task: dict, task_dir: Path, record: dict, message: str, instructions: str | None = None) -> subprocess.Popen:
     settings, project = task["session"], tasks._projects()[task["project"]]
-    template = getattr(tasks, MODES[settings["mode"]])[settings["provider"]]
+    full = _full_setup(settings)
+    template = CONVERSATION[settings["provider"]] if full else getattr(tasks, MODES[settings["mode"]])[settings["provider"]]
     argv = tasks._argv(template, settings["provider"], message, project.get("check") or "true", settings["model"], settings["effort"],
                        settings=tasks._claude_settings(Path(task["worktree"])))
     if instructions:
@@ -368,7 +382,9 @@ def _launch(task: dict, task_dir: Path, record: dict, message: str, instructions
     events, errors = (run_dir / "events.jsonl").open("w", encoding="utf-8"), (run_dir / "stderr.txt").open("w", encoding="utf-8")
     record["marker"] = tasks._new_marker()
     record["descendants"] = str(run_dir / "descendants")
-    env = {**os.environ, **tasks.NO_BYTECODE, "HEARTH_TASK": task["id"], "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1", tasks.RUN_MARKER: record["marker"]}
+    env = {**os.environ, **tasks.NO_BYTECODE, "HEARTH_TASK": task["id"], tasks.RUN_MARKER: record["marker"]}
+    if not full:
+        env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] = "1"
     if settings["provider"] == "codex":
         env["CODEX_HOME"] = str(tasks._codex_home(task_dir))
     try:
@@ -466,6 +482,7 @@ def _settle(task_dir: Path, exit_code: int | None = None) -> None:
             record["model_used"], record["sandbox_used"] = _codex_context(task_dir, parsed["session_id"])
         else:
             record["model_used"] = parsed["model"]
+        record["denied"] = _denied(text)
         if parsed["session_id"] and not task["session"]["cli_session"]:
             task["session"]["cli_session"] = parsed["session_id"]
         task["status"] = "done"  # Between turns a session is ready, never waiting or queued, so an update is not refused.
@@ -524,6 +541,63 @@ def _instructions(check: str, turn_check: str | None) -> str:
             if turn_check else "")
     return (f"{told}Hearth runs the project's full check, `{check}`, after each of your turns that changes files, outside your sandbox, "
             "because it may need what your sandbox does not allow. Do not run it yourself. Its result opens the keeper's next message.")
+
+
+def _full_setup(settings: dict) -> bool:
+    return settings["provider"] == "claude" and settings["mode"] == "edit"
+
+
+def _config_changed(task: dict) -> str | None:
+    """The first Claude configuration path whose contents or mode on disk differ from the base commit, ignored files included;
+    when Hearth cannot say, the paths themselves, so the turn is refused rather than run on unknown configuration. It reads the
+    files, not Git's index, so an index flag such as skip-worktree or assume-unchanged cannot hide a change."""
+    worktree = Path(task["worktree"])
+    try:
+        base = {}
+        for entry in _git(task, "ls-tree", "-r", "-z", task["base"], "--", *AGENT_CONFIG, check=True).stdout.split(b"\0"):
+            if entry:
+                meta, name = entry.split(b"\t", 1)
+                mode, _, blob = meta.split(b" ")
+                base[os.fsdecode(name)] = (mode.decode(), blob.decode())
+        disk, files, pending = {}, [], [worktree / name for name in AGENT_CONFIG]
+        while pending:
+            path = pending.pop()
+            name = path.relative_to(worktree).as_posix()
+            if path.is_symlink():  # Git stores a link as a blob of its target.
+                target = os.fsencode(os.readlink(path))
+                disk[name] = ("120000", _git(task, "hash-object", "--stdin", check=True, input=target).stdout.decode().strip())
+            elif path.is_dir():
+                pending += path.iterdir()
+            elif path.is_file():
+                files.append(name)
+                disk[name] = ("100755" if path.stat().st_mode & 0o100 else "100644", None)
+            elif os.path.lexists(path):
+                disk[name] = ("other", None)
+        if files:  # Raw bytes, no filters: attributes in the worktree are the agent's to change.
+            hashes = _git(task, "hash-object", "--no-filters", "--stdin-paths", check=True, input="\n".join(files).encode()).stdout.split()
+            for name, blob in zip(files, hashes, strict=True):
+                disk[name] = (disk[name][0], blob.decode())
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return " or ".join(AGENT_CONFIG)
+    return next((name for name in sorted(base.keys() | disk.keys()) if base.get(name) != disk.get(name)), None)
+
+
+def _denied(text: str) -> list[str] | None:
+    """What Claude Code refused in a turn because nobody could approve it, from its result line: each tool with the command,
+    path, or URL it asked for, once."""
+    found = []
+    for line in text.splitlines():
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(event, dict) and event.get("type") == "result":
+            for item in event.get("permission_denials") or []:
+                if isinstance(item, dict) and item.get("tool_name"):
+                    asked = item.get("tool_input") if isinstance(item.get("tool_input"), dict) else {}
+                    what = asked.get("command") or asked.get("file_path") or asked.get("url") or asked.get("query")
+                    found.append(f"{item['tool_name']} ({str(what)[:120]})" if what else item["tool_name"])
+    return list(dict.fromkeys(found)) or None
 
 
 def _fingerprint(task: dict) -> str | None:

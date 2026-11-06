@@ -307,7 +307,7 @@
     const { turn } = view;
     // Whether anything arrived is part of the key: on reopening, the footer is drawn before the transcript is read.
     const key = JSON.stringify([turn.finished, turn.outcome, turn.model_used, turn.warnings, turn.error, Boolean(view.draft),
-      view.items.children.length > 0, turn.left_running, turn.left_in_folder, turn.cleanup_unchecked, turn.check]);
+      view.items.children.length > 0, turn.left_running, turn.left_in_folder, turn.cleanup_unchecked, turn.check, turn.denied]);
     if (key === view.footKey) return;
     view.footKey = key;
     const parts = [];
@@ -346,6 +346,9 @@
         parts.push(el("p", "turn-note failed", "Hearth stopped this reply when it quit or lost its backend. Nothing was resent; send again to continue."));
       }
       if (turn.outcome === "failed") parts.push(el("p", "turn-note failed", shown(turn.error)));
+      if ((turn.denied || []).length) {
+        parts.push(el("p", "turn-note", `${agent(state.detail.provider)} asked to use ${turn.denied.join(", ")}. Hearth cannot approve that yet, so it was refused.`));
+      }
       if (turn.check) parts.push(checkView(turn.check));
     }
     if (view.draft && turn.finished) view.draft.classList.add("partial");
@@ -419,29 +422,33 @@
       const step = el("li", "reply-step");
       const details = el("details");
       const summary = el("summary");
-      summary.append(el("span", "step-tool", item.tool || "tool"), el("span", "step-arg", item.text));
+      summary.append(el("span", "step-tool", `${item.subagent ? "subagent · " : ""}${item.tool || "tool"}`), el("span", "step-arg", item.text));
       details.append(summary);
       step.append(details);
       steps(view).append(step);
       view.tool = details;
+      if (item.id) (view.calls ||= {})[item.id] = details;
       view.steps += 1;
       workLine(view);
     } else if (item.kind === "output") {
+      // A result goes to the call it answers: a subagent's own steps run between its start and its report.
+      const tool = (item.for && view.calls?.[item.for]) || view.tool;
       const pre = el("pre", `step-output${item.error ? " error" : ""}`, item.text || "(no output)");
-      if (view.tool) view.tool.append(pre);
+      if (tool) tool.append(pre);
       else {  // Output with no tool line before it; append() returns nothing, so it cannot be chained.
         const step = el("li", "reply-step");
         step.append(pre);
         steps(view).append(step);
       }
+      if (item.note) return;  // A prompt or loaded text, not a result: it settles nothing.
       if (item.error) {
-        view.tool?.classList.remove("done");
-        view.tool?.classList.add("error");
-        if (view.tool) view.tool.open = true;
+        tool?.classList.remove("done");
+        tool?.classList.add("error");
+        if (tool) tool.open = true;
         view.failed += 1;
         view.work.open = true; // Folding never hides a failed step.
         workLine(view);
-      } else if (!view.tool?.classList.contains("error")) view.tool?.classList.add("done");
+      } else if (!tool?.classList.contains("error")) tool?.classList.add("done");
     } else if (item.kind === "error" || (item.kind === "result" && item.error)) {
       view.items.append(el("li", "reply-text failed", shown(item.text)));
     }
