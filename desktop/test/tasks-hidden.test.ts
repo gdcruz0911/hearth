@@ -61,6 +61,7 @@ test("a direct task address still opens with Tasks out of the sidebar, and Find 
   assert.equal(await tasksLink(page).isVisible(), false);
 
   await page.evaluate(() => void (window.location.hash = "#/sessions"));
+  await page.locator("#convo-view").waitFor();  // A hashchange still to fire would close Find as it opens.
   await page.locator("#find-open").click();
   await page.locator("#find-input").fill("20261105-120000");
   await page.locator("#find-results a", { hasText: "Goal of 20261105-120000" }).click();
@@ -78,7 +79,7 @@ test("a task with an open question brings Tasks back, and can be answered from t
 
   await tasksLink(page).waitFor();
   await tasksLink(page).click();
-  assert.equal(await shownView(page), "tasks");
+  await page.locator(".tasks-view").waitFor();  // The view changes on hashchange, which fires after the click returns.
   await page.locator(".task-list a.card", { hasText: `Goal of ${id}` }).click();
   await page.locator("#task-summary", { hasText: "Which greeting?" }).waitFor();
   await page.locator("textarea.answer-input").waitFor();
