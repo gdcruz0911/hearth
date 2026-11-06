@@ -130,14 +130,19 @@ test("at full plan use a conversation warns at the set level and still sends", a
 
   const warning = page.locator("#convo-usage-warning");
   await warning.waitFor({ state: "visible" });
-  assert.match(await page.locator("#convo-usage").textContent() ?? "", /Claude Code: 5-hour 100%, week 95%/);
-  assert.match(await warning.textContent() ?? "", /100% of its 5-hour limit and 95% of its weekly limit\. Sending still works\.$/);
+  const windows = page.locator("#convo-usage .usage-window");
+  assert.deepEqual(await windows.allTextContents(), ["5-hour 100%", "week 95%", "5-hour not reported", "week not reported"]);
+  assert.equal(await page.locator("#convo-usage meter").count(), 2);  // A bar only for a number that exists.
+  assert.equal(await page.locator("#convo-usage meter.reached").count(), 2);
+  assert.equal(await warning.textContent(), "Claude Code has used 100% of its 5-hour limit and 95% of its weekly limit.");
 
   assert.equal(await page.locator("#convo-usage-warn").inputValue(), "90");
   await setWarning(page, "100");  // Only the window that reaches the level is named.
-  assert.match(await warning.textContent() ?? "", /has used 100% of its 5-hour limit\. Sending/);
+  assert.equal(await warning.textContent(), "Claude Code has used 100% of its 5-hour limit.");
+  assert.equal(await page.locator("#convo-usage meter.reached").count(), 1);
   await setWarning(page, "off");
   assert.equal(await warning.isHidden(), true);
+  assert.equal(await page.locator("#convo-usage meter.reached").count(), 0);
   await setWarning(page, "90");
 
   await page.locator("#convo-message").fill("Send anyway");
@@ -155,7 +160,8 @@ test("plan use nobody reported reads as not reported, never as 0%, and warns abo
   const page = await windowShowing(app, "Live ·");
   await page.evaluate((session) => void (window.location.hash = `#/sessions/${session}`), id);
   await page.waitForFunction(() => document.getElementById("convo-usage")?.textContent?.includes("Codex"));
-  assert.equal(await page.locator("#convo-usage").textContent(), "Claude Code: 5-hour not reported, week not reported · Codex: 5-hour not reported, week not reported");
+  assert.deepEqual(await page.locator("#convo-usage .usage-window").allTextContents(), ["5-hour not reported", "week not reported", "5-hour not reported", "week not reported"]);
+  assert.equal(await page.locator("#convo-usage meter").count(), 0);
   assert.equal(await page.locator("#convo-usage-warning").isHidden(), true);
   await setWarning(page, "50");
   assert.equal(await page.locator("#convo-usage-warning").isHidden(), true);

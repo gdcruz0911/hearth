@@ -229,18 +229,31 @@
     return typeof value === "number" ? `${+value.toFixed(1)}%` : "not reported"; // UI-8: a missing number is never 0%.
   }
 
+  function usageWindow(name, value, reached) {
+    const item = el("span", "usage-window");
+    if (typeof value === "number") {
+      const bar = el("meter", reached ? "reached" : "");
+      Object.assign(bar, { min: 0, max: 100, value });
+      bar.setAttribute("aria-hidden", "true"); // The number beside it says the same.
+      item.append(bar);
+    }
+    item.append(`${name} ${percent(value)}`);
+    return item;
+  }
+
   function renderUsage() {
     // Shown only: nothing here, or in the backend's send, stops a message at any level (ADR-0050).
-    const row = (provider) => (state.usage || []).find((item) => item.provider === provider) || {};
-    $("convo-usage").textContent = Object.keys(AGENTS)
-      .map((provider) => `${agent(provider)}: 5-hour ${percent(row(provider).five_hour)}, week ${percent(row(provider).week)}`).join(" · ");
-    const level = Number($("convo-usage-warn").value); // "Never" is NaN, which no number reaches.
-    const mine = state.detail ? row(state.detail.provider) : {};
-    const over = [["5-hour", mine.five_hour], ["weekly", mine.week]].filter(([, value]) => typeof value === "number" && value >= level);
+    const level = Number($("convo-usage-warn").value); // "Off" is NaN, which no number reaches.
+    const reached = (provider, value) => provider === state.detail?.provider && typeof value === "number" && value >= level;
+    $("convo-usage").replaceChildren(...Object.keys(AGENTS).flatMap((provider) => {
+      const row = (state.usage || []).find((item) => item.provider === provider) || {};
+      return [el("span", "usage-agent", agent(provider)),
+              usageWindow("5-hour", row.five_hour, reached(provider, row.five_hour)), usageWindow("week", row.week, reached(provider, row.week))];
+    }));
+    const mine = (state.usage || []).find((item) => item.provider === state.detail?.provider) || {};
+    const over = [["5-hour", mine.five_hour], ["weekly", mine.week]].filter(([, value]) => reached(mine.provider, value));
     const warning = $("convo-usage-warning");
-    const text = over.length
-      ? `${agent(state.detail.provider)} has used ${over.map(([name, value]) => `${percent(value)} of its ${name} limit`).join(" and ")}. Sending still works.`
-      : "";
+    const text = over.length ? `${agent(mine.provider)} has used ${over.map(([name, value]) => `${percent(value)} of its ${name} limit`).join(" and ")}.` : "";
     warning.hidden = !over.length;
     if (warning.textContent !== text) warning.textContent = text; // Its own live region: unchanged text is not announced again.
   }

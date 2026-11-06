@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
 import shutil
@@ -13,6 +15,7 @@ import time
 from pathlib import Path
 from unittest import mock
 
+from hearth.cli import main
 from hearth.workbench import sessions, stats, tasks, transcript, usage
 from test_tasks import TaskTestCase, git
 
@@ -217,8 +220,11 @@ class SessionTests(SessionTestCase):
         self.settled(session_id)
         self.assertEqual(len(self.calls()), 1)
 
-        refused, _ = self.cli("task", "new", "demo", "Add hello.txt")
+        errors = io.StringIO()
+        with contextlib.redirect_stderr(errors):
+            refused = main(["task", "new", "demo", "Add hello.txt"])
         self.assertEqual(refused, 1)
+        self.assertIn("claude is at 90% or more of a plan limit", errors.getvalue())
 
     def test_usage_without_a_sample_is_listed_as_missing_and_not_as_zero(self) -> None:
         self.real_usage()

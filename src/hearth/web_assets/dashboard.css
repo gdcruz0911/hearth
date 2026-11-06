@@ -439,6 +439,12 @@ pre.turn-text { font-family: var(--mono); font-size: 12px; background: var(--sof
 @media (hover: hover) and (pointer: fine) { .send:not(:disabled):hover { background: var(--ember); } }
 .composer-hint { margin: 0; padding: 9px 3px 0; font-size: 11px; color: var(--muted); }
 .usage-warning { color: var(--attention); }
+.usage-line { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; }
+.usage-window { display: inline-flex; align-items: center; gap: 5px; }
+.usage-window meter { width: 40px; height: 5px; }
+.usage-window meter::-webkit-meter-bar { background: var(--line); border: 0; border-radius: 3px; height: 5px; }
+.usage-window meter::-webkit-meter-optimum-value { background: var(--muted); border-radius: 3px; }
+.usage-window meter.reached::-webkit-meter-optimum-value { background: var(--attention); }
 
 /* ---------- the work inspector beside the conversation ---------- */
 .work { background: var(--panel); border: 1px solid var(--line); border-radius: 9px; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
