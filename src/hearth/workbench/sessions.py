@@ -23,7 +23,13 @@ from . import roles, tasks, usage
 KIND = "session"
 MODES = {"edit": "PROVIDERS", "read": "REVIEWERS"}  # Edit in the session's own worktree, or read it only.
 PROVIDERS = ("claude", "codex")  # Resume, stop, and restrictions checked in real runs on 2026-10-13; agy is not.
-EFFORTS = ("low", "medium", "high")
+# Hearth checks effort itself: on 2026-11-06 Claude Code 2.1.283 dropped an unknown --effort with only a warning, and Codex 0.163.0
+# ran a level its catalog does not list for that model. Codex's list for a model it names comes from that catalog; this is its fallback.
+EFFORTS = {"claude": ("low", "medium", "high", "xhigh", "max"), "codex": ("low", "medium", "high", "xhigh", "max", "ultra")}
+CLAUDE_MODELS = ("fable", "opus", "sonnet", "haiku")  # The documented aliases: Claude Code has no command that lists models.
+MODEL_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/\[\]-]{0,79}")  # It follows a flag in the argv, so it never starts with a dash.
+CATALOG_SECONDS = 600  # The page polls the listing every few seconds; `codex debug models` takes about half a second.
+CATALOG_TIMEOUT = 5
 MESSAGE_LIMIT = 20_000
 SEND_ID = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
 TIMEOUT_SECONDS = 1800
@@ -43,6 +49,9 @@ AGENT_CONFIG = (".claude", ".mcp.json")  # What a full-setup turn loads from the
 _active: dict[str, subprocess.Popen] = {}  # Session ID to the turn, or the check after it, this backend is running for it.
 _active_lock = threading.Lock()
 _quitting = False  # Set under _active_lock when the backend stops, so no check starts after stop_all has looked.
+_create_lock = threading.Lock()  # A retry arriving while the first request still runs must find the conversation it made.
+_catalog: dict[str, tuple[float, list[dict]]] = {}  # Codex's program path to when it was read and the models it listed.
+_catalog_lock = threading.Lock()
 
 
 class SessionError(Exception):
@@ -54,14 +63,62 @@ class SessionError(Exception):
 
 
 def options() -> dict:
-    """What the new-conversation form offers: each project's allowed session CLIs and their default models."""
+    """What a new chat offers: each project's allowed session CLIs and default models, and each CLI's models and effort levels."""
     # Before any project is added the form says how to add one, rather than the whole view failing.
     projects = tasks._projects() if (tasks._home() / "projects.json").exists() else {}
     found = {}
     for name, project in projects.items():
         allowed = [provider for provider in project.get("providers", []) if provider in PROVIDERS]
         found[name] = {"providers": allowed, "models": {provider: _default_model(name, provider) for provider in allowed}}
-    return {"projects": found, "efforts": list(EFFORTS), "modes": list(MODES)}
+    return {"projects": found, "modes": list(MODES),
+            "agents": {"claude": {"models": [{"id": name} for name in CLAUDE_MODELS], "efforts": list(EFFORTS["claude"])},
+                       "codex": {"models": _codex_models(), "efforts": list(EFFORTS["codex"])}}}
+
+
+def _codex_models() -> list[dict]:
+    """The models `codex debug models` offers this account, with each one's effort levels; none when Codex cannot say, so the
+    picker falls back to the project's default, recently used models, and typing a name. Checked on Codex 0.163.0, 2026-11-06."""
+    program = tasks.PROVIDERS["codex"][0]
+    with _catalog_lock:
+        read_at, models = _catalog.get(program, (None, []))
+        if read_at is not None and time.monotonic() - read_at < CATALOG_SECONDS:
+            return models
+        try:
+            listed = subprocess.run([program, "debug", "models"], capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=CATALOG_TIMEOUT)
+            models = _parse_catalog(listed.stdout) if listed.returncode == 0 else []
+        except (OSError, subprocess.SubprocessError, ValueError):
+            models = []
+        _catalog[program] = (time.monotonic(), models)
+        return models
+
+
+def _parse_catalog(text: str) -> list[dict]:
+    rows = json.loads(text)
+    rows = rows.get("models") if isinstance(rows, dict) else None
+    models = []
+    for row in rows if isinstance(rows, list) else []:  # CODE-3: this debug command's shape may change.
+        if not isinstance(row, dict) or row.get("visibility") != "list" or not MODEL_NAME.fullmatch(str(row.get("slug"))):
+            continue
+        levels = row.get("supported_reasoning_levels")
+        efforts = [level.get("effort") for level in levels if isinstance(level, dict)] if isinstance(levels, list) else []
+        models.append({"id": row["slug"], "efforts": [effort for effort in efforts if isinstance(effort, str) and re.fullmatch("[a-z]+", effort)]})
+    return models
+
+
+def _efforts(provider: str, model: str | None) -> list[str]:
+    listed = next((row["efforts"] for row in _codex_models() if row["id"] == model), None) if provider == "codex" else None
+    return listed or list(EFFORTS[provider])
+
+
+def _choice(project: str, provider: str, model: str | None, effort: str) -> tuple[str | None, str]:
+    """A model and effort Hearth will pass to the CLI, or the refusal; an empty model means the project's default."""
+    model = (model or "").strip() or _default_model(project, provider)
+    if model and not MODEL_NAME.fullmatch(model):
+        raise SessionError("A model name starts with a letter or digit, and has only letters, digits, and . _ : / [ ] -")
+    allowed = _efforts(provider, model)
+    if effort not in allowed:
+        raise SessionError(f"{model or 'This model'} does not offer {effort} effort. Choose one of: {', '.join(allowed)}.")
+    return model, effort
 
 
 def create(project: str, provider: str, mode: str, model: str | None, effort: str | None, request: str) -> dict:
@@ -71,41 +128,57 @@ def create(project: str, provider: str, mode: str, model: str | None, effort: st
         raise SessionError(f"No project {project}. Next: add it to ~/.hearth/projects.json")
     if provider not in PROVIDERS or provider not in projects[project].get("providers", []):
         raise SessionError(f"{project} does not offer {provider} for sessions. Next: choose one of: {', '.join(options()['projects'][project]['providers']) or 'none'}")
-    if mode not in MODES or (effort is not None and effort not in EFFORTS) or not SEND_ID.match(request or ""):
-        raise SessionError("Choose a mode, an effort, and send a request ID.")
-    model = (model or "").strip() or _default_model(project, provider)
-    if model and not re.fullmatch(r"[A-Za-z0-9._:/-]{1,80}", model):
-        raise SessionError("A model name is letters, digits, and . _ : / - only.")
-    existing = next((summary(task) for task in _sessions() if task.get("request") == request), None)
-    if existing:  # The same click arriving twice makes one conversation.
-        return existing
-    repo = Path(projects[project]["path"]).expanduser()
-    try:
-        base = tasks._git(repo, "rev-parse", "HEAD").strip()
-    except (OSError, subprocess.CalledProcessError):
-        raise SessionError(f"{project}'s folder {repo} is not a Git repository with a commit. Next: fix its path in ~/.hearth/projects.json") from None
-    session_id = time.strftime("%Y%m%d-%H%M%S")
-    for suffix in range(2, 100):
-        if not (tasks._home() / "tasks" / session_id).exists():
-            break
-        session_id = f"{time.strftime('%Y%m%d-%H%M%S')}-{suffix}"
-    task_dir = tasks._home() / "tasks" / session_id
-    worktree = tasks._home() / "worktrees" / project / session_id
-    tasks._git(repo, "worktree", "add", "-q", "-b", f"hearth/{session_id}", str(worktree), base)
-    task_dir.mkdir(parents=True)
-    copied = tasks._copy_local(repo, worktree)
-    task = {"id": session_id, "kind": KIND, "project": project, "goal": "New conversation", "status": "done", "stop_reason": None,
-            "runs": [], "created": tasks._now(), "finished": None, "branch": f"hearth/{session_id}", "base": base,
-            "worktree": str(worktree), "copied": copied, "request": request,
-            "session": {"provider": provider, "mode": mode, "model": model or None, "effort": effort or "medium", "cli_session": None}}
-    tasks._write(task_dir, task)
-    return summary(task)
+    if mode not in MODES or not SEND_ID.match(request or ""):
+        raise SessionError("Choose what it can do, then try again. If this keeps happening, reload the window.")
+    model, effort = _choice(project, provider, model, "medium" if effort is None else effort)
+    with _create_lock:
+        existing = next((summary(task) for task in _sessions() if task.get("request") == request), None)
+        if existing:  # The same click arriving twice makes one conversation.
+            return existing
+        repo = Path(projects[project]["path"]).expanduser()
+        try:
+            base = tasks._git(repo, "rev-parse", "HEAD").strip()
+        except (OSError, subprocess.CalledProcessError):
+            raise SessionError(f"{project}'s folder {repo} is not a Git repository with a commit. Next: fix its path in ~/.hearth/projects.json") from None
+        session_id = time.strftime("%Y%m%d-%H%M%S")
+        for suffix in range(2, 100):
+            if not (tasks._home() / "tasks" / session_id).exists():
+                break
+            session_id = f"{time.strftime('%Y%m%d-%H%M%S')}-{suffix}"
+        task_dir = tasks._home() / "tasks" / session_id
+        worktree = tasks._home() / "worktrees" / project / session_id
+        tasks._git(repo, "worktree", "add", "-q", "-b", f"hearth/{session_id}", str(worktree), base)
+        task_dir.mkdir(parents=True)
+        copied = tasks._copy_local(repo, worktree)
+        task = {"id": session_id, "kind": KIND, "project": project, "goal": "New conversation", "status": "done", "stop_reason": None,
+                "runs": [], "created": tasks._now(), "finished": None, "branch": f"hearth/{session_id}", "base": base,
+                "worktree": str(worktree), "copied": copied, "request": request,
+                "session": {"provider": provider, "mode": mode, "model": model or None, "effort": effort, "cli_session": None}}
+        tasks._write(task_dir, task)
+        return summary(task)
 
 
-def send(session_id: str, message: str, send_id: str, draft_at: int | None = None) -> dict:
+def choose(session_id: str, model: str | None, effort: str | None) -> dict:
+    """Save the model and effort for this conversation's next message; a turn already running keeps what it started with (ADR-0041)."""
+    task_dir = _dir(session_id)
+    with tasks._task_lock(task_dir):
+        task = tasks._read(task_dir)
+        _apply_choice(task, model, effort)
+        tasks._write(task_dir, task)
+        return summary(task)
+
+
+def _apply_choice(task: dict, model: str | None, effort: str | None) -> None:
+    settings = task["session"]
+    settings["model"], settings["effort"] = _choice(task["project"], settings["provider"], settings["model"] if model is None else model,
+                                                    settings["effort"] if effort is None else effort)
+
+
+def send(session_id: str, message: str, send_id: str, draft_at: int | None = None, model: str | None = None, effort: str | None = None) -> dict:
     """Start a turn with the keeper's message; the same send ID, retried, returns that turn instead of sending again.
 
     `draft_at` is the draft version the message came from: a started turn clears that draft, and no older save brings it back.
+    `model` and `effort` are what the message box showed: they start with this message and stay for the next ones.
     """
     if not SEND_ID.match(send_id or ""):
         raise SessionError("A send needs a request ID.")
@@ -122,6 +195,7 @@ def send(session_id: str, message: str, send_id: str, draft_at: int | None = Non
             if task["runs"][-1]["role"] == CHECK:
                 raise SessionError("Hearth is still running the project's check after the last turn. Next: wait for it, or stop it.", 409)
             raise SessionError("A turn is still running in this conversation. Next: wait for it, or stop it.", 409)
+        _apply_choice(task, model, effort)  # In this lock, after the repeat check: a refusal or a retry changes nothing.
         settings = task["session"]
         tampered = tasks._tampered(task, task_dir)  # The same refusal as a task's: agent-written settings, or an unlinked sign-in.
         if tampered:
@@ -356,7 +430,7 @@ def summary(task: dict, turns: bool = False) -> dict:
         for run in task["runs"]:
             shown = {key: run.get(key) for key in ("dir", "message", "model", "effort", "started", "finished", "outcome", "exit_code",
                                                    "model_used", "sandbox_used", "warnings", "error", "session_id", "resumed", "stopped_by",
-                                                   "left_running", "left_in_folder", "cleanup_unchecked", "denied")}
+                                                   "left_running", "left_in_folder", "cleanup_unchecked", "denied", "model_refused")}
             if run["role"] != CHECK:
                 found["turns"].append({**shown, "check": None})
             elif found["turns"]:
@@ -482,6 +556,7 @@ def _settle(task_dir: Path, exit_code: int | None = None) -> None:
                       warnings=sorted(set(WARNINGS.findall(errors))) or None, stopped_by=record.pop("stopping", None))
         if outcome == "failed":
             record["error"] = parsed["error"] or (errors.strip().splitlines() or [f"Exit code {exit_code}"])[-1][:500]
+            record["model_refused"] = "model_not_found" in text or "unrecognized_model" in errors  # Each CLI's word, seen on 2026-11-06.
         if record["provider"] == "codex":
             record["model_used"], record["sandbox_used"] = _codex_context(task_dir, parsed["session_id"])
         else:

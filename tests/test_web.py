@@ -522,6 +522,7 @@ class SessionEndpointTests(unittest.TestCase):
                                      create=lambda *args: calls.append(("create", *args)) or {"id": "s"}, send=send,
                                      stop=lambda *args: calls.append(("stop", *args)) or {"id": "s"},
                                      save_draft=lambda *args: calls.append(("draft", *args)) or {"text": "Hi", "at": 5},
+                                     choose=lambda *args: calls.append(("choose", *args)) or {"id": "s"},
                                      changes=lambda *args: calls.append(("changes", *args)) or {"files": []},
                                      open_folder=lambda *args: calls.append(("open", *args)) or {"opened": "/w"})
         app = HearthWebApplication(self.service, "token", workbench_sessions=fake)
@@ -536,14 +537,17 @@ class SessionEndpointTests(unittest.TestCase):
         changed = ask("GET", "/api/sessions/s/changes")
         opened = ask("POST", "/api/sessions/s/open", b"{}")
         open_elsewhere = app.respond("POST", "/api/sessions/s/open", b"{}", {**ask.headers, "Origin": "http://example.test"})
-        sent = ask("POST", "/api/sessions/s/send", b'{"message": "Hi", "send": "send-0002", "draft_at": 5}')
+        sent = ask("POST", "/api/sessions/s/send", b'{"message": "Hi", "send": "send-0002", "draft_at": 5, "model": "opus", "effort": "max"}')
+        chosen = ask("POST", "/api/sessions/s/settings", b'{"model": "opus", "effort": "high"}')
+        choose_elsewhere = app.respond("POST", "/api/sessions/s/settings", b"{}", {**ask.headers, "Origin": "http://example.test"})
 
         self.assertEqual([listed.status, created.status, busy.status, stopped.status, elsewhere.status], [200, 200, 409, 200, 403])
         self.assertEqual([drafted.status, changed.status, opened.status, open_elsewhere.status, sent.status], [200, 200, 200, 403, 409])
+        self.assertEqual([chosen.status, choose_elsewhere.status], [200, 403])
         self.assertEqual(json.loads(busy.body)["error"], "A turn is still running.")
-        self.assertEqual(calls, [("create", "demo", "claude", "edit", None, None, "r1234567"), ("send", "s", "Hi", "send-0001", None),
+        self.assertEqual(calls, [("create", "demo", "claude", "edit", None, None, "r1234567"), ("send", "s", "Hi", "send-0001", None, None, None),
                                  ("stop", "s", "01-session-claude"), ("draft", "s", "Hi", 5), ("changes", "s"), ("open", "s"),
-                                 ("send", "s", "Hi", "send-0002", 5)])
+                                 ("send", "s", "Hi", "send-0002", 5, "opus", "max"), ("choose", "s", "opus", "high")])
 
 
 class SlowCleanupIndex(BlockingRelationshipIndex):

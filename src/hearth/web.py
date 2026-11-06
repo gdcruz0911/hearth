@@ -359,7 +359,10 @@ class HearthWebApplication:
                                                                        text("effort"), text("request"))})
             if method == "POST" and len(parts) == 2 and parts[1] == "send":
                 at = payload.get("draft_at")
-                return self._json_response({"session": sessions.send(parts[0], text("message"), text("send"), at if isinstance(at, int) else None)})
+                return self._json_response({"session": sessions.send(parts[0], text("message"), text("send"), at if isinstance(at, int) else None,
+                                                                     text("model"), text("effort"))})
+            if method == "POST" and len(parts) == 2 and parts[1] == "settings":
+                return self._json_response({"session": sessions.choose(parts[0], text("model"), text("effort"))})
             if method == "POST" and len(parts) == 2 and parts[1] == "draft":
                 return self._json_response({"draft": sessions.save_draft(parts[0], text("text"), payload.get("at"))})
             if method == "GET" and len(parts) == 2 and parts[1] == "changes":

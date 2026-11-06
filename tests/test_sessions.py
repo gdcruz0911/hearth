@@ -29,6 +29,12 @@ FAKE = r'''
 import json, os, re, sys, time
 from pathlib import Path
 codex = Path(sys.argv[0]).name == "codex"
+if codex and sys.argv[1:3] == ["debug", "models"]:  # The catalog, read outside any turn, so it is not logged as a call.
+    print(os.environ.get("FAKE_CATALOG", json.dumps({"models": [
+        {"slug": "gpt-big", "visibility": "list", "supported_reasoning_levels": [{"effort": "low"}, {"effort": "ultra"}]},
+        {"slug": "gpt-small", "visibility": "list", "supported_reasoning_levels": [{"effort": "low"}, {"effort": "medium"}]},
+        {"slug": "gpt-hidden", "visibility": "hide", "supported_reasoning_levels": [{"effort": "low"}]}]})))
+    sys.exit(int(os.environ.get("FAKE_CATALOG_EXIT", "0")))
 prompt = sys.stdin.read()
 scenario = os.environ.get("FAKE_SESSION", "reply")
 with open(Path.home() / ".fake-session-calls.jsonl", "a") as log:
@@ -66,6 +72,15 @@ if scenario == "chain":
     (Path.home() / ".fake-child").write_text(str(child.pid))
 if scenario == "fail":
     print("Not logged in. Run login.", file=sys.stderr)
+    sys.exit(1)
+if scenario == "refuse-model":  # As each CLI refused a model it does not know, in the real runs of 2026-11-06.
+    if codex:
+        emit({"type": "thread.started", "thread_id": "thread-0001"})
+        emit({"type": "turn.failed", "error": {"message": '{"error": {"code": "model_not_found"}}'}})
+    else:
+        print('[claude-code:unrecognized_model] {"model": "x"}', file=sys.stderr, flush=True)
+        emit({"type": "system", "subtype": "init", "model": "x", "session_id": "claude-session-1"})
+        emit({"type": "result", "result": "There's an issue with the selected model.", "is_error": True, "session_id": "claude-session-1"})
     sys.exit(1)
 if scenario in ("edit", "edit-hang", "edit-go"):  # It changes a file in its worktree, as an editing turn does.
     Path("edited.txt").write_text(prompt)
@@ -117,6 +132,9 @@ class SessionTestCase(TaskTestCase):
         conversation.start()
         self.addCleanup(conversation.stop)
         self.write_projects(check="true", providers=("claude", "codex", "antigravity"))
+        catalog = mock.patch.dict(sessions._catalog, clear=True)  # Each test reads its own fake's catalog.
+        catalog.start()
+        self.addCleanup(catalog.stop)
         quitting = mock.patch.object(sessions, "_quitting", False)  # stop_all sets it for good, as the backend then exits.
         quitting.start()
         self.addCleanup(quitting.stop)
@@ -1322,3 +1340,157 @@ class HostCheckTests(SessionTestCase):
         (worktree / f"new-{sessions.UNTRACKED_LIMIT:03d}.txt").write_text("b", encoding="utf-8")  # Past the Changes view's limit.
         self.assertNotEqual(sessions._fingerprint(task), before)
         self.assertIsNotNone(before)
+
+
+class SessionChoiceTests(SessionTestCase):
+    """ADR-0052 (proposed): the model and effort change from the next message, and a chat starts from one message."""
+
+    def flag(self, argv: list[str], name: str) -> str | None:
+        return argv[argv.index(name) + 1] if name in argv else None
+
+    def test_claude_switching_model_and_effort_between_turns_reaches_the_argv_and_each_turn_keeps_its_own(self) -> None:
+        session_id = self.new()
+        sessions.send(session_id, "One", "send-0001")
+        self.settled(session_id)
+        sessions.choose(session_id, "opus", "max")  # Picked in the box, then later sent with the box's values unchanged.
+        self.assertEqual((sessions.detail(session_id)["model"], sessions.detail(session_id)["effort"]), ("opus", "max"))
+        sessions.send(session_id, "Two", "send-0002")
+        turns = self.settled(session_id)["turns"]
+        while not turns[-1]["finished"] or len(turns) < 2:
+            turns = self.settled(session_id)["turns"]
+
+        first, second = self.calls()
+        self.assertEqual((self.flag(first["argv"], "--model"), self.flag(first["argv"], "--effort")), ("fake-model", "medium"))
+        self.assertEqual(second["argv"][:2], ["--resume", "claude-session-1"])
+        self.assertEqual((self.flag(second["argv"], "--model"), self.flag(second["argv"], "--effort")), ("opus", "max"))
+        self.assertEqual([(turn["model"], turn["effort"], turn["model_used"]) for turn in turns],
+                         [("fake-model", "medium", "fake-model"), ("opus", "max", "opus")])
+
+    def test_codex_switching_with_the_send_reaches_the_argv_and_stays_for_the_next_message(self) -> None:
+        session_id = self.new(provider="codex", mode="read", model="gpt-small")
+        sessions.send(session_id, "One", "send-0001")
+        self.settled(session_id)
+        sessions.send(session_id, "Two", "send-0002", None, "gpt-big", "ultra")
+        for _ in range(200):
+            if (turns := sessions.detail(session_id)["turns"])[-1]["finished"]:
+                break
+            time.sleep(0.05)
+        sessions.send(session_id, "Three", "send-0003")
+        for _ in range(200):
+            if (turns := sessions.detail(session_id)["turns"])[-1]["finished"]:
+                break
+            time.sleep(0.05)
+
+        first, second, third = self.calls()
+        self.assertEqual(second["argv"][:3], ["exec", "resume", "thread-0001"])
+        self.assertEqual((self.flag(first["argv"], "-m"), self.flag(second["argv"], "-m"), self.flag(third["argv"], "-m")), ("gpt-small", "gpt-big", "gpt-big"))
+        self.assertIn("model_reasoning_effort=medium", first["argv"])
+        self.assertIn("model_reasoning_effort=ultra", second["argv"])
+        self.assertIn("model_reasoning_effort=ultra", third["argv"])
+        self.assertEqual([turn["model_used"] for turn in turns], ["gpt-small", "gpt-big", "gpt-big"])
+
+    def test_a_turn_already_running_keeps_what_it_started_with(self) -> None:
+        session_id = self.new()
+        with mock.patch.dict(os.environ, {"FAKE_SESSION": "hang"}):
+            sessions.send(session_id, "One", "send-0001")
+            sessions.choose(session_id, "opus", "high")
+            detail = sessions.detail(session_id)
+            self.assertEqual((detail["turns"][0]["model"], detail["turns"][0]["effort"]), ("fake-model", "medium"))
+            self.assertEqual((detail["model"], detail["effort"]), ("opus", "high"))
+            sessions.stop(session_id, detail["turns"][0]["dir"])
+
+    def test_a_refused_value_changes_nothing_and_starts_no_turn(self) -> None:
+        session_id = self.new()
+        codex_id = self.new(provider="codex", mode="read", model="gpt-small")
+        cases = [(session_id, "opus", "silly"),  # Claude Code would drop this with a warning and run on.
+                 (session_id, "--dangerously-skip-permissions", "high"),  # Never a flag in the model's place.
+                 (session_id, "two words", "high"),
+                 (codex_id, "gpt-small", "ultra"),  # Codex would run this, though its catalog does not list it for this model.
+                 (codex_id, "gpt-unknown", "silly")]
+        for target, model, effort in cases:
+            before = sessions.detail(target)
+            with self.subTest(model=model, effort=effort):
+                with self.assertRaises(sessions.SessionError) as choosing:
+                    sessions.choose(target, model, effort)
+                with self.assertRaises(sessions.SessionError) as sending:
+                    sessions.send(target, "Hi", f"send-{time.time_ns()}", None, model, effort)
+                self.assertEqual((choosing.exception.status, sending.exception.status), (400, 400))
+                after = sessions.detail(target)
+                self.assertEqual((after["model"], after["effort"], after["turns"]), (before["model"], before["effort"], []))
+        self.assertEqual(self.calls(), [])
+        self.assertEqual(sessions.choose(codex_id, "gpt-unknown", "xhigh")["effort"], "xhigh")  # A typed model gets the CLI's whole list.
+        with self.assertRaises(sessions.SessionError):
+            sessions.create("demo", "claude", "edit", "-x", "medium", "request-refused-1")
+
+    def test_a_retried_send_keeps_the_settings_it_first_used(self) -> None:
+        session_id = self.new()
+        sessions.send(session_id, "One", "send-0001", None, "opus", "high")
+        self.settled(session_id)
+        sessions.send(session_id, "One", "send-0001", None, "sonnet", "low")  # The same click again, whatever the box now shows.
+        detail = sessions.detail(session_id)
+        self.assertEqual(len(self.calls()), 1)
+        self.assertEqual((detail["model"], detail["effort"], detail["turn_count"]), ("opus", "high", 1))
+
+    def test_a_chat_starts_from_one_message_and_a_retry_creates_and_sends_once(self) -> None:
+        def start() -> str:
+            session = sessions.create("demo", "claude", "edit", "opus", "high", "request-chat-0001")
+            sessions.send(session["id"], "Fix the bug", "send-chat-0001", None, "opus", "high")
+            return session["id"]
+
+        session_id = start()
+        detail = self.settled(session_id)
+        self.assertEqual(start(), session_id)  # The reply was lost, so the page sends both again with the same IDs.
+        self.assertEqual(len(self.calls()), 1)
+        self.assertEqual(self.calls()[0]["prompt"], "Fix the bug")
+        self.assertEqual((detail["title"], self.flag(self.calls()[0]["argv"], "--model")), ("Fix the bug", "opus"))
+        self.assertEqual(len([found for found in sessions._sessions() if found.get("request") == "request-chat-0001"]), 1)
+
+    def test_a_create_retried_while_the_first_still_runs_makes_one_conversation(self) -> None:
+        import threading
+        found = []
+        threads = [threading.Thread(target=lambda: found.append(sessions.create("demo", "claude", "edit", "opus", "high", "request-both-0001")["id"]))
+                   for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        self.assertEqual(len(set(found)), 1)
+        self.assertEqual(len(sessions._sessions()), 1)
+
+    def test_options_list_each_clis_models_and_efforts(self) -> None:
+        agents = sessions.options()["agents"]
+        self.assertEqual(agents["codex"]["models"], [{"id": "gpt-big", "efforts": ["low", "ultra"]}, {"id": "gpt-small", "efforts": ["low", "medium"]}])
+        self.assertEqual([row["id"] for row in agents["claude"]["models"]], ["fable", "opus", "sonnet", "haiku"])
+        self.assertEqual(agents["claude"]["efforts"], ["low", "medium", "high", "xhigh", "max"])
+
+    def test_the_codex_catalog_is_read_once_and_a_broken_one_falls_back(self) -> None:
+        real = subprocess.run
+        with mock.patch.object(sessions.subprocess, "run", side_effect=real) as run:
+            sessions.options()
+            sessions.options()
+        self.assertEqual(sum(call.args[0][1:] == ["debug", "models"] for call in run.call_args_list), 1)
+        for env in ({"FAKE_CATALOG": "not json"}, {"FAKE_CATALOG": '{"models": [{"slug": 5}, "x", {"slug": "--bad", "visibility": "list"}]}'},
+                    {"FAKE_CATALOG_EXIT": "2"}):
+            sessions._catalog.clear()
+            with self.subTest(env=env), mock.patch.dict(os.environ, env):
+                self.assertEqual(sessions.options()["agents"]["codex"]["models"], [])
+        sessions._catalog.clear()
+        with mock.patch.dict(tasks.PROVIDERS, {"codex": [str(self.home / "no-such-codex"), *tasks.PROVIDERS["codex"][1:]]}):
+            self.assertEqual(sessions.options()["agents"]["codex"]["models"], [])
+
+    def test_a_model_the_cli_refuses_fails_that_turn_says_so_and_the_next_model_resumes(self) -> None:
+        for provider, model, resume in (("claude", "fake-model", "--resume"), ("codex", "gpt-small", "resume")):
+            with self.subTest(provider=provider):
+                session_id = self.new(provider=provider, mode="read", model=model)
+                with mock.patch.dict(os.environ, {"FAKE_SESSION": "refuse-model"}):
+                    sessions.send(session_id, "One", f"send-{provider}-1")
+                    turn = self.settled(session_id)["turns"][0]
+                self.assertEqual((turn["outcome"], turn["model_refused"]), ("failed", True))
+                sessions.send(session_id, "Two", f"send-{provider}-2", None, "opus" if provider == "claude" else "gpt-big", "low")
+                for _ in range(200):
+                    if (turn := sessions.detail(session_id)["turns"][-1])["finished"]:
+                        break
+                    time.sleep(0.05)
+                self.assertEqual(turn["outcome"], "done")
+                self.assertFalse(turn["model_refused"])
+                self.assertIn(resume, self.calls()[-1]["argv"])
