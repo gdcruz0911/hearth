@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
 import shutil
@@ -13,7 +15,8 @@ import time
 from pathlib import Path
 from unittest import mock
 
-from hearth.workbench import sessions, stats, tasks, transcript
+from hearth.cli import main
+from hearth.workbench import sessions, stats, tasks, transcript, usage
 from test_tasks import TaskTestCase, git
 
 # A stand-in for both CLIs: it logs how it was called, then prints that CLI's events. FAKE_SESSION picks the
@@ -92,6 +95,9 @@ else:
     emit({"type": "assistant", "message": {"content": [{"type": "text", "text": "Hello"}]}, "session_id": session})
     emit({"type": "result", "result": "Hello", "is_error": False, "session_id": session})
 '''
+
+
+REPORT = usage.report
 
 
 class SessionTestCase(TaskTestCase):
@@ -192,6 +198,49 @@ class SessionTests(SessionTestCase):
     def test_the_list_works_before_any_project_is_added(self) -> None:
         (self.home / ".hearth/projects.json").unlink()
         self.assertEqual(sessions.listing()["options"]["projects"], {})
+
+    def real_usage(self) -> None:
+        patch = mock.patch.object(usage, "report", REPORT)  # TaskTestCase stubs it to nothing; these tests read the real files.
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def write_claude_usage(self, line: str) -> None:
+        self.real_usage()
+        samples = self.home / ".hearth/usage/claude-limits.jsonl"
+        samples.parent.mkdir(parents=True, exist_ok=True)
+        samples.write_text(line + "\n", encoding="utf-8")
+
+    def test_a_conversation_sends_at_full_usage_while_a_task_is_refused(self) -> None:
+        window = {"used_percentage": 100, "resets_at": time.time() + 3600}  # A future reset: an expired window reads as no data.
+        self.write_claude_usage(json.dumps({"rate_limits": {"five_hour": window, "seven_day": window}}))
+        self.assertEqual([row["five_hour"] for row in sessions.listing()["usage"] if row["provider"] == "claude"], [100])
+
+        session_id = self.new()
+        sessions.send(session_id, "Say hello", "send-0001")
+        self.settled(session_id)
+        self.assertEqual(len(self.calls()), 1)
+
+        errors = io.StringIO()
+        with contextlib.redirect_stderr(errors):
+            refused = main(["task", "new", "demo", "Add hello.txt"])
+        self.assertEqual(refused, 1)
+        self.assertIn("claude is at 90% or more of a plan limit", errors.getvalue())
+
+    def test_usage_without_a_sample_is_listed_as_missing_and_not_as_zero(self) -> None:
+        self.real_usage()
+        rows = sessions.listing()["usage"]
+        self.assertEqual({row["provider"] for row in rows}, {"claude", "codex"})
+        for row in rows:
+            self.assertIsNone(row["five_hour"])
+            self.assertIsNone(row["week"])
+
+    def test_an_unreadable_usage_log_never_stops_the_list_or_a_send(self) -> None:
+        self.write_claude_usage('{"rate_limits": {"five_hour"')  # The statusline may be mid-write.
+        self.assertEqual(sessions.listing()["usage"], [])
+        session_id = self.new()
+        sessions.send(session_id, "Say hello", "send-0001")
+        self.settled(session_id)
+        self.assertEqual(len(self.calls()), 1)
 
     def test_starting_a_conversation_runs_nothing_and_the_same_request_makes_one(self) -> None:
         first = sessions.create("demo", "claude", "edit", None, "medium", "request-0001")

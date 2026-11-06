@@ -132,10 +132,6 @@ def send(session_id: str, message: str, send_id: str, draft_at: int | None = Non
         slot = "implement" if settings["mode"] == "edit" else "support"
         if tasks._busy(slot) >= tasks.SLOTS[slot]:
             raise SessionError(f"All {tasks.SLOTS[slot]} {slot} slots are in use. Next: wait for a run to finish, or stop one.", 409)
-        spent = [row for row in usage.report(usage.codex_limits(*usage.codex_sessions()), usage.claude_limits(tasks._home() / "usage/claude-limits.jsonl"))
-                 if row["provider"] == settings["provider"] and max(row["five_hour"] or 0, row["week"] or 0) >= tasks.HEADROOM_LIMIT]
-        if spent:
-            raise SessionError(f"{settings['provider']} is at {tasks.HEADROOM_LIMIT}% or more of a plan limit. Next: hearth usage, or wait for it to reset.", 409)
         run_dir = f"{len(task['runs']) + 1:02d}-session-{settings['provider']}"
         (task_dir / "runs" / run_dir).mkdir(parents=True)
         record = {"dir": run_dir, "role": KIND, "provider": settings["provider"], "model": settings["model"], "effort": settings["effort"],
@@ -250,7 +246,15 @@ def _owned_elsewhere(record: dict) -> bool:
 
 
 def listing() -> dict:
-    return {"sessions": [summary(task) for task in _sessions()], "options": options()}
+    return {"sessions": [summary(task) for task in _sessions()], "options": options(), "usage": _usage()}
+
+
+def _usage() -> list[dict]:
+    """Each agent's plan use, to show and never to act on (ADR-0050); a log that cannot be read leaves it unknown, and the list still loads."""
+    try:
+        return usage.report(usage.codex_limits(*usage.codex_sessions()), usage.claude_limits(tasks._home() / "usage/claude-limits.jsonl"))
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):  # CODE-3: these logs may be mid-write, or change shape.
+        return []
 
 
 def detail(session_id: str) -> dict:
