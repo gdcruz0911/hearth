@@ -3,8 +3,8 @@
 A session is a task record with `kind: "session"` and its own worktree; each turn is a run in its `runs` list, launched
 by the backend from the same tables as tasks (`PROVIDERS` to edit, `REVIEWERS` to read only), except that Claude edits with
 the keeper's own setup (`CONVERSATION`, ADR-0049), resumed with the CLI's own session, and stopped with the task's process
-group. A message starting with @codex in such a conversation is an ask: Codex reads the worktree and replies, unresumed. Turns belong to the backend that started them: quitting Hearth stops
-them, and a turn found without its backend is stopped and marked interrupted, never resent.
+group. Turns belong to the backend that started them: quitting Hearth stops them, and a turn found without its backend is
+stopped and marked interrupted, never resent.
 """
 
 from __future__ import annotations
@@ -38,8 +38,6 @@ SUMMARY_LINES = 20  # Lines of that check's output that open the keeper's next m
 CONVERSATION = {"claude": ["claude", "{options}", "-p", "--output-format", "stream-json", "--verbose", "--permission-mode", "acceptEdits",
                            "--allowedTools", "Bash({check} *)", "--disallowedTools",
                            "Artifact,ArtifactComments,ArtifactData,DesignSync,PushNotification,RemoteTrigger,CronCreate,CronDelete,ScheduleWakeup,SendMessage"]}
-ASK = "ask"  # ADR-0049: the role of a run in which Codex checks a Claude conversation's changes, read only, never resumed.
-ASKED = re.compile(r"^@codex(?:\s+|$)")
 AGENT_CONFIG = (".claude", ".mcp.json")  # What a full-setup turn loads from the worktree, so the agent must not change it.
 
 _active: dict[str, subprocess.Popen] = {}  # Session ID to the turn, or the check after it, this backend is running for it.
@@ -131,26 +129,18 @@ def send(session_id: str, message: str, send_id: str, draft_at: int | None = Non
         if _full_setup(settings) and (changed := _config_changed(task)):
             raise SessionError(f"Hearth will not continue this conversation: {changed} in its worktree differs from the base commit, and "
                                "Claude would load it as its own configuration. Next: start a new conversation.", 409)
-        asking = _full_setup(settings) and ASKED.match(message)
-        if asking and "codex" not in tasks._projects().get(task["project"], {}).get("providers", []):
-            # Asking sends the diff and files to Codex, so only where the keeper allowed Codex for this project.
-            raise SessionError(f"{task['project']} does not allow Codex, so @codex cannot check it. "
-                               f"Next: add codex to {task['project']}'s providers in ~/.hearth/projects.json")
-        provider = "codex" if asking else settings["provider"]
-        slot = "implement" if settings["mode"] == "edit" and not asking else "support"
+        slot = "implement" if settings["mode"] == "edit" else "support"
         if tasks._busy(slot) >= tasks.SLOTS[slot]:
             raise SessionError(f"All {tasks.SLOTS[slot]} {slot} slots are in use. Next: wait for a run to finish, or stop one.", 409)
         spent = [row for row in usage.report(usage.codex_limits(*usage.codex_sessions()), usage.claude_limits(tasks._home() / "usage/claude-limits.jsonl"))
-                 if row["provider"] == provider and max(row["five_hour"] or 0, row["week"] or 0) >= tasks.HEADROOM_LIMIT]
+                 if row["provider"] == settings["provider"] and max(row["five_hour"] or 0, row["week"] or 0) >= tasks.HEADROOM_LIMIT]
         if spent:
-            raise SessionError(f"{provider} is at {tasks.HEADROOM_LIMIT}% or more of a plan limit. Next: hearth usage, or wait for it to reset.", 409)
-        role = ASK if asking else KIND
-        run_dir = f"{len(task['runs']) + 1:02d}-{role}-{provider}"
+            raise SessionError(f"{settings['provider']} is at {tasks.HEADROOM_LIMIT}% or more of a plan limit. Next: hearth usage, or wait for it to reset.", 409)
+        run_dir = f"{len(task['runs']) + 1:02d}-session-{settings['provider']}"
         (task_dir / "runs" / run_dir).mkdir(parents=True)
-        record = {"dir": run_dir, "role": role, "provider": provider, "model": tasks._model(provider, "review") if asking else settings["model"],
-                  "effort": None if asking else settings["effort"], "started": tasks._now(), "finished": None, "pid": None, "send_id": send_id,
-                  "message": message, "resumed": None if asking else settings["cli_session"]}
-        prompt, instructions = (_ask_prompt(task, task_dir, message[asking.end():].strip()) if asking else message), None
+        record = {"dir": run_dir, "role": KIND, "provider": settings["provider"], "model": settings["model"], "effort": settings["effort"],
+                  "started": tasks._now(), "finished": None, "pid": None, "send_id": send_id, "message": message, "resumed": settings["cli_session"]}
+        prompt, instructions = message, None
         if settings["provider"] == "codex" and settings["mode"] == "edit":
             project = tasks._projects().get(task["project"], {})
             last = task["runs"][-1] if task["runs"] else {}
@@ -360,9 +350,9 @@ def summary(task: dict, turns: bool = False) -> dict:
                                      host_check=tasks._projects().get(task["project"], {}).get("check"))
         found["turns"] = []
         for run in task["runs"]:
-            shown = {key: run.get(key) for key in ("dir", "role", "provider", "message", "model", "effort", "started", "finished", "outcome",
-                                                   "exit_code", "model_used", "sandbox_used", "warnings", "error", "session_id", "resumed",
-                                                   "stopped_by", "left_running", "left_in_folder", "cleanup_unchecked", "reply", "denied")}
+            shown = {key: run.get(key) for key in ("dir", "message", "model", "effort", "started", "finished", "outcome", "exit_code",
+                                                   "model_used", "sandbox_used", "warnings", "error", "session_id", "resumed", "stopped_by",
+                                                   "left_running", "left_in_folder", "cleanup_unchecked", "denied")}
             if run["role"] != CHECK:
                 found["turns"].append({**shown, "check": None})
             elif found["turns"]:
@@ -379,15 +369,14 @@ def _tail(task_dir: Path, record: dict) -> str | None:
 
 
 def _launch(task: dict, task_dir: Path, record: dict, message: str, instructions: str | None = None) -> subprocess.Popen:
-    settings, project, provider = task["session"], tasks._projects()[task["project"]], record["provider"]
-    full = _full_setup(settings) and record["role"] == KIND
-    # An ask is the read-only reviewer's invocation in the same worktree; a turn is the conversation's own agent.
-    template = tasks.REVIEWERS[provider] if record["role"] == ASK else CONVERSATION[provider] if full else getattr(tasks, MODES[settings["mode"]])[provider]
-    argv = tasks._argv(template, provider, message, project.get("check") or "true", record["model"], record["effort"],
+    settings, project = task["session"], tasks._projects()[task["project"]]
+    full = _full_setup(settings)
+    template = CONVERSATION[settings["provider"]] if full else getattr(tasks, MODES[settings["mode"]])[settings["provider"]]
+    argv = tasks._argv(template, settings["provider"], message, project.get("check") or "true", settings["model"], settings["effort"],
                        settings=tasks._claude_settings(Path(task["worktree"])))
     if instructions:
         argv[argv.index("--json") + 1:argv.index("--json") + 1] = ["-c", f"developer_instructions={json.dumps(instructions)}"]  # A TOML string.
-    argv = _resumable(argv, provider, settings["cli_session"] if record["role"] == KIND else None)
+    argv = _resumable(argv, settings["provider"], settings["cli_session"])
     record["argv"] = argv  # It holds no message text, which goes on stdin.
     run_dir = task_dir / "runs" / record["dir"]
     events, errors = (run_dir / "events.jsonl").open("w", encoding="utf-8"), (run_dir / "stderr.txt").open("w", encoding="utf-8")
@@ -396,7 +385,7 @@ def _launch(task: dict, task_dir: Path, record: dict, message: str, instructions
     env = {**os.environ, **tasks.NO_BYTECODE, "HEARTH_TASK": task["id"], tasks.RUN_MARKER: record["marker"]}
     if not full:
         env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] = "1"
-    if provider == "codex":
+    if settings["provider"] == "codex":
         env["CODEX_HOME"] = str(tasks._codex_home(task_dir))
     try:
         process = subprocess.Popen(argv, cwd=task["worktree"], stdin=subprocess.PIPE, stdout=events, stderr=errors, text=True,
@@ -494,9 +483,7 @@ def _settle(task_dir: Path, exit_code: int | None = None) -> None:
         else:
             record["model_used"] = parsed["model"]
         record["denied"] = _denied(text)
-        if record["role"] == ASK:
-            record["reply"] = parsed["final"]  # Shown with its Send to Claude action; never passed on by Hearth itself.
-        elif parsed["session_id"] and not task["session"]["cli_session"]:
+        if parsed["session_id"] and not task["session"]["cli_session"]:
             task["session"]["cli_session"] = parsed["session_id"]
         task["status"] = "done"  # Between turns a session is ready, never waiting or queued, so an update is not refused.
         check = record.get("host_check") if outcome == "done" else None
@@ -593,24 +580,6 @@ def _config_changed(task: dict) -> str | None:
     except (OSError, subprocess.SubprocessError, ValueError):
         return " or ".join(AGENT_CONFIG)
     return next((name for name in sorted(base.keys() | disk.keys()) if base.get(name) != disk.get(name)), None)
-
-
-def _ask_prompt(task: dict, task_dir: Path, question: str) -> str:
-    """What Codex is given when the keeper asks it to check the conversation: their words, Claude's last reply, and the diff."""
-    turns = [run for run in task["runs"] if run["role"] == KIND and run.get("finished")]
-    events = task_dir / "runs" / turns[-1]["dir"] / "events.jsonl" if turns else None
-    reply = tasks.parse_events("claude", events.read_text(encoding="utf-8", errors="replace"))["final"] if events and events.exists() else ""
-    try:
-        diff = _git(task, "diff", "--no-ext-diff", "--no-textconv", task["base"], "--", ".", *_mine(task), check=True).stdout
-        added = _git(task, "ls-files", "--others", "--exclude-standard", "-z", "--", ".", *_mine(task), check=True).stdout.split(b"\0")
-    except (OSError, subprocess.SubprocessError):
-        diff, added = b"(Hearth could not read the diff; read the files yourself.)", []
-    shown = diff[:tasks.DIFF_LIMIT].decode("utf-8", errors="replace") + ("\n(diff cut short)" if len(diff) > tasks.DIFF_LIMIT else "")
-    new = ", ".join(os.fsdecode(name) for name in added if name) or "none"
-    return (f"[Hearth] The keeper asks you to check the work of a Claude Code conversation in this worktree. Read any file you need; "
-            f"change nothing.\n\nThe keeper's question: {question or 'Check these changes for bugs and for anything that does not do what was asked.'}"
-            f"\n\nClaude's last reply:\n{reply or '(Claude has not replied yet.)'}\n\nThe changes against the conversation's base commit:\n"
-            f"```diff\n{shown}\n```\nNew files: {new}\n")
 
 
 def _denied(text: str) -> list[str] | None:

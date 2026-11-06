@@ -1721,8 +1721,7 @@ def _busy(kind: str) -> int:
     count = 0
     for path in _home().glob("tasks/*/task.json"):
         other = _read(path.parent)
-        last = other["runs"][-1]["role"] if other["runs"] else None  # A conversation's @codex check is support work, like a review.
-        implementing = last in IMPLEMENT_ROLES or (other.get("session", {}).get("mode") == "edit" and last != "ask")
+        implementing = other["runs"] and (other["runs"][-1]["role"] in IMPLEMENT_ROLES or other.get("session", {}).get("mode") == "edit")
         if other["status"] == "running" and other["runs"] and bool(implementing) == (kind == "implement"):
             count += 1
     return count

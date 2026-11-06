@@ -290,9 +290,8 @@
     me.append(icon("user"));
     mine.append(me, myBody);
     const reply = el("div", "message reply");
-    // An ask (ADR-0049) is answered by Codex, not the conversation's agent, so the turn names who replied.
-    const head = el("div", "message-head", agent(turn.provider || state.detail.provider));
-    head.append(clock(turn.started), el("small", "", turn.role === "ask" ? "checking Claude's changes, read only" : "agent output"));
+    const head = el("div", "message-head", agent(state.detail.provider));
+    head.append(clock(turn.started), el("small", "", "agent output"));
     const items = el("ol", "reply-items");
     const foot = el("div", "turn-foot");
     const body = el("div");
@@ -308,7 +307,7 @@
     const { turn } = view;
     // Whether anything arrived is part of the key: on reopening, the footer is drawn before the transcript is read.
     const key = JSON.stringify([turn.finished, turn.outcome, turn.model_used, turn.warnings, turn.error, Boolean(view.draft),
-      view.items.children.length > 0, turn.left_running, turn.left_in_folder, turn.cleanup_unchecked, turn.check, turn.denied, turn.reply]);
+      view.items.children.length > 0, turn.left_running, turn.left_in_folder, turn.cleanup_unchecked, turn.check, turn.denied]);
     if (key === view.footKey) return;
     view.footKey = key;
     const parts = [];
@@ -348,30 +347,13 @@
       }
       if (turn.outcome === "failed") parts.push(el("p", "turn-note failed", shown(turn.error)));
       if ((turn.denied || []).length) {
-        parts.push(el("p", "turn-note", `${agent(turn.provider)} asked to use ${turn.denied.join(", ")}. Hearth cannot approve that yet, so it was refused.`));
+        parts.push(el("p", "turn-note", `${agent(state.detail.provider)} asked to use ${turn.denied.join(", ")}. Hearth cannot approve that yet, so it was refused.`));
       }
-      if (turn.role === "ask" && turn.reply) parts.push(forward(turn));
       if (turn.check) parts.push(checkView(turn.check));
     }
     if (view.draft && turn.finished) view.draft.classList.add("partial");
     workLine(view);
     view.foot.replaceChildren(...parts);
-  }
-
-  function forward(turn) {
-    // Nothing Codex says reaches Claude unless the keeper sends it: this puts it in the message box to edit and send.
-    const button = el("button", "btn small", "Send to Claude");
-    button.type = "button";
-    button.addEventListener("click", () => {
-      const box = $("convo-message");
-      box.value = `Codex reviewed your changes and said:\n\n${turn.reply}\n\n${box.value}`.trimEnd() + "\n\n";
-      typed(state.selected, box.value);
-      composer();
-      box.focus();
-    });
-    const line = el("p", "turn-meta");
-    line.append(button);
-    return line;
   }
 
   function checkView(check) {
@@ -570,11 +552,7 @@
       : mine.failed ? "Draft not saved: Hearth did not answer. It stays here and is saved again as you type."
       : turn && $("convo-message").value.trim()
       ? "Not sent: Hearth does not queue messages. Send it when this reply finishes · Esc stops the reply"
-      : turn ? "Esc stops the reply · its output so far is kept"
-      : state.detail && state.detail.provider === "claude" && state.detail.mode === "edit"
-        && (state.options?.projects?.[state.detail.project]?.providers || []).includes("codex")
-      ? "Start with @codex to have Codex check this conversation's changes · ⌘↩ sends"
-      : "Drafts stay with their conversation · ⌘↩ sends";
+      : turn ? "Esc stops the reply · its output so far is kept" : "Drafts stay with their conversation · ⌘↩ sends";
     if (turn) say(`${agent(state.detail.provider)} is replying.`);
     else if (state.detail && state.detail.status === "done") say("Reply finished.");
     else if (state.detail && state.detail.status === "cancelled") say("Stopped. What arrived before Stop is kept here.");
