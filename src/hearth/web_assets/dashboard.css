@@ -416,6 +416,10 @@ pre.turn-text { font-family: var(--mono); font-size: 12px; background: var(--sof
 .turn-live { color: var(--ember); }
 .turn-note { margin: 0; font-size: 12px; color: var(--muted); }
 .turn-note.failed { color: var(--failed); }
+.approval { border: 1px solid var(--attention); border-radius: 8px; padding: 10px 12px; margin: 6px 0; display: grid; gap: 6px; }
+.approval-title { margin: 0; font-size: 13px; font-weight: 600; }
+.approval-command { margin: 0; padding: 8px 10px; background: var(--hover); border-radius: 6px; font-size: 12px; white-space: pre-wrap; word-break: break-word; }
+.approval-actions { display: flex; gap: 8px; }
 .turn-meta code, .turn-live code { font-family: var(--mono); font-size: 11px; background: var(--soft); border-radius: 3px; padding: 1px 5px; color: var(--text); }
 .convo-log .pulse { width: 6px; height: 6px; }
 .titlebar .icon-button, .section-label .icon-button { width: 32px; height: 32px; border-radius: 5px; }

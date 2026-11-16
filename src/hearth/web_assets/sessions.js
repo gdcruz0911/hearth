@@ -337,18 +337,60 @@
     return { node, items, foot, turn, offset: 0, done: false, draft: null, tool: null, footKey: "", work: null, steps: 0, failed: 0 };
   }
 
+  // ADR-0045: a command Claude asked to run. A pending one waits for Allow once or Deny; the others say what was decided.
+  function approvalViews(turn) {
+    const said = { allowed: "You allowed", denied: "You declined", expired: "Nobody answered in time, so Hearth refused",
+      cancelled: "Never answered, because the reply ended:", refused: "Hearth refused without asking:" };
+    return (turn.approvals || []).map((entry) => {
+      if (entry.decision) {
+        const note = el("p", "turn-note", `${said[entry.decision] || entry.decision} `);
+        note.append(el("code", "", entry.command || entry.reason || entry.tool));
+        if (entry.command && entry.reason) note.append(` ${entry.reason}`);
+        return note;
+      }
+      const box = el("div", "approval");
+      box.append(el("p", "approval-title", `${agent(state.detail.provider)} asks to run a command`), el("pre", "approval-command", entry.command));
+      if (entry.description) box.append(el("p", "turn-note", entry.description));
+      box.append(el("p", "turn-note", `It runs in ${state.detail.worktree}, inside Claude Code's sandbox: no network, none of your `
+        + "sign-ins, and no writes outside this folder. Allowing covers this one command. Unanswered, it is refused after 10 minutes."));
+      const row = el("div", "approval-actions");
+      for (const [label, allow, style] of [["Allow once", true, "btn small primary"], ["Deny", false, "btn small"]]) {
+        const button = el("button", style, label);
+        button.type = "button";
+        button.addEventListener("click", () => answer(entry.request_id, allow, row));
+        row.append(button);
+      }
+      box.append(row);
+      return box;
+    });
+  }
+
+  async function answer(request, allow, row) {
+    const from = state.selected;
+    for (const button of row.children) button.disabled = true;
+    try {
+      await api(`sessions/${encodeURIComponent(from)}/answer`, { request, allow });
+      if (state.selected === from) $("convo-send-error").hidden = true;
+    } catch (failure) {
+      if (state.selected !== from) return; // Shown only with the conversation it is about.
+      $("convo-send-error").hidden = false;
+      $("convo-send-error").textContent = failure.message;
+    }
+    await tick();
+  }
+
   function footer(view) {
     const { turn } = view;
     // Whether anything arrived is part of the key: on reopening, the footer is drawn before the transcript is read.
     const key = JSON.stringify([turn.finished, turn.outcome, turn.model_used, turn.warnings, turn.error, Boolean(view.draft),
-      view.items.children.length > 0, turn.left_running, turn.left_in_folder, turn.cleanup_unchecked, turn.check, turn.denied]);
+      view.items.children.length > 0, turn.left_running, turn.left_in_folder, turn.cleanup_unchecked, turn.check, turn.denied, turn.approvals]);
     if (key === view.footKey) return;
     view.footKey = key;
     const parts = [];
     if (!turn.finished) {
       const line = el("p", "turn-live");
       line.append(el("span", "pulse"), el("span", "", view.items.children.length ? "Working…" : "Starting the agent…"));
-      parts.push(line);
+      parts.push(line, ...approvalViews(turn));
     } else {
       const line = el("p", "turn-meta");
       const took = window.Hearth.span(turn.started, turn.finished);
@@ -360,7 +402,8 @@
       }
       if (turn.outcome === "cancelled") {
         // Who stopped it comes only from the record; older records did not keep it, and it is never guessed.
-        const who = { keeper: "You stopped this reply.", quit: "Hearth stopped this reply when it quit." }[turn.stopped_by] || "Stop reason not recorded.";
+        const who = { keeper: "You stopped this reply.", quit: "Hearth stopped this reply when it quit.",
+          timeout: "Hearth stopped this reply because it ran too long." }[turn.stopped_by] || "Stop reason not recorded.";
         const kept = view.draft || view.items.children.length
           ? " Hearth keeps what arrived above; the agent's own session does not, so it will not remember this reply."
           : " No output had arrived.";
@@ -380,7 +423,8 @@
         parts.push(el("p", "turn-note failed", "Hearth stopped this reply when it quit or lost its backend. Nothing was resent; send again to continue."));
       }
       if (turn.outcome === "failed") parts.push(el("p", "turn-note failed", shown(turn.error)));
-      if ((turn.denied || []).length) {
+      parts.push(...approvalViews(turn));
+      if ((turn.denied || []).length && !(turn.approvals || []).length) {  // With approvals, each refusal is listed above, once.
         parts.push(el("p", "turn-note", `${agent(state.detail.provider)} asked to use ${turn.denied.join(", ")}. Hearth cannot approve that yet, so it was refused.`));
       }
       if (turn.check) parts.push(checkView(turn.check));

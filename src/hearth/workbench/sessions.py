@@ -42,16 +42,39 @@ SUMMARY_LINES = 20  # Lines of that check's output that open the keeper's next m
 # Tools that act beyond this Mac on their own (publish, notify, schedule, message) are off; probed on 2026-10-31, web tools and
 # MCP calls are refused without approval, and these were not probed because trying them would act.
 CONVERSATION = {"claude": ["claude", "{options}", "-p", "--output-format", "stream-json", "--verbose", "--permission-mode", "acceptEdits",
-                           "--allowedTools", "Bash({check} *)", "--disallowedTools",
+                           "--settings", "{settings}", "--allowedTools", "Bash({check} *)", "--disallowedTools",
                            "Artifact,ArtifactComments,ArtifactData,DesignSync,PushNotification,RemoteTrigger,CronCreate,CronDelete,ScheduleWakeup,SendMessage"]}
 AGENT_CONFIG = (".claude", ".mcp.json")  # What a full-setup turn loads from the worktree, so the agent must not change it.
+
+# ADR-0045: an approved command runs in Claude Code's sandbox, never as the keeper, and a turn fails rather than run without it.
+SANDBOX = {"enabled": True, "failIfUnavailable": True, "allowUnsandboxedCommands": False, "autoAllowBashIfSandboxed": False,
+           "credentials": {"files": [{"path": path, "mode": "deny"} for path in ("~/.ssh", "~/.aws", "~/.config/gh", "~/Library/Keychains")],
+                           "envVars": [{"name": name, "mode": "deny"} for name in ("GITHUB_TOKEN", "GH_TOKEN")]}}
+# ADR-0046: what Git keeps at the root of a repository's shared .git, or creates there only when needed (gitrepository-layout).
+GIT_ROOT_NAMES = ("index", "HEAD", "config", "config.worktree", "description", "hooks", "info", "branches", "remotes", "modules", "shallow",
+                  "packed-refs", "ORIG_HEAD", "FETCH_HEAD", "MERGE_HEAD", "MERGE_MSG", "MERGE_MODE", "AUTO_MERGE", "CHERRY_PICK_HEAD",
+                  "REVERT_HEAD", "BISECT_LOG", "BISECT_START", "BISECT_TERMS", "BISECT_EXPECTED_REV", "COMMIT_EDITMSG", "rebase-merge",
+                  "rebase-apply", "sequencer", "gc.pid", "gc.log")
+GIT_REF_AREAS = ("refs/tags", "refs/remotes", "refs/replace", "refs/notes", "refs/stash")
+EXPIRY_SECONDS = 600  # ADR-0045: a request nobody answers is refused after this long, and the turn goes on.
+INITIALIZE_SECONDS = 30
+WRITE_SECONDS = 5  # A reply Claude Code does not take within this long is recorded as not delivered, so Stop never waits on it.
+REFUSALS = {"keeper": "The keeper declined this command.", "expiry": "Nobody answered in time.", "policy": "Hearth does not allow this."}
+STOPPED = {"keeper": "stop", "quit": "quit", "timeout": "timeout"}  # A turn's `stopping` mark to who cancelled its pending requests.
+GUARD_LIMIT = 20_000  # Paths in the list; the hearth repository had about 600 on 2026-11-15. Not yet measured against a real turn.
 
 _active: dict[str, subprocess.Popen] = {}  # Session ID to the turn, or the check after it, this backend is running for it.
 _active_lock = threading.Lock()
 _quitting = False  # Set under _active_lock when the backend stops, so no check starts after stop_all has looked.
+_streams: dict[str, dict] = {}  # Session ID to its stream-json turn: the process, and each pending request's input and timer.
+_stdin_lock = threading.Lock()  # One writer to an agent's stdin at a time, and never a write after its close.
 _create_lock = threading.Lock()  # A retry arriving while the first request still runs must find the conversation it made.
 _catalog: dict[str, tuple[float, list[dict]]] = {}  # Codex's program path to when it was read and the models it listed.
 _catalog_lock = threading.Lock()
+
+
+class LaunchRefused(Exception):
+    """A turn Hearth will not start, by its named error."""
 
 
 class SessionError(Exception):
@@ -211,13 +234,13 @@ def send(session_id: str, message: str, send_id: str, draft_at: int | None = Non
         record = {"dir": run_dir, "role": KIND, "provider": settings["provider"], "model": settings["model"], "effort": settings["effort"],
                   "started": tasks._now(), "finished": None, "pid": None, "send_id": send_id, "message": message, "resumed": settings["cli_session"]}
         prompt, instructions = message, None
-        if settings["provider"] == "codex" and settings["mode"] == "edit":
+        if settings["mode"] == "edit":  # ADR-0046 for Claude, ADR-0047 for Codex: the project's check runs after the turn, on the host.
             project = tasks._projects().get(task["project"], {})
             last = task["runs"][-1] if task["runs"] else {}
             if last.get("role") == CHECK:  # Its result, once, ahead of the keeper's words (ADR-0046); `message` keeps theirs only.
                 prompt = _check_note(task_dir, last) + message
                 record["check_note"] = last["dir"]
-            if not settings["cli_session"] and project.get("check"):
+            if settings["provider"] == "codex" and not settings["cli_session"] and project.get("check"):
                 # A resumed Codex turn ignores new developer instructions (probe, 2026-10-23), so only the first turn gets them.
                 instructions = _instructions(project["check"], project.get("turn_check"))
                 settings["turn_check"] = project.get("turn_check")  # What Codex was told, for the commands note.
@@ -232,8 +255,9 @@ def send(session_id: str, message: str, send_id: str, draft_at: int | None = Non
         tasks._write(task_dir, task)
         try:
             process = _launch(task, task_dir, record, prompt, instructions)
-        except OSError as exc:
-            record.update(finished=tasks._now(), outcome="failed", error=f"The {settings['provider']} command could not start: {exc}")
+        except (OSError, LaunchRefused) as exc:
+            record.update(finished=tasks._now(), outcome="failed",
+                          error=str(exc) if isinstance(exc, LaunchRefused) else f"The {settings['provider']} command could not start: {exc}")
             task["status"] = "done"
             tasks._write(task_dir, task)
             return summary(task)
@@ -270,6 +294,7 @@ def stop(session_id: str, run: str) -> dict:
         if record.get("finished"):
             return summary(task)
         record["stopping"] = "keeper"
+        _cancel_requests(record, "stop")  # In the step that marks the stop, so no answer is sent once it has begun (ADR-0045).
         tasks._write(task_dir, task)
     with _active_lock:
         process = _active.get(session_id)
@@ -293,6 +318,7 @@ def stop_all() -> None:
             with tasks._task_lock(_dir(session_id)):
                 task = tasks._read(_dir(session_id))
                 task["runs"][-1]["stopping"] = "quit"
+                _cancel_requests(task["runs"][-1], "quit")
                 tasks._write(_dir(session_id), task)
         except (OSError, ValueError, KeyError, IndexError, SessionError):
             pass  # Its record is unreadable or gone; the process is still stopped.
@@ -414,23 +440,26 @@ def summary(task: dict, turns: bool = False) -> dict:
              "updated": (last or {}).get("finished") or (last or {}).get("started") or task["created"], "worktree": task["worktree"]}
     if turns:
         if found["provider"] == "claude":
-            check = (tasks._projects().get(task["project"], {}).get("check") or "true") if found["mode"] == "edit" else None
-            description = ("Your own Claude setup, inside this worktree: read-only commands, and shell commands starting with" if check
-                           else "Read and search files only. Shell commands are unavailable.")
+            check = tasks._projects().get(task["project"], {}).get("turn_check") if found["mode"] == "edit" else None
+            description = ("Your own Claude setup, inside this worktree. A shell command asks you first and runs in Claude Code's sandbox, "
+                           "except read-only ones." if found["mode"] == "edit" else "Read and search files only. Shell commands are unavailable.")
+            description += " Without asking:" if check else ""
         else:
             check = None
             sandbox = "workspace-write" if found["mode"] == "edit" else "read-only"
             description = f"Shell commands run within Codex's {sandbox} sandbox."
         found["commands"] = {"description": description, "check": check}
+        if found["mode"] == "edit":
+            found["commands"]["host_check"] = tasks._projects().get(task["project"], {}).get("check")
         if found["provider"] == "codex" and found["mode"] == "edit":
             # What Codex was told at its first turn, which later edits to projects.json do not reach (ADR-0047).
-            found["commands"].update(turn_check=task["session"].get("turn_check"),
-                                     host_check=tasks._projects().get(task["project"], {}).get("check"))
+            found["commands"]["turn_check"] = task["session"].get("turn_check")
         found["turns"] = []
         for run in task["runs"]:
             shown = {key: run.get(key) for key in ("dir", "message", "model", "effort", "started", "finished", "outcome", "exit_code",
                                                    "model_used", "sandbox_used", "warnings", "error", "session_id", "resumed", "stopped_by",
-                                                   "left_running", "left_in_folder", "cleanup_unchecked", "denied", "model_refused")}
+                                                   "left_running", "left_in_folder", "cleanup_unchecked", "denied", "model_refused", "approvals",
+                                                   "claude_code_version")}
             if run["role"] != CHECK:
                 found["turns"].append({**shown, "check": None})
             elif found["turns"]:
@@ -450,11 +479,24 @@ def _launch(task: dict, task_dir: Path, record: dict, message: str, instructions
     settings, project = task["session"], tasks._projects()[task["project"]]
     full = _full_setup(settings)
     template = CONVERSATION[settings["provider"]] if full else getattr(tasks, MODES[settings["mode"]])[settings["provider"]]
-    argv = tasks._argv(template, settings["provider"], message, project.get("check") or "true", settings["model"], settings["effort"],
-                       settings=tasks._claude_settings(Path(task["worktree"])))
+    if full:
+        if excluded := _excluded_commands(Path(task["worktree"])):
+            raise LaunchRefused(f"sandbox_excluded_commands: {excluded} sets sandbox.excludedCommands, and Claude Code runs an excluded "
+                                "command outside its sandbox without asking. Next: remove that setting, then send again.")
+        guard = _git_guard(task)
+        if len(guard) > GUARD_LIMIT:
+            raise LaunchRefused(f"git_guard_too_large: {len(guard)} paths in the repository's .git would need protecting, over the limit "
+                                f"of {GUARD_LIMIT}. Next: run git gc in the project's folder, then send again.")
+        claude_settings = json.dumps({"sandbox": {**SANDBOX, "filesystem": {"denyWrite": guard}}})
+        if not project.get("turn_check"):  # ADR-0046: only the check that works inside the sandbox runs without asking.
+            template = [part for part in template if part not in ("--allowedTools", "Bash({check} *)")]
+    else:
+        claude_settings = tasks._claude_settings(Path(task["worktree"]))
+    argv = tasks._argv(template, settings["provider"], message, (project.get("turn_check") if full else project.get("check")) or "true",
+                       settings["model"], settings["effort"], settings=claude_settings)
     if instructions:
         argv[argv.index("--json") + 1:argv.index("--json") + 1] = ["-c", f"developer_instructions={json.dumps(instructions)}"]  # A TOML string.
-    argv = _resumable(argv, settings["provider"], settings["cli_session"])
+    argv = _resumable(argv, settings["provider"], settings["cli_session"], asks=full)
     record["argv"] = argv  # It holds no message text, which goes on stdin.
     run_dir = task_dir / "runs" / record["dir"]
     events, errors = (run_dir / "events.jsonl").open("w", encoding="utf-8"), (run_dir / "stderr.txt").open("w", encoding="utf-8")
@@ -466,23 +508,225 @@ def _launch(task: dict, task_dir: Path, record: dict, message: str, instructions
     if settings["provider"] == "codex":
         env["CODEX_HOME"] = str(tasks._codex_home(task_dir))
     try:
-        process = subprocess.Popen(argv, cwd=task["worktree"], stdin=subprocess.PIPE, stdout=events, stderr=errors, text=True,
-                                   start_new_session=True, env=env)
+        process = subprocess.Popen(argv, cwd=task["worktree"], stdin=subprocess.PIPE, stdout=subprocess.PIPE if full else events,
+                                   stderr=errors, text=True, encoding="utf-8", errors="replace", start_new_session=True, env=env)
     finally:
         events.close()
         errors.close()
-    process.stdin.write(message)
-    process.stdin.close()
+    if not full:
+        process.stdin.write(message)
+        process.stdin.close()
+        return process
+    # ADR-0045: the turn's stdin stays open for answers to its command requests, and its stdout is read here, line by line.
+    os.set_blocking(process.stdin.fileno(), False)
+    stream = {"process": process, "pending": {}, "timers": {}, "init": f"hearth-{os.urandom(4).hex()}"}
+    with _active_lock:
+        _streams[task["id"]] = stream
+    stream["reader"] = threading.Thread(target=_read_stream, args=(task_dir, task["id"], run_dir / "events.jsonl", stream), daemon=True)
+    stream["reader"].start()
+
+    def begin() -> None:  # Its own thread: a long message waits for Claude Code to start reading, and send() does not wait with it.
+        opening = ({"type": "control_request", "request_id": stream["init"], "request": {"subtype": "initialize", "hooks": None}},
+                   {"type": "user", "message": {"role": "user", "content": message}, "parent_tool_use_id": None})
+        if not all(_tell(process, line, INITIALIZE_SECONDS) for line in opening) and process.poll() is None:
+            _protocol_changed(task_dir, record["dir"], process, "Claude Code did not take the message")
+    threading.Thread(target=begin, daemon=True).start()
     return process
 
 
-def _resumable(argv: list[str], provider: str, cli_session: str | None) -> list[str]:
+def _tell(process: subprocess.Popen, message: dict, seconds: float = WRITE_SECONDS) -> bool:
+    """Write one line to a stream-json turn's stdin, without waiting long on an agent that has stopped reading; False if it did
+    not all go, after which the stream cannot be trusted and the caller stops the turn."""
+    data, end = (json.dumps(message) + "\n").encode(), time.monotonic() + seconds
+    with _stdin_lock:
+        try:
+            while data:
+                try:
+                    data = data[os.write(process.stdin.fileno(), data):]
+                except BlockingIOError:
+                    if time.monotonic() > end:
+                        return False
+                    time.sleep(0.02)
+        except (OSError, ValueError):  # The agent has exited, or its stdin is closed.
+            return False
+    return True
+
+
+def _read_stream(task_dir: Path, session_id: str, events_path: Path, stream: dict) -> None:
+    """Copy the turn's stdout to its events file as it arrives, unchanged, and act on what Claude Code asks its host."""
+    process, ready, run = stream["process"], threading.Event(), events_path.parent.name
+    watchdog = stream["watchdog"] = threading.Timer(
+        INITIALIZE_SECONDS, lambda: ready.is_set() or _protocol_changed(task_dir, run, process, "Claude Code did not answer initialize"))
+    watchdog.daemon = True
+    watchdog.start()
+    try:
+        with events_path.open("a", encoding="utf-8") as events:
+            for line in process.stdout:
+                events.write(line)
+                events.flush()
+                try:
+                    event = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(event, dict):
+                    continue
+                if event.get("type") == "control_response":
+                    reply = event.get("response") if isinstance(event.get("response"), dict) else {}
+                    if reply.get("request_id") == stream["init"]:
+                        ready.set()
+                        if reply.get("subtype") != "success":
+                            _protocol_changed(task_dir, run, process, "Claude Code refused initialize")
+                elif event.get("type") == "control_request":
+                    # Not on this thread: it waits for the conversation's lock, and Claude Code's output must keep being read meanwhile.
+                    threading.Thread(target=_asked, args=(task_dir, session_id, run, stream, event), daemon=True).start()
+                elif event.get("type") == "result":
+                    with _stdin_lock:  # The turn is over: with its input ended, the process exits.
+                        process.stdin.close()
+    except (OSError, ValueError):
+        pass  # The pipe or the events file went away; the turn's watcher settles it from its exit.
+    finally:
+        watchdog.cancel()
+        process.stdout.close()
+
+
+def _asked(task_dir: Path, session_id: str, run: str, stream: dict, event: dict) -> None:
+    """One control request from Claude Code: a Bash command waits for the keeper, anything else is refused and recorded (ADR-0045)."""
+    request = event.get("request") if isinstance(event.get("request"), dict) else {}
+    request_id, tool, asked = event.get("request_id"), request.get("tool_name"), request.get("input")
+    if request.get("subtype") != "can_use_tool":
+        return _protocol_changed(task_dir, run, stream["process"], f"Claude Code sent an unknown control request, {str(request.get('subtype'))[:40]}")
+    if not (isinstance(request_id, str) and request_id and isinstance(tool, str) and isinstance(asked, dict)):
+        return _protocol_changed(task_dir, run, stream["process"], "Claude Code sent a command request without its ID, tool or input")
+    entry = {"request_id": request_id, "tool_use_id": request.get("tool_use_id"), "tool": tool,
+             "command": asked.get("command") if tool == "Bash" else None, "description": asked.get("description") or request.get("description"),
+             "asked": tasks._now(), "decision": None, "by": None, "reason": None, "decided": None}
+    if tool == "SandboxNetworkAccess":
+        refusal = f"a network host, {str(asked.get('host'))[:120]}"
+    elif tool != "Bash" or not isinstance(entry["command"], str):
+        path = request.get("blocked_path") or asked.get("file_path")
+        refusal = f"{tool} on {str(path)[:200]}" if path else f"a tool other than Bash, {tool[:80]}"
+    else:
+        refusal = None
+    with tasks._task_lock(task_dir):
+        task = tasks._read(task_dir)
+        record = next((item for item in task["runs"] if item["dir"] == run), None)
+        if record is None:
+            return
+        if record.get("finished") or record.get("stopping") or record.get("protocol_error"):
+            entry.update(decision="cancelled", by=STOPPED.get(record.get("stopping"), "crash"), decided=tasks._now())  # Never answered.
+        elif refusal:
+            entry.update(decision="refused", by="policy", reason=refusal, decided=tasks._now())
+            _tell(stream["process"], _reply(request_id, False, None, "policy"))
+        else:
+            stream["pending"][request_id] = asked
+            timer = stream["timers"][request_id] = threading.Timer(EXPIRY_SECONDS, _expire, args=(session_id, request_id))
+            timer.daemon = True
+            timer.start()
+        record.setdefault("approvals", []).append(entry)
+        tasks._write(task_dir, task)
+
+
+def _reply(request_id: str, allow: bool, asked: dict | None, by: str) -> dict:
+    # Allow returns the input as it came: Hearth never edits a command, adds a permission rule, or echoes Claude's suggestions.
+    body = {"behavior": "allow", "updatedInput": asked} if allow else {"behavior": "deny", "message": REFUSALS[by]}
+    return {"type": "control_response", "response": {"subtype": "success", "request_id": request_id, "response": body}}
+
+
+def answer(session_id: str, request_id: str, allow: bool) -> dict:
+    """The keeper's Allow once or Deny for one pending command; the same answer, repeated, returns what was recorded."""
+    return _decide(session_id, request_id, allow, "keeper")
+
+
+def _expire(session_id: str, request_id: str) -> None:
+    try:
+        _decide(session_id, request_id, False, "expiry")
+    except (SessionError, OSError, ValueError, KeyError, IndexError):
+        pass  # Answered, cancelled, or its conversation is gone.
+
+
+def _decide(session_id: str, request_id: str, allow: bool, by: str) -> dict:
+    """Record a decision and send it to Claude Code in one locked step, only while the request can still be answered (ADR-0045)."""
+    task_dir = _dir(session_id)
+    with tasks._task_lock(task_dir):
+        task = tasks._read(task_dir)
+        entry = next((item for run in task["runs"] for item in run.get("approvals") or [] if item.get("request_id") == request_id), None)
+        if entry is None or not request_id:
+            raise SessionError("That request is not in this conversation.", 404)
+        if entry["decision"]:
+            return summary(task, turns=True)
+        record = task["runs"][-1]
+        with _active_lock:
+            stream = _streams.get(session_id)
+        if (entry not in (record.get("approvals") or []) or record.get("finished") or record.get("stopping") or record.get("protocol_error")
+                or stream is None or request_id not in stream["pending"]):
+            raise SessionError("This request can no longer be answered: its turn has ended or is stopping.", 409)
+        asked = stream["pending"].pop(request_id)
+        stream["timers"].pop(request_id).cancel()
+        entry.update(decision="allowed" if allow else "expired" if by == "expiry" else "denied", by=by, decided=tasks._now())
+        tasks._write(task_dir, task)  # Recorded first: an answer that cannot be delivered stays on the record, with that note.
+        delivered = _tell(stream["process"], _reply(request_id, allow, asked, by))
+        if not delivered:
+            entry["reason"] = "The answer could not be delivered: the agent was no longer reading."
+            tasks._write(task_dir, task)
+        found = summary(task, turns=True)
+    if not delivered and stream["process"].poll() is None:  # Part of the answer may have gone, so nothing after it can be trusted.
+        _protocol_changed(task_dir, record["dir"], stream["process"], "Claude Code stopped reading Hearth's answers")
+    return found
+
+
+def _cancel_requests(record: dict, by: str) -> None:
+    for entry in record.get("approvals") or []:
+        if not entry.get("decision"):
+            entry.update(decision="cancelled", by=by, decided=tasks._now())
+
+
+def _protocol_changed(task_dir: Path, run: str, process: subprocess.Popen, why: str) -> None:
+    """ADR-0045: Claude Code did not speak the protocol Hearth knows, so the turn stops and says so; it never runs without approvals.
+    `run` is the turn it happened in: a late call, after that turn ended, must not touch the conversation's next one."""
+    refused = []
+    try:
+        with tasks._task_lock(task_dir):
+            task = tasks._read(task_dir)
+            record = task["runs"][-1]
+            if record["dir"] != run or record.get("finished") or record.get("protocol_error"):
+                return
+            record["protocol_error"] = why  # From here no answer is accepted, so the refusals can be sent after the lock.
+            for entry in record.get("approvals") or []:
+                if not entry.get("decision"):
+                    entry.update(decision="refused", by="policy", reason="claude_protocol_changed", decided=tasks._now())
+                    refused.append(entry["request_id"])
+            tasks._write(task_dir, task)
+    except (OSError, ValueError, KeyError, IndexError):
+        pass  # Its record is unreadable or gone; the turn is still stopped.
+    for request_id in refused:
+        _tell(process, _reply(request_id, False, None, "policy"))
+    _stop_turn(task_dir, process)
+
+
+def _excluded_commands(worktree: Path) -> str | None:
+    """The first settings file Claude Code will load that names sandbox.excludedCommands; on 2026-10-20 such a command ran outside the
+    sandbox with no request, and Claude Code adds lists from every settings file together, so Hearth's own settings cannot empty it."""
+    for path in (Path.home() / ".claude/settings.json", Path.home() / ".claude/settings.local.json",
+                 worktree / ".claude/settings.json", worktree / ".claude/settings.local.json"):
+        try:
+            found = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue  # Absent, or one Claude Code ignores too.
+        sandbox = found.get("sandbox") if isinstance(found, dict) else None
+        if isinstance(sandbox, dict) and sandbox.get("excludedCommands"):
+            return str(path)
+    return None
+
+
+def _resumable(argv: list[str], provider: str, cli_session: str | None, asks: bool = False) -> list[str]:
     """The table's invocation, made to stream partial text and to continue the CLI's own session after the first turn."""
     argv = list(argv)
     if provider == "claude":
         argv.insert(argv.index("--verbose") + 1, "--include-partial-messages")  # Text as it arrives, kept if the turn is stopped.
         if cli_session:
             argv[1:1] = ["--resume", cli_session]
+        if asks:  # ADR-0045: permission prompts come to Hearth as control requests; without the second flag they are refused unseen.
+            argv += ["--input-format", "stream-json", "--permission-prompt-tool", "stdio"]
     elif provider == "codex" and cli_session:
         # `codex exec resume` has no --sandbox flag; the same mode goes through -c, which held on 2026-10-13's real runs.
         index = argv.index("--sandbox")
@@ -495,11 +739,31 @@ def _wait(task_dir: Path, session_id: str, process: subprocess.Popen) -> None:
     try:
         process.wait(timeout=TIMEOUT_SECONDS)
     except subprocess.TimeoutExpired:
+        try:
+            with tasks._task_lock(task_dir):  # Marked before stopping, as Stop is, so no answer is sent to a turn that timed out.
+                task = tasks._read(task_dir)
+                task["runs"][-1]["stopping"] = "timeout"
+                _cancel_requests(task["runs"][-1], "timeout")
+                tasks._write(task_dir, task)
+        except (OSError, ValueError, KeyError, IndexError):
+            pass  # Its record is unreadable or gone; the process is still stopped.
         _stop_turn(task_dir, process)
         process.wait()
     with _active_lock:
         if _active.get(session_id) is process:
             del _active[session_id]
+        stream = _streams.get(session_id)
+        if stream is not None and stream["process"] is process:
+            del _streams[session_id]
+        else:
+            stream = None
+    if stream is not None:
+        for timer in (*stream["timers"].values(), *([stream["watchdog"]] if "watchdog" in stream else [])):
+            timer.cancel()
+        # So the last events are on disk before the turn is recorded; bounded, since a command the agent left running may hold the pipe.
+        stream["reader"].join(timeout=5)
+        with _stdin_lock:
+            process.stdin.close()
     _settle(task_dir, process.returncode)
 
 
@@ -544,7 +808,10 @@ def _settle(task_dir: Path, exit_code: int | None = None) -> None:
         text = (run_dir / "events.jsonl").read_text(encoding="utf-8", errors="replace") if (run_dir / "events.jsonl").exists() else ""
         parsed = tasks.parse_events(record["provider"], text)
         errors = (run_dir / "stderr.txt").read_text(encoding="utf-8", errors="replace") if (run_dir / "stderr.txt").exists() else ""
-        if record.get("stopping"):
+        _cancel_requests(record, STOPPED.get(record.get("stopping"), "crash"))  # Whatever was still waiting was never answered.
+        if record.get("protocol_error"):
+            outcome = "failed"
+        elif record.get("stopping"):
             outcome = "cancelled"  # CLI-5's word for work the keeper stopped, or quitting did.
         elif not owned:
             outcome = "interrupted"
@@ -554,7 +821,12 @@ def _settle(task_dir: Path, exit_code: int | None = None) -> None:
             outcome = "done"
         record.update(finished=tasks._now(), exit_code=exit_code, outcome=outcome, session_id=parsed["session_id"],
                       warnings=sorted(set(WARNINGS.findall(errors))) or None, stopped_by=record.pop("stopping", None))
-        if outcome == "failed":
+        version = re.search(r'"claude_code_version":\s*"([^"]{1,40})"', text)
+        if version:
+            record["claude_code_version"] = version.group(1)
+        if record.get("protocol_error"):
+            record["error"] = f"claude_protocol_changed: {record['protocol_error']}. Next: update Hearth, or start a read-only conversation."
+        elif outcome == "failed":
             record["error"] = parsed["error"] or (errors.strip().splitlines() or [f"Exit code {exit_code}"])[-1][:500]
             record["model_refused"] = "model_not_found" in text or "unrecognized_model" in errors  # Each CLI's word, seen on 2026-11-06.
         if record["provider"] == "codex":
@@ -659,6 +931,25 @@ def _config_changed(task: dict) -> str | None:
     except (OSError, subprocess.SubprocessError, ValueError):
         return " or ".join(AGENT_CONFIG)
     return next((name for name in sorted(base.keys() | disk.keys()) if base.get(name) != disk.get(name)), None)
+
+
+def _git_guard(task: dict) -> list[str]:
+    """ADR-0046: the paths in the repository's shared .git that an approved command must not write, named one by one because
+    the sandbox cannot allow a path back inside a denied folder: everything that exists when the turn starts except this
+    conversation's own branch and worktree folder. New loose objects and new ref names stay writable."""
+    def where(flag: str) -> Path:
+        return Path(_git(task, "rev-parse", "--path-format=absolute", flag, check=True).stdout.decode().strip()).resolve()
+    shared, own = where("--git-common-dir"), where("--git-dir")
+    deny = {shared / name for name in GIT_ROOT_NAMES} | {shared / "objects/pack", shared / "objects/info", shared / "logs/HEAD"}
+    deny |= {path for path in shared.iterdir() if path.name not in ("objects", "refs", "logs", "worktrees")}
+    deny |= {shared / f"{path.relative_to(shared)}.lock" for path in set(deny)}
+    deny |= {path for folder in (shared / "objects").iterdir() if len(folder.name) == 2 and folder.is_dir() for path in folder.iterdir()}
+    refs = _git(task, "for-each-ref", "--format=%(refname)", "refs/heads", check=True).stdout.decode().split()
+    for ref in (*(ref for ref in refs if ref != f"refs/heads/{task['branch']}"), *GIT_REF_AREAS):
+        deny |= {shared / ref, shared / f"{ref}.lock", shared / "logs" / ref, shared / "logs" / f"{ref}.lock"}
+    if (shared / "worktrees").is_dir():
+        deny |= {path for path in (shared / "worktrees").iterdir() if path != own}
+    return sorted(map(str, deny))
 
 
 def _denied(text: str) -> list[str] | None:

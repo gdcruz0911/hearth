@@ -35,7 +35,15 @@ if codex and sys.argv[1:3] == ["debug", "models"]:  # The catalog, read outside 
         {"slug": "gpt-small", "visibility": "list", "supported_reasoning_levels": [{"effort": "low"}, {"effort": "medium"}]},
         {"slug": "gpt-hidden", "visibility": "hide", "supported_reasoning_levels": [{"effort": "low"}]}]})))
     sys.exit(int(os.environ.get("FAKE_CATALOG_EXIT", "0")))
-prompt = sys.stdin.read()
+stream = "--input-format" in sys.argv  # ADR-0045: Claude's edit turns keep stdin open and speak the SDK's protocol.
+if stream:
+    first = json.loads(sys.stdin.readline())
+    if os.environ.get("FAKE_INIT") != "silent":
+        print(json.dumps({"type": "control_response", "response": {"subtype": os.environ.get("FAKE_INIT", "success"),
+                                                                   "request_id": first["request_id"], "response": {}}}), flush=True)
+    prompt = json.loads(sys.stdin.readline())["message"]["content"]
+else:
+    prompt = sys.stdin.read()
 scenario = os.environ.get("FAKE_SESSION", "reply")
 with open(Path.home() / ".fake-session-calls.jsonl", "a") as log:
     log.write(json.dumps({"argv": sys.argv[1:], "cwd": os.getcwd(), "prompt": prompt, "codex_home": os.environ.get("CODEX_HOME"),
@@ -106,9 +114,27 @@ else:
     emit({"type": "stream_event", "event": {"type": "content_block_delta", "delta": {"type": "text_delta", "text": "Hel"}}, "session_id": session})
     if scenario in ("hang", "detach", "detach-wait", "term-spawn", "term-spawn-unmarked", "group-ignore", "chain", "edit-hang"):
         time.sleep(60)
+    # FAKE_ASK: the requests it makes of its host, in order; an allowed one leaves ran-<n> holding the input it was given back.
+    for number, ask in enumerate(json.loads(os.environ.get("FAKE_ASK", "[]")), 1):
+        emit({"type": "control_request", **({} if ask.get("no_id") else {"request_id": f"req-{number}"}),
+              "request": {"subtype": ask.get("subtype", "can_use_tool"), "tool_name": ask.get("tool", "Bash"), "tool_use_id": f"toolu-{number}",
+                          "input": ask.get("input", {"command": f"echo  {number}", "description": "Say a number"}),
+                          "permission_suggestions": [{"type": "addRules", "behavior": "allow"}], **ask.get("extra", {})}})
+        if ask.get("nowait"):
+            continue
+        line = sys.stdin.readline()
+        if not line:
+            sys.exit(0)  # Its input ended while it waited: the prompt is cancelled.
+        with open(Path.home() / ".fake-answers.jsonl", "a") as log:
+            log.write(line)
+        reply = json.loads(line)["response"]["response"]
+        if reply["behavior"] == "allow":
+            Path(f"ran-{number}").write_text(json.dumps(reply["updatedInput"]))
     emit({"type": "stream_event", "event": {"type": "content_block_delta", "delta": {"type": "text_delta", "text": "lo"}}, "session_id": session})
     emit({"type": "assistant", "message": {"content": [{"type": "text", "text": "Hello"}]}, "session_id": session})
     emit({"type": "result", "result": "Hello", "is_error": False, "session_id": session})
+    if stream:
+        sys.stdin.read()  # As Claude Code does: it exits once its input ends.
 '''
 
 
@@ -198,20 +224,21 @@ class SessionTests(SessionTestCase):
         for provider, mode in (("claude", "edit"), ("claude", "read"), ("codex", "edit"), ("codex", "read")):
             with self.subTest(provider=provider, mode=mode):
                 commands = sessions.detail(self.new(provider, mode))["commands"]
-                self.assertEqual(commands["check"], check if (provider, mode) == ("claude", "edit") else None)
+                self.assertIsNone(commands["check"])  # ADR-0046: with no turn_check, nothing runs without asking.
+                self.assertEqual(commands.get("host_check"), check if mode == "edit" else None)
                 if provider == "codex":
                     self.assertIn("workspace-write" if mode == "edit" else "read-only", commands["description"])
                 elif mode == "read":
                     self.assertIn("Shell commands are unavailable", commands["description"])
         self.assertEqual(self.calls(), [])
 
-    def test_command_guidance_uses_the_same_fallback_check_as_launch(self) -> None:
+    def test_command_guidance_and_launch_allow_no_command_unasked_without_a_turn_check(self) -> None:
         self.write_projects(check="")
         session_id = self.new()
-        self.assertEqual(sessions.detail(session_id)["commands"]["check"], "true")
+        self.assertIsNone(sessions.detail(session_id)["commands"]["check"])
         sessions.send(session_id, "Say hello", "send-0001")
         self.settled(session_id)
-        self.assertIn("Bash(true *)", self.calls()[0]["argv"])
+        self.assertNotIn("--allowedTools", self.calls()[0]["argv"])
 
     def test_the_list_works_before_any_project_is_added(self) -> None:
         (self.home / ".hearth/projects.json").unlink()
@@ -839,10 +866,10 @@ class FullSetupTests(SessionTestCase):
         self.settled(session_id)
 
         first, second = self.calls()
-        for flag in ("--setting-sources", "--strict-mcp-config", "--tools", "--settings"):
+        for flag in ("--setting-sources", "--strict-mcp-config", "--tools"):
             self.assertNotIn(flag, first["argv"])
         self.assertEqual(first["argv"][first["argv"].index("--permission-mode") + 1], "acceptEdits")
-        self.assertIn("Bash(true *)", first["argv"])
+        self.assertNotIn("--allowedTools", first["argv"])  # ADR-0046: other commands ask the keeper (ApprovalTests).
         self.assertIn("PushNotification", first["argv"][first["argv"].index("--disallowedTools") + 1].split(","))
         self.assertIsNone(first["no_memory"])
         self.assertEqual(second["argv"][:2], ["--resume", "claude-session-1"])
@@ -1175,7 +1202,7 @@ class HostCheckTests(SessionTestCase):
         self.assertEqual(third["prompt"], "Again")  # Delivered once.
         self.assertEqual([turn["check"] for turn in sessions.detail(session_id)["turns"][1:]], [None, None])  # Nothing changed.
 
-    def test_no_check_after_a_stopped_turn_or_a_claude_turn(self) -> None:
+    def test_no_check_after_a_stopped_turn_and_claude_gets_no_developer_instructions(self) -> None:
         self.project("echo check-ran")
         os.environ["FAKE_SESSION"] = "edit-hang"
         codex = self.new("codex")
@@ -1194,8 +1221,7 @@ class HostCheckTests(SessionTestCase):
         self.settled(claude)
         time.sleep(0.5)
 
-        for session_id in (codex, claude):
-            self.assertEqual([run["role"] for run in tasks._read(self.home / ".hearth/tasks" / session_id)["runs"]], ["session"])
+        self.assertEqual([run["role"] for run in tasks._read(self.home / ".hearth/tasks" / codex)["runs"]], ["session"])
         self.assertFalse(any(part.startswith("developer_instructions=") for part in self.calls()[1]["argv"]))
         self.assertEqual(self.calls()[1]["prompt"], "Change it")
 
@@ -1494,3 +1520,241 @@ class SessionChoiceTests(SessionTestCase):
                 self.assertEqual(turn["outcome"], "done")
                 self.assertFalse(turn["model_refused"])
                 self.assertIn(resume, self.calls()[-1]["argv"])
+
+
+class GitGuardTests(SessionTestCase):
+    """ADR-0046: the paths in the shared .git that an approved command may not write."""
+
+    def test_it_names_existing_history_and_other_work_and_leaves_the_conversations_own_branch(self) -> None:
+        git(self.repo, "branch", "other")
+        session_id, other = self.new(), self.new("codex")
+        dot = (self.repo / ".git").resolve()
+        loose = next(path for folder in (dot / "objects").iterdir() if len(folder.name) == 2 for path in folder.iterdir())
+
+        deny = set(sessions._git_guard(tasks._read(self.home / ".hearth/tasks" / session_id)))
+
+        for name in ("index", "index.lock", "HEAD", "config", "hooks", "info", "MERGE_HEAD", "packed-refs", "packed-refs.lock",
+                     "objects/pack", "objects/info", "refs/heads/other", "refs/heads/other.lock", "logs/refs/heads/other", "refs/tags",
+                     "refs/remotes", "refs/replace", "refs/notes", "refs/stash", "logs/refs/stash", "logs/HEAD",
+                     f"refs/heads/hearth/{other}", f"worktrees/{other}"):
+            self.assertIn(str(dot / name), deny)
+        self.assertIn(str(loose), deny)
+        for name in ("objects", "refs", "logs", "worktrees", "refs/heads", f"refs/heads/hearth/{session_id}",
+                     f"logs/refs/heads/hearth/{session_id}", f"worktrees/{session_id}"):
+            self.assertNotIn(str(dot / name), deny)
+
+
+class ApprovalTests(SessionTestCase):
+    """ADR-0045 and ADR-0046: a Claude conversation that edits asks the keeper before a command, and runs it in the sandbox."""
+
+    def ask(self, *requests: dict) -> str:
+        os.environ["FAKE_ASK"] = json.dumps(list(requests) or [{}])
+        self.addCleanup(os.environ.pop, "FAKE_ASK", None)
+        session_id = self.new()
+        sessions.send(session_id, "Run it", "send-0001")
+        return session_id
+
+    def approvals(self, session_id: str, pending: int | None = None) -> list[dict]:
+        for _ in range(200):
+            found = tasks._read(self.home / ".hearth/tasks" / session_id)["runs"][0].get("approvals") or []
+            if pending is None or sum(not entry["decision"] for entry in found) == pending and found:
+                return found
+            time.sleep(0.05)
+        self.fail("The request did not arrive.")
+
+    def answers(self) -> list[dict]:
+        path = self.home / ".fake-answers.jsonl"
+        return [json.loads(line)["response"] for line in path.read_text(encoding="utf-8").splitlines()] if path.exists() else []
+
+    def test_only_an_editing_claude_turn_asks_and_it_runs_sandboxed_without_the_host_check_allowed(self) -> None:
+        self.write_projects(check="echo full", providers=("claude", "codex"))
+        for provider, mode in (("claude", "edit"), ("claude", "read"), ("codex", "edit")):
+            session_id = self.new(provider, mode)
+            sessions.send(session_id, "Hello", f"send-{provider}-{mode}")
+            self.settled(session_id)
+        edit, read, codex = (call["argv"] for call in self.calls())
+
+        self.assertEqual(edit[-4:], ["--input-format", "stream-json", "--permission-prompt-tool", "stdio"])
+        settings = json.loads(edit[edit.index("--settings") + 1])["sandbox"]
+        self.assertEqual((settings["enabled"], settings["failIfUnavailable"], settings["allowUnsandboxedCommands"], settings["autoAllowBashIfSandboxed"]),
+                         (True, True, False, False))
+        self.assertIn(str((self.repo / ".git").resolve() / "HEAD"), settings["filesystem"]["denyWrite"])
+        self.assertNotIn("--allowedTools", edit)  # ADR-0046: the project's check is never run by the agent unasked.
+        self.assertFalse(any("echo full" in part for part in edit))
+        for argv in (read, codex):
+            self.assertFalse({"--input-format", "--permission-prompt-tool"} & set(argv))
+        self.assertNotIn("--input-format", PROVIDERS["claude"] + REVIEWERS["claude"])  # Tasks keep their tables.
+
+    def test_a_turn_check_is_the_only_command_allowed_without_asking(self) -> None:
+        config = {"path": str(self.repo), "check": "echo full", "turn_check": "echo quick", "providers": ["claude"]}
+        (self.home / ".hearth/projects.json").write_text(json.dumps({"demo": config}), encoding="utf-8")
+        session_id = self.new()
+        sessions.send(session_id, "Hello", "send-0001")
+        self.settled(session_id)
+        argv = self.calls()[0]["argv"]
+
+        self.assertEqual(argv[argv.index("--allowedTools") + 1], "Bash(echo quick *)")
+        self.assertEqual(sessions.detail(session_id)["commands"]["check"], "echo quick")
+
+    def test_allow_once_returns_the_command_unchanged_and_a_repeat_sends_nothing_more(self) -> None:
+        session_id = self.ask()
+        entry = self.approvals(session_id, pending=1)[0]
+        self.assertEqual((entry["tool"], entry["command"], entry["description"], entry["tool_use_id"]), ("Bash", "echo  1", "Say a number", "toolu-1"))
+        self.assertEqual(sessions.detail(session_id)["turns"][0]["approvals"][0]["decision"], None)
+
+        sessions.answer(session_id, "req-1", True)
+        again = sessions.answer(session_id, "req-1", False)  # A repeat, even a different one, returns what was recorded.
+        detail = self.settled(session_id)
+
+        self.assertEqual((again["turns"][0]["approvals"][0]["decision"], detail["turns"][0]["outcome"]), ("allowed", "done"))
+        entry = self.approvals(session_id)[0]
+        self.assertEqual((entry["decision"], entry["by"], entry["reason"]), ("allowed", "keeper", None))
+        self.assertEqual(self.answers(), [{"subtype": "success", "request_id": "req-1", "response": {
+            "behavior": "allow", "updatedInput": {"command": "echo  1", "description": "Say a number"}}}])
+        events = (self.home / ".hearth/tasks" / session_id / "runs/01-session-claude/events.jsonl").read_text(encoding="utf-8")
+        self.assertIn('"request_id": "req-1"', events)  # Kept as it arrived, with the rest of the turn.
+        self.assertIn('"type": "result"', events)
+
+    def test_deny_tells_claude_and_the_turn_goes_on(self) -> None:
+        session_id = self.ask()
+        self.approvals(session_id, pending=1)
+        sessions.answer(session_id, "req-1", False)
+        detail = self.settled(session_id)
+
+        self.assertEqual(self.answers()[0]["response"], {"behavior": "deny", "message": "The keeper declined this command."})
+        self.assertEqual((detail["turns"][0]["approvals"][0]["decision"], detail["turns"][0]["outcome"]), ("denied", "done"))
+        self.assertFalse((Path(detail["worktree"]) / "ran-1").exists())
+
+    def test_anything_but_a_bash_command_is_refused_without_asking_the_keeper(self) -> None:
+        session_id = self.ask({"tool": "Read", "input": {"file_path": "/etc/hosts"}, "extra": {"blocked_path": "/etc/hosts"}},
+                              {"tool": "SandboxNetworkAccess", "input": {"host": "example.com"}}, {"tool": "mcp__mail__send", "input": {}},
+                              {"input": {"command": None}})
+        detail = self.settled(session_id)
+
+        found = detail["turns"][0]["approvals"]
+        self.assertEqual([(entry["decision"], entry["by"]) for entry in found], [("refused", "policy")] * 4)
+        self.assertEqual([entry["reason"] for entry in found[:3]],
+                         ["Read on /etc/hosts", "a network host, example.com", "a tool other than Bash, mcp__mail__send"])
+        self.assertEqual({answer["response"]["behavior"] for answer in self.answers()}, {"deny"})
+
+    def test_an_unanswered_request_expires_and_the_turn_goes_on(self) -> None:
+        with mock.patch.object(sessions, "EXPIRY_SECONDS", 0.2):
+            session_id = self.ask()
+            detail = self.settled(session_id)
+
+        entry = detail["turns"][0]["approvals"][0]
+        self.assertEqual((entry["decision"], entry["by"], detail["turns"][0]["outcome"]), ("expired", "expiry", "done"))
+        self.assertEqual(self.answers()[0]["response"]["message"], "Nobody answered in time.")
+
+    def test_stop_cancels_a_pending_request_and_no_answer_is_ever_sent(self) -> None:
+        session_id = self.ask()
+        self.approvals(session_id, pending=1)
+        sessions.stop(session_id, "01-session-claude")
+        detail = sessions.detail(session_id)
+
+        entry = detail["turns"][0]["approvals"][0]
+        self.assertEqual((entry["decision"], entry["by"], detail["turns"][0]["outcome"]), ("cancelled", "stop", "cancelled"))
+        self.assertEqual(sessions.answer(session_id, "req-1", True)["turns"][0]["approvals"][0]["decision"], "cancelled")
+        self.assertEqual(self.answers(), [])
+
+    def test_an_answer_is_refused_once_the_stop_has_begun_or_by_a_backend_that_does_not_hold_the_turn(self) -> None:
+        session_id = self.ask()
+        self.approvals(session_id, pending=1)
+        task_dir = self.home / ".hearth/tasks" / session_id
+        with mock.patch.dict(sessions._streams, clear=True), self.assertRaises(sessions.SessionError) as other_backend:
+            sessions.answer(session_id, "req-1", True)
+        task = tasks._read(task_dir)
+        task["runs"][0]["stopping"] = "keeper"  # As Stop marks it, before it stops anything.
+        tasks._write(task_dir, task)
+        with self.assertRaises(sessions.SessionError) as stopping:
+            sessions.answer(session_id, "req-1", True)
+        with self.assertRaises(sessions.SessionError) as unknown:
+            sessions.answer(session_id, "req-9", True)
+
+        self.assertEqual((other_backend.exception.status, stopping.exception.status, unknown.exception.status), (409, 409, 404))
+        self.assertEqual(self.answers(), [])
+
+    def test_quitting_and_the_timeout_cancel_a_pending_request(self) -> None:
+        session_id = self.ask()
+        self.approvals(session_id, pending=1)
+        sessions.stop_all()
+        self.assertEqual([(entry["decision"], entry["by"]) for entry in self.approvals(session_id)], [("cancelled", "quit")])
+
+        with mock.patch.object(sessions, "_quitting", False), mock.patch.object(sessions, "TIMEOUT_SECONDS", 0.5):
+            timed = self.ask()
+            turn = self.settled(timed)["turns"][0]
+        self.assertEqual((turn["approvals"][0]["decision"], turn["approvals"][0]["by"], turn["stopped_by"]), ("cancelled", "timeout", "timeout"))
+        self.assertEqual(self.answers(), [])
+
+    def test_a_turn_left_by_a_crashed_backend_has_its_request_cancelled_and_is_never_answered(self) -> None:
+        session_id = self.ask()
+        self.approvals(session_id, pending=1)
+        with sessions._active_lock:  # As after a restart: this backend holds nothing.
+            process = sessions._active.pop(session_id)
+            sessions._streams.pop(session_id)
+        sessions.recover()
+        process.wait(timeout=10)
+
+        detail = sessions.detail(session_id)
+        entry = detail["turns"][0]["approvals"][0]
+        self.assertEqual((entry["decision"], entry["by"], detail["turns"][0]["outcome"]), ("cancelled", "crash", "interrupted"))
+        self.assertEqual(self.answers(), [])
+
+    def test_a_protocol_hearth_does_not_know_stops_the_turn_by_name(self) -> None:
+        cases = (({"FAKE_ASK": json.dumps([{"subtype": "hook_callback"}])}, "unknown control request, hook_callback"),
+                 ({"FAKE_ASK": json.dumps([{"no_id": True}])}, "without its ID"),
+                 ({"FAKE_ASK": json.dumps([{"nowait": True}, {"tool": 7}])}, "without its ID"),
+                 ({"FAKE_INIT": "error"}, "refused initialize"), ({"FAKE_INIT": "silent", "FAKE_SESSION": "hang"}, "did not answer initialize"))
+        for number, (env, why) in enumerate(cases):
+            with self.subTest(why=why, env=env), mock.patch.dict(os.environ, env), mock.patch.object(sessions, "INITIALIZE_SECONDS", 0.3):
+                session_id = self.new()
+                sessions.send(session_id, "Run it", f"send-000{number}")
+                turn = self.settled(session_id)["turns"][0]
+                self.assertEqual(turn["outcome"], "failed")
+                self.assertTrue(turn["error"].startswith("claude_protocol_changed: "), turn["error"])
+                self.assertIn(why, turn["error"])
+                self.assertEqual(bool(turn["approvals"]), "nowait" in env.get("FAKE_ASK", ""))
+                if turn["approvals"]:  # One was waiting when the unknown request came: refused first, never allowed.
+                    self.assertEqual((turn["approvals"][0]["decision"], turn["approvals"][0]["reason"]), ("refused", "claude_protocol_changed"))
+
+    def test_a_long_message_arrives_whole_and_a_late_failure_from_another_turn_changes_nothing(self) -> None:
+        message = "word " * 3990  # More than a pipe holds at once, so it is written in parts while the agent starts.
+        session_id = self.ask()
+        self.approvals(session_id, pending=1)
+        task_dir = self.home / ".hearth/tasks" / session_id
+        sessions._protocol_changed(task_dir, "00-an-earlier-turn", sessions._active[session_id], "late")
+        self.assertNotIn("protocol_error", tasks._read(task_dir)["runs"][0])
+        sessions.answer(session_id, "req-1", False)
+        self.settled(session_id)
+        os.environ.pop("FAKE_ASK")
+        sessions.send(session_id, message, "send-0002")
+        self.settled(session_id)
+
+        self.assertEqual(self.calls()[-1]["prompt"], message.strip())
+
+    def test_a_turn_is_refused_when_settings_exclude_commands_from_the_sandbox_or_the_guard_is_too_long(self) -> None:
+        (self.home / ".claude").mkdir(exist_ok=True)
+        (self.home / ".claude/settings.json").write_text(json.dumps({"sandbox": {"excludedCommands": ["docker *"]}}), encoding="utf-8")
+        excluded = self.new()
+        sessions.send(excluded, "Hello", "send-0001")
+        (self.home / ".claude/settings.json").unlink()
+        with mock.patch.object(sessions, "GUARD_LIMIT", 3):
+            long = self.new()
+            sessions.send(long, "Hello", "send-0002")
+
+        self.assertTrue(sessions.detail(excluded)["turns"][0]["error"].startswith("sandbox_excluded_commands: "))
+        self.assertTrue(sessions.detail(long)["turns"][0]["error"].startswith("git_guard_too_large: "))
+        self.assertEqual(self.calls(), [])
+
+    def test_hearth_runs_the_projects_check_after_a_claude_turn_that_changed_files(self) -> None:
+        self.write_projects(check="echo host-check", providers=("claude",))
+        os.environ["FAKE_SESSION"] = "edit"
+        session_id = self.new()
+        sessions.send(session_id, "Change it", "send-0001")
+        for _ in range(200):
+            check = sessions.detail(session_id)["turns"][0]["check"]
+            if check and check["finished"]:
+                break
+            time.sleep(0.05)
+
+        self.assertEqual((check["command"], check["outcome"], check["tail"]), ("echo host-check", "done", "host-check"))
