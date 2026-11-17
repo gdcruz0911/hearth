@@ -18,7 +18,7 @@ import threading
 import time
 from pathlib import Path
 
-from . import roles, tasks, usage
+from . import recall, roles, tasks, usage
 
 KIND = "session"
 # Any command without asking, edit in the session's own worktree, or read it only; each names its table, in tasks except FULL_ACCESS.
@@ -434,6 +434,68 @@ def open_folder(session_id: str) -> dict:
     return {"opened": str(worktree)}
 
 
+def publish(session_id: str) -> dict:
+    """Commit what the conversation changed, push its branch, and open its pull request, or find the one already open.
+    Only the keeper's click starts it, and never during a turn, so the agent's own git work never meets it."""
+    task_dir = _dir(session_id)
+    with tasks._task_lock(task_dir):
+        task = tasks._read(task_dir)
+        if task["runs"] and not task["runs"][-1].get("finished"):
+            raise SessionError("A turn is still running in this conversation. Next: wait for it, or stop it.", 409)
+        if recall.delivered(task_dir):  # ADR-0024: excerpts from the keeper's notes never reach GitHub from a button.
+            raise SessionError("This conversation received excerpts from your notes, so Hearth will not push it. Next: hearth task publish has the review step.", 409)
+        branch, title = task["branch"], task["goal"]
+        try:
+            # Named one by one, as git add fails when an exclusion names an ignored file, such as copied-in guidance.
+            names = _git(task, "ls-files", "-z", "--modified", "--deleted", "--others", "--exclude-standard", "--", ".", *_mine(task), check=True).stdout
+            if names:
+                _git(task, "--literal-pathspecs", "add", "-A", "--pathspec-from-file=-", "--pathspec-file-nul", check=True, input=names)
+            if _git(task, "diff", "--cached", "--quiet").returncode:
+                _git(task, "commit", "-q", "-m", title, check=True)
+            log = _git(task, "log", "--reverse", "--format=- %s", f"{task['base']}..HEAD", check=True).stdout.decode("utf-8", errors="replace")
+        except subprocess.CalledProcessError as exc:
+            raise SessionError(f"Hearth could not commit: {_last_line(exc.stderr) or 'git failed'}", 409) from None
+        except subprocess.TimeoutExpired:
+            raise SessionError("Hearth could not commit: git took longer than 30 seconds.", 409) from None
+        if not log:
+            raise SessionError("Nothing to commit or push: this conversation has not changed anything yet.", 409)
+        leaks = sorted({kind for kind, pattern in tasks.GUARD_PATTERNS if re.search(pattern, f"{title}\n{log}")})
+        if leaks:
+            raise SessionError(f"Committed, but not pushed: the pull request text would contain {', '.join(leaks)} (CODE-6). Next: push it yourself.", 409)
+        # No -u: Hearth never writes the shared repository's config. The push names the branch, so HEAD's state does not matter.
+        pushed = _outside(["git", "-C", task["worktree"], "push", "origin", f"HEAD:refs/heads/{branch}"], 120)
+        if pushed.returncode:
+            raise SessionError(f"Committed, but not pushed: {_last_line(pushed.stderr) or 'git push failed'}", 409)
+        found = _outside(["gh", "pr", "view", branch, "--json", "url,state"], 60, task["worktree"])
+        state = json.loads(found.stdout) if not found.returncode and found.stdout.strip() else {}
+        if state.get("state") == "OPEN":
+            url = state["url"]
+        else:
+            # shortcut: the PR targets the repository's default branch, so a conversation begun on another branch shows its commits too.
+            made = _outside(["gh", "pr", "create", "--head", branch, "--title", title, "--body", log], 60, task["worktree"])
+            if made.returncode:
+                raise SessionError(f"Pushed, but no pull request: {_last_line(made.stderr) or 'gh pr create failed'}", 409)
+            url = made.stdout.strip().splitlines()[-1]
+        task["pr"] = {"url": url}
+        tasks._write(task_dir, task)
+        return summary(task)
+
+
+def _outside(argv: list[str], seconds: int, cwd: str | None = None) -> subprocess.CompletedProcess:
+    """Run git push or gh, whose failures are the keeper's to read, never Hearth's to raise."""
+    try:
+        return subprocess.run(argv, cwd=cwd, capture_output=True, text=True, timeout=seconds)
+    except FileNotFoundError:
+        return subprocess.CompletedProcess(argv, 127, "", f"{argv[0]} is not installed." + (" Next: brew install gh, then gh auth login." if argv[0] == "gh" else ""))
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(argv, 124, "", f"{argv[0]} took longer than {seconds} seconds.")
+
+
+def _last_line(text: str | bytes | None) -> str:
+    text = text.decode("utf-8", errors="replace") if isinstance(text, bytes) else text or ""
+    return (text.strip().splitlines() or [""])[-1]
+
+
 def summary(task: dict, turns: bool = False) -> dict:
     last = task["runs"][-1] if task["runs"] else None
     running = bool(last and not last.get("finished"))
@@ -443,7 +505,8 @@ def summary(task: dict, turns: bool = False) -> dict:
              "status": ("running" if task["status"] == "running" else "interrupted") if running else (replies[-1] if replies else {}).get("outcome"),
              "provider": task["session"]["provider"], "mode": task["session"]["mode"], "model": task["session"]["model"],
              "effort": task["session"]["effort"], "resumable": bool(task["session"]["cli_session"]), "turn_count": len(replies),
-             "updated": (last or {}).get("finished") or (last or {}).get("started") or task["created"], "worktree": task["worktree"]}
+             "updated": (last or {}).get("finished") or (last or {}).get("started") or task["created"], "worktree": task["worktree"],
+             "pr": (task.get("pr") or {}).get("url")}
     if turns:
         if found["mode"] == "full":
             check = None

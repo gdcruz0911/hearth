@@ -1,7 +1,7 @@
 // The Sessions view (ADR-0041): direct conversations with one CLI, from api/sessions, with each turn's events read
 // through the same transcript endpoint as tasks. Every value is written with textContent.
 (() => {
-  const { el, shown, badge, api, stored, store } = window.Hearth;
+  const { el, shown, badge, safeLink, api, stored, store } = window.Hearth;
   const $ = (id) => document.getElementById(id);
   const AGENTS = { claude: "Claude Code", codex: "Codex" };
   const state = { visible: false, selected: null, options: null, sessions: [], detail: null, turns: new Map(), sending: null, timer: 0, said: "",
@@ -285,6 +285,9 @@
     if (session.commands?.host_check) commands.append(" After a turn that changes files, Hearth runs ", el("code", "", session.commands.host_check), " outside the sandbox.");
     commands.append(" Hearth cannot approve extra commands here.");
     $("convo-badge").replaceChildren(session.status ? badge(session.status) : el("span", "badge other", "new"));
+    $("convo-pr").hidden = !safeLink(session.pr);
+    if (safeLink(session.pr)) $("convo-pr").href = safeLink(session.pr);
+    $("convo-publish").hidden = session.mode === "read";
     const finished = session.turns.filter((turn) => turn.finished).length;
     const key = `${session.id}:${finished}`;
     if (key !== state.changesKey) {
@@ -607,6 +610,27 @@
     }
   }
 
+  async function publish() {
+    const from = state.selected;
+    state.publishing = from;
+    composer();
+    try {
+      const { session } = await api(`sessions/${encodeURIComponent(from)}/publish`, {});
+      if (state.selected === from) {
+        state.detail = { ...state.detail, pr: session.pr };
+        renderDetail();
+        $("convo-send-error").hidden = true;
+      }
+    } catch (failure) {
+      if (state.selected !== from) return; // Shown only with the conversation it is about.
+      $("convo-send-error").hidden = false;
+      $("convo-send-error").textContent = failure.message;
+    } finally {
+      state.publishing = null;
+      composer();
+    }
+  }
+
   function stick(change) {
     // Follow new output only while the keeper is at the bottom; reading further up is never interrupted.
     const scroller = $("convo-scroll");
@@ -622,6 +646,8 @@
     $("convo-send").setAttribute("aria-label", state.sending ? "Sending…" : state.detail ? `Send to ${agent(state.detail.provider)}` : "Send");
     $("convo-send").title = $("convo-send").getAttribute("aria-label");
     $("convo-stop").hidden = !turn;
+    $("convo-publish").disabled = Boolean(turn) || Boolean(state.publishing);
+    $("convo-publish").textContent = state.publishing ? "Pushing…" : state.detail?.pr ? "Commit and push" : "Commit and open PR";
     $("convo-message").placeholder = state.detail ? `Message ${agent(state.detail.provider)}` : "";
     // Without a queue, text written during a reply waits here: say so, so it is never taken for sent.
     const mine = state.drafts.get(state.selected) || {};
@@ -768,6 +794,7 @@
   $("convo-composer").addEventListener("submit", send);
   $("convo-stop").addEventListener("click", stop);
   $("convo-open").addEventListener("click", openFolder);
+  $("convo-publish").addEventListener("click", publish);
   // shortcut: the desktop app's storage lasts one launch, so a chosen level returns to 90%; move it to a file if that matters (ADR-0050).
   $("convo-usage-warn").value = stored("hearth-usage-warn", "90");
   if (!$("convo-usage-warn").value) $("convo-usage-warn").value = "90";

@@ -1192,6 +1192,93 @@ class SessionWorkTests(SessionTestCase):
         run.assert_not_called()
 
 
+# A gh that logs its arguments: `pr view` finds nothing until `pr create` has made the pull request.
+FAKE_GH = (
+    "import json, sys\n"
+    "from pathlib import Path\n"
+    "made = Path.home() / '.fake-gh-pr'\n"
+    "with open(Path.home() / '.fake-gh.jsonl', 'a') as log: log.write(json.dumps(sys.argv[1:]) + '\\n')\n"
+    "if sys.argv[1:3] == ['pr', 'view']:\n"
+    "    if not made.exists(): sys.exit('no pull requests found for branch')\n"
+    "    print(json.dumps({'url': made.read_text(), 'state': 'OPEN'}))\n"
+    "elif sys.argv[1:3] == ['pr', 'create']:\n"
+    "    made.write_text('https://github.com/keeper/demo/pull/7')\n"
+    "    print('https://github.com/keeper/demo/pull/7')\n"
+)
+
+
+class PublishTests(SessionTestCase):
+    """The Commit, push and open PR button: real Git with a local origin, and a fake gh."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.origin = self.home / "origin.git"
+        subprocess.run(["git", "init", "-q", "--bare", str(self.origin)], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "remote", "add", "origin", str(self.origin)], check=True)
+        gh = self.home / "bin" / "gh"
+        gh.write_text(f"#!{sys.executable}\n{FAKE_GH}", encoding="utf-8")
+        gh.chmod(0o755)
+        path = mock.patch.dict(os.environ, {"PATH": f"{gh.parent}{os.pathsep}{os.environ['PATH']}"})
+        path.start()
+        self.addCleanup(path.stop)
+
+    def gh_calls(self) -> list[list[str]]:
+        path = self.home / ".fake-gh.jsonl"
+        return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()] if path.exists() else []
+
+    def test_publishing_commits_the_agents_work_pushes_it_and_opens_one_pull_request(self) -> None:
+        (self.repo / "CONTEXT.md").write_text("Copied in by Hearth, never committed.\n", encoding="utf-8")
+        session_id = self.new(mode="full")
+        record = self.only_task()
+        worktree = Path(record["worktree"])
+        (worktree / "made.txt").write_text("by the agent\n", encoding="utf-8")
+
+        found = sessions.publish(session_id)
+
+        self.assertEqual(found["pr"], "https://github.com/keeper/demo/pull/7")
+        head = subprocess.run(["git", "-C", str(worktree), "rev-parse", "HEAD"], capture_output=True, text=True, check=True).stdout
+        pushed = subprocess.run(["git", "-C", str(self.origin), "rev-parse", f"refs/heads/{record['branch']}"], capture_output=True, text=True, check=True).stdout
+        self.assertEqual(head, pushed)
+        committed = subprocess.run(["git", "-C", str(worktree), "show", "--name-only", "--format=%s", "HEAD"], capture_output=True, text=True, check=True).stdout.split()
+        self.assertEqual(committed, ["New", "conversation", "made.txt"])  # The conversation's title, and not the guidance Hearth copied in.
+        create = [call for call in self.gh_calls() if call[:2] == ["pr", "create"]]
+        self.assertEqual(len(create), 1)
+        self.assertEqual(create[0][create[0].index("--head") + 1], record["branch"])
+        self.assertIn("- New conversation", create[0][create[0].index("--body") + 1])
+        config = subprocess.run(["git", "-C", str(self.repo), "config", "--list", "--local"], capture_output=True, text=True, check=True).stdout
+        self.assertNotIn(f"branch.{record['branch']}", config)  # No -u: the shared config is never written.
+
+        (worktree / "more.txt").write_text("a second change\n", encoding="utf-8")
+        self.assertEqual(sessions.publish(session_id)["pr"], "https://github.com/keeper/demo/pull/7")
+        self.assertEqual(len([call for call in self.gh_calls() if call[:2] == ["pr", "create"]]), 1)  # The open one is found, not made again.
+        self.assertEqual(subprocess.run(["git", "-C", str(self.origin), "log", "--format=%s", record["branch"]], capture_output=True, text=True,
+                                        check=True).stdout.count("New conversation"), 2)
+        self.assertEqual(sessions.detail(session_id)["pr"], "https://github.com/keeper/demo/pull/7")
+
+    def test_nothing_changed_a_running_turn_and_a_failed_push_are_refused_and_said(self) -> None:
+        session_id = self.new(mode="full")
+        with self.assertRaises(sessions.SessionError) as nothing:
+            sessions.publish(session_id)
+        self.assertIn("Nothing to commit", str(nothing.exception))
+
+        task_dir = self.home / ".hearth/tasks" / session_id
+        record = json.loads((task_dir / "task.json").read_text(encoding="utf-8"))
+        (Path(record["worktree"]) / "made.txt").write_text("by the agent\n", encoding="utf-8")
+        running = {**record, "status": "running", "runs": [{"role": "full", "dir": "001", "started": "now", "finished": None, "pid": os.getpid()}]}
+        (task_dir / "task.json").write_text(json.dumps(running), encoding="utf-8")
+        with self.assertRaises(sessions.SessionError) as busy:
+            sessions.publish(session_id)
+        self.assertEqual(busy.exception.status, 409)
+        self.assertIn("still running", str(busy.exception))
+        (task_dir / "task.json").write_text(json.dumps(record), encoding="utf-8")
+
+        subprocess.run(["git", "-C", str(self.repo), "remote", "remove", "origin"], check=True)
+        with self.assertRaises(sessions.SessionError) as unpushed:
+            sessions.publish(session_id)
+        self.assertIn("Committed, but not pushed", str(unpushed.exception))
+        self.assertEqual(self.gh_calls(), [])
+
+
 class SessionGuardTests(SessionTestCase):
     def test_task_commands_dashboard_tasks_and_stats_leave_sessions_alone(self) -> None:
         session_id = self.new()

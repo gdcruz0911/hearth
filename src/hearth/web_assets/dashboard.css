@@ -554,7 +554,8 @@ ol.md-list { list-style: decimal; }
   border: 1px solid var(--line-soft); background: color-mix(in srgb, var(--soft) 45%, var(--panel)); border-radius: 8px 0 0 8px; padding: 9px 12px; }
 .changes-card .diff-count { font-size: 11px; }
 .changes-card .meta { font-size: 11px; margin: 0; }
-.changes-card .btn { border-radius: 0 8px 8px 0; border-left: 0; font-size: 12px; }
+.changes-card .btn { border-radius: 0; border-left: 0; font-size: 12px; }
+.changes-card .btn:last-child { border-radius: 0 8px 8px 0; }
 .convo-changes-body .diff-line { white-space: pre-wrap; overflow-wrap: anywhere; grid-template-columns: 32px 32px 1fr; }
 @media (min-width: 1181px) { .workspace:has(> .work:not([hidden]) #work-changes:not([hidden])) { grid-template-columns: 249px minmax(0, 1fr) clamp(306px, 34vw, 560px); } }
 .avatar.you { color: var(--muted); }

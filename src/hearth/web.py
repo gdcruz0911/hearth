@@ -369,6 +369,8 @@ class HearthWebApplication:
                 return self._json_response({"changes": sessions.changes(parts[0])})
             if method == "POST" and len(parts) == 2 and parts[1] == "open":
                 return self._json_response(sessions.open_folder(parts[0]))
+            if method == "POST" and len(parts) == 2 and parts[1] == "publish":
+                return self._json_response({"session": sessions.publish(parts[0])})
             if method == "POST" and len(parts) == 2 and parts[1] == "answer":
                 return self._json_response({"session": sessions.answer(parts[0], text("request") or "", payload.get("allow") is True)})
             if method == "POST" and len(parts) == 2 and parts[1] == "stop":
