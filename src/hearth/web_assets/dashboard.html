@@ -78,7 +78,8 @@
               <fieldset class="form-row">
                 <legend>What it may do</legend>
                 <div class="choices">
-                  <label class="choice"><input type="radio" name="convo-mode" value="edit" checked><span>Edit files in its own worktree</span></label>
+                  <label class="choice"><input type="radio" name="convo-mode" value="full" checked><span>Full access: runs any command, without asking</span></label>
+                  <label class="choice"><input type="radio" name="convo-mode" value="edit"><span>Guarded: Claude asks before a command, Codex stays in its sandbox</span></label>
                   <label class="choice"><input type="radio" name="convo-mode" value="read"><span>Read only</span></label>
                 </div>
               </fieldset>

@@ -2,8 +2,8 @@
 
 A session is a task record with `kind: "session"` and its own worktree; each turn is a run in its `runs` list, launched
 by the backend from the same tables as tasks (`PROVIDERS` to edit, `REVIEWERS` to read only), except that Claude edits with
-the keeper's own setup (`CONVERSATION`, ADR-0049), resumed with the CLI's own session, and stopped with the task's process
-group. Turns belong to the backend that started them: quitting Hearth stops them, and a turn found without its backend is
+the keeper's own setup (`CONVERSATION`, ADR-0049) and full access runs any command unasked and unsandboxed (`FULL_ACCESS`),
+resumed with the CLI's own session, and stopped with the task's process group. Turns belong to the backend that started them: quitting Hearth stops them, and a turn found without its backend is
 stopped and marked interrupted, never resent.
 """
 
@@ -21,7 +21,8 @@ from pathlib import Path
 from . import roles, tasks, usage
 
 KIND = "session"
-MODES = {"edit": "PROVIDERS", "read": "REVIEWERS"}  # Edit in the session's own worktree, or read it only.
+# Any command without asking, edit in the session's own worktree, or read it only; each names its table, in tasks except FULL_ACCESS.
+MODES = {"full": "FULL_ACCESS", "edit": "PROVIDERS", "read": "REVIEWERS"}
 PROVIDERS = ("claude", "codex")  # Resume, stop, and restrictions checked in real runs on 2026-10-13; agy is not.
 # Hearth checks effort itself: on 2026-11-06 Claude Code 2.1.283 dropped an unknown --effort with only a warning, and Codex 0.163.0
 # ran a level its catalog does not list for that model. Codex's list for a model it names comes from that catalog; this is its fallback.
@@ -44,6 +45,11 @@ SUMMARY_LINES = 20  # Lines of that check's output that open the keeper's next m
 CONVERSATION = {"claude": ["claude", "{options}", "-p", "--output-format", "stream-json", "--verbose", "--permission-mode", "acceptEdits",
                            "--settings", "{settings}", "--allowedTools", "Bash({check} *)", "--disallowedTools",
                            "Artifact,ArtifactComments,ArtifactData,DesignSync,PushNotification,RemoteTrigger,CronCreate,CronDelete,ScheduleWakeup,SendMessage"]}
+# Full access, the keeper's choice over ADR-0045's "every command asks": the agent runs any command as the keeper, with no approval
+# and no sandbox, in the conversation's own worktree. Claude keeps the keeper's own setup and the same tools off.
+FULL_ACCESS = {"claude": ["claude", "{options}", "-p", "--output-format", "stream-json", "--verbose", "--permission-mode", "bypassPermissions",
+                          "--disallowedTools", CONVERSATION["claude"][-1]],
+               "codex": ["danger-full-access" if part == "workspace-write" else part for part in tasks.PROVIDERS["codex"]]}
 AGENT_CONFIG = (".claude", ".mcp.json")  # What a full-setup turn loads from the worktree, so the agent must not change it.
 
 # ADR-0045: an approved command runs in Claude Code's sandbox, never as the keeper, and a turn fails rather than run without it.
@@ -226,7 +232,7 @@ def send(session_id: str, message: str, send_id: str, draft_at: int | None = Non
         if _full_setup(settings) and (changed := _config_changed(task)):
             raise SessionError(f"Hearth will not continue this conversation: {changed} in its worktree differs from the base commit, and "
                                "Claude would load it as its own configuration. Next: start a new conversation.", 409)
-        slot = "implement" if settings["mode"] == "edit" else "support"
+        slot = "implement" if settings["mode"] in ("edit", "full") else "support"
         if tasks._busy(slot) >= tasks.SLOTS[slot]:
             raise SessionError(f"All {tasks.SLOTS[slot]} {slot} slots are in use. Next: wait for a run to finish, or stop one.", 409)
         run_dir = f"{len(task['runs']) + 1:02d}-session-{settings['provider']}"
@@ -439,7 +445,11 @@ def summary(task: dict, turns: bool = False) -> dict:
              "effort": task["session"]["effort"], "resumable": bool(task["session"]["cli_session"]), "turn_count": len(replies),
              "updated": (last or {}).get("finished") or (last or {}).get("started") or task["created"], "worktree": task["worktree"]}
     if turns:
-        if found["provider"] == "claude":
+        if found["mode"] == "full":
+            check = None
+            description = ("Full access: your own Claude setup. It runs any command as you, without asking and without a sandbox."
+                           if found["provider"] == "claude" else "Full access: Codex runs any command as you, without asking and without a sandbox.")
+        elif found["provider"] == "claude":
             check = tasks._projects().get(task["project"], {}).get("turn_check") if found["mode"] == "edit" else None
             description = ("Your own Claude setup, inside this worktree. A shell command asks you first and runs in Claude Code's sandbox, "
                            "except read-only ones." if found["mode"] == "edit" else "Read and search files only. Shell commands are unavailable.")
@@ -478,7 +488,8 @@ def _tail(task_dir: Path, record: dict) -> str | None:
 def _launch(task: dict, task_dir: Path, record: dict, message: str, instructions: str | None = None) -> subprocess.Popen:
     settings, project = task["session"], tasks._projects()[task["project"]]
     full = _full_setup(settings)
-    template = CONVERSATION[settings["provider"]] if full else getattr(tasks, MODES[settings["mode"]])[settings["provider"]]
+    table = FULL_ACCESS if settings["mode"] == "full" else getattr(tasks, MODES[settings["mode"]])
+    template = CONVERSATION[settings["provider"]] if full else table[settings["provider"]]
     if full:
         if excluded := _excluded_commands(Path(task["worktree"])):
             raise LaunchRefused(f"sandbox_excluded_commands: {excluded} sets sandbox.excludedCommands, and Claude Code runs an excluded "
@@ -503,7 +514,7 @@ def _launch(task: dict, task_dir: Path, record: dict, message: str, instructions
     record["marker"] = tasks._new_marker()
     record["descendants"] = str(run_dir / "descendants")
     env = {**os.environ, **tasks.NO_BYTECODE, "HEARTH_TASK": task["id"], tasks.RUN_MARKER: record["marker"]}
-    if not full:
+    if not full and settings["mode"] != "full":  # Full access is the keeper's own setup too, memory included.
         env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] = "1"
     if settings["provider"] == "codex":
         env["CODEX_HOME"] = str(tasks._codex_home(task_dir))
@@ -612,7 +623,10 @@ def _asked(task_dir: Path, session_id: str, run: str, stream: dict, event: dict)
         record = next((item for item in task["runs"] if item["dir"] == run), None)
         if record is None:
             return
-        if record.get("finished") or record.get("stopping") or record.get("protocol_error"):
+        if record.get("protocol_error"):  # Requests are handled on their own threads, so one can reach here after a later one broke the protocol.
+            entry.update(decision="refused", by="policy", reason="claude_protocol_changed", decided=tasks._now())
+            _tell(stream["process"], _reply(request_id, False, None, "policy"))
+        elif record.get("finished") or record.get("stopping"):
             entry.update(decision="cancelled", by=STOPPED.get(record.get("stopping"), "crash"), decided=tasks._now())  # Never answered.
         elif refusal:
             entry.update(decision="refused", by="policy", reason=refusal, decided=tasks._now())

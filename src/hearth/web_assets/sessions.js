@@ -270,10 +270,10 @@
       return row;
     };
     $("convo-meta").replaceChildren(field("Agent", agent(session.provider)), field("Model asked for", session.model || "the CLI's default"),
-      field("Effort", session.effort), field("May", session.mode === "edit" ? "edit its own worktree" : "read only"),
+      field("Effort", session.effort), field("May", session.mode === "full" ? "full access: any command, without asking" : session.mode === "edit" ? "edit, guarded: Claude asks before a command, Codex stays in its sandbox" : "read only"),
       field("Agent session kept", session.resumable ? "yes, the next message resumes it" : "not yet"), field("Work folder", session.worktree));
     $("convo-meta").lastElementChild.lastElementChild.classList.add("path");
-    $("convo-mode").replaceChildren(icon("shield"), el("span", "", session.mode === "edit" ? "Own worktree" : "Read only"));
+    $("convo-mode").replaceChildren(icon("shield"), el("span", "", session.mode === "full" ? "Full access" : session.mode === "edit" ? "Guarded" : "Read only"));
     // The recipient is fixed for a conversation: another agent is another conversation.
     $("convo-recipient").replaceChildren(icon("flame"), el("span", "", "To "), el("strong", "", agent(session.provider)),
       el("span", "", `· ${session.model || "CLI default"} · ${session.effort}`));

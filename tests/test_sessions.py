@@ -157,6 +157,9 @@ class SessionTestCase(TaskTestCase):
         conversation = mock.patch.dict(sessions.CONVERSATION, {"claude": [str(bin_dir / "claude"), *CONVERSATION["claude"][1:]]})
         conversation.start()
         self.addCleanup(conversation.stop)
+        full = mock.patch.dict(sessions.FULL_ACCESS, {name: [str(bin_dir / name), *FULL_ACCESS[name][1:]] for name in ("claude", "codex")})
+        full.start()
+        self.addCleanup(full.stop)
         self.write_projects(check="true", providers=("claude", "codex", "antigravity"))
         catalog = mock.patch.dict(sessions._catalog, clear=True)  # Each test reads its own fake's catalog.
         catalog.start()
@@ -214,7 +217,7 @@ DETACHED = (
 )
 FAKE = FAKE.replace("DETACHED", repr(DETACHED))
 PROVIDERS, REVIEWERS = dict(tasks.PROVIDERS), dict(tasks.REVIEWERS)  # Taken at import, before any test patches the tables.
-CONVERSATION = dict(sessions.CONVERSATION)
+CONVERSATION, FULL_ACCESS = dict(sessions.CONVERSATION), dict(sessions.FULL_ACCESS)
 
 
 class SessionTests(SessionTestCase):
@@ -955,6 +958,72 @@ class FullSetupTests(SessionTestCase):
         self.assertEqual(len(self.calls()), 1)
 
 FIXTURES = Path(__file__).with_name("fixtures") / "public/providers"
+
+
+class FullAccessTests(SessionTestCase):
+    """Full access, the keeper's choice: any command runs without asking and without a sandbox, in the conversation's worktree."""
+
+    def test_full_access_claude_bypasses_permissions_without_the_approval_protocol_and_resumes_the_same(self) -> None:
+        session_id = self.new(mode="full")
+        sessions.send(session_id, "One", "send-0001")
+        self.settled(session_id)
+        sessions.send(session_id, "Two", "send-0002")
+        self.settled(session_id)
+
+        first, second = self.calls()
+        self.assertEqual(first["argv"][first["argv"].index("--permission-mode") + 1], "bypassPermissions")
+        for flag in ("--settings", "--allowedTools", "--input-format", "--permission-prompt-tool", "--setting-sources", "--tools"):
+            self.assertNotIn(flag, first["argv"])
+        self.assertEqual(first["argv"][first["argv"].index("--disallowedTools") + 1], CONVERSATION["claude"][-1])
+        self.assertIsNone(first["no_memory"])  # The keeper's own setup, memory included.
+        self.assertEqual(second["argv"][:2], ["--resume", "claude-session-1"])
+        self.assertEqual(second["argv"][2:], first["argv"])
+        self.assertEqual(second["prompt"], "Two")
+
+    def test_full_access_codex_runs_without_a_sandbox_and_resumes_it_through_config(self) -> None:
+        session_id = self.new("codex", "full", model=None)
+        sessions.send(session_id, "One", "send-0001")
+        self.settled(session_id)
+        sessions.send(session_id, "Two", "send-0002")
+        self.settled(session_id)
+
+        first, second = self.calls()
+        self.assertEqual(FULL_ACCESS["codex"], [part.replace("workspace-write", "danger-full-access") for part in PROVIDERS["codex"]])
+        self.assertEqual(first["argv"][first["argv"].index("--sandbox") + 1], "danger-full-access")
+        self.assertNotIn("--sandbox", second["argv"])
+        self.assertIn('sandbox_mode="danger-full-access"', second["argv"])
+
+    def test_a_full_turn_takes_an_implement_slot_runs_no_host_check_and_ignores_claude_configuration_changes(self) -> None:
+        os.environ["FAKE_SESSION"] = "edit"
+        for provider in ("claude", "codex"):
+            with self.subTest(provider=provider):
+                session_id = self.new(provider, "full")
+                with mock.patch.dict(tasks.SLOTS, {"implement": 0}), self.assertRaises(sessions.SessionError) as full:
+                    sessions.send(session_id, "Change it", "send-0000")
+                self.assertIn("implement slots", str(full.exception))
+                changed = Path(sessions.detail(session_id)["worktree"], ".claude/agents/helper.md")  # Not settings.json: _tampered guards it.
+                changed.parent.mkdir(parents=True, exist_ok=True)
+                changed.write_text("{}", encoding="utf-8")
+                sessions.send(session_id, "Change it", "send-0001")
+                self.settled(session_id)
+                time.sleep(0.2)  # Long enough for a check after the turn to have been recorded.
+                runs = tasks._read(self.home / ".hearth/tasks" / session_id)["runs"]
+                self.assertEqual([run["role"] for run in runs], [sessions.KIND])
+                self.assertNotIn("host_check", runs[0])
+                self.assertTrue(Path(sessions.detail(session_id)["worktree"], "edited.txt").exists())
+
+    def test_a_running_full_turn_counts_as_implementing(self) -> None:
+        os.environ["FAKE_SESSION"] = "hang"
+        sessions.send(self.new("codex", "full"), "Wait", "send-0001")
+        self.assertEqual((tasks._busy("implement"), tasks._busy("support")), (1, 0))
+
+    def test_full_access_is_described_with_no_check_run_unasked(self) -> None:
+        self.write_projects(check="python -m unittest", providers=("claude", "codex"))
+        claude, codex = (sessions.detail(self.new(provider, "full"))["commands"] for provider in ("claude", "codex"))
+        self.assertEqual(claude, {"description": "Full access: your own Claude setup. It runs any command as you, without asking and without a "
+                                                 "sandbox.", "check": None})
+        self.assertEqual(codex, {"description": "Full access: Codex runs any command as you, without asking and without a sandbox.", "check": None})
+        self.assertEqual(self.calls(), [])
 
 
 class ReleasedReaderTests(SessionTestCase):
@@ -1706,7 +1775,8 @@ class ApprovalTests(SessionTestCase):
                  ({"FAKE_ASK": json.dumps([{"nowait": True}, {"tool": 7}])}, "without its ID"),
                  ({"FAKE_INIT": "error"}, "refused initialize"), ({"FAKE_INIT": "silent", "FAKE_SESSION": "hang"}, "did not answer initialize"))
         for number, (env, why) in enumerate(cases):
-            with self.subTest(why=why, env=env), mock.patch.dict(os.environ, env), mock.patch.object(sessions, "INITIALIZE_SECONDS", 0.3):
+            wait = 0.3 if env.get("FAKE_INIT") == "silent" else sessions.INITIALIZE_SECONDS  # Short only where nothing answers: a slow start is not silence.
+            with self.subTest(why=why, env=env), mock.patch.dict(os.environ, env), mock.patch.object(sessions, "INITIALIZE_SECONDS", wait):
                 session_id = self.new()
                 sessions.send(session_id, "Run it", f"send-000{number}")
                 turn = self.settled(session_id)["turns"][0]
