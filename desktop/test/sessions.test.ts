@@ -108,6 +108,65 @@ test("a draft typed just before reloading is saved, and is back after the reload
   assert.equal(JSON.parse(readFileSync(join(home.dir, "hearth/tasks", id, "draft.json"), "utf8")).text, "Typed, then reloaded");
 });
 
+async function setWarning(page: import("playwright").Page, level: string): Promise<void> {
+  await page.evaluate((value) => {
+    const node = document.getElementById("convo-usage-warn") as HTMLSelectElement;  // In the Details tab, which may be closed.
+    node.value = value;
+    node.dispatchEvent(new Event("change"));
+  }, level);
+}
+
+test("at full plan use a conversation warns at the set level and still sends", async (t) => {
+  const home = scratch();
+  const id = conversation(home);
+  fakeClaude(home);
+  const resets_at = Math.floor(Date.now() / 1000) + 3600;
+  mkdirSync(join(home.dir, "hearth/usage"), { recursive: true });
+  writeFileSync(join(home.dir, "hearth/usage/claude-limits.jsonl"),
+                JSON.stringify({ rate_limits: { five_hour: { used_percentage: 100, resets_at }, seven_day: { used_percentage: 95, resets_at } } }) + "\n");
+  const { app } = await openApp(t, home, realBackend(home.dir), { env: { PATH: "/usr/bin:/bin" } });
+  const page = await windowShowing(app, "Live ·");
+  await page.evaluate((session) => void (window.location.hash = `#/sessions/${session}`), id);
+
+  const warning = page.locator("#convo-usage-warning");
+  await warning.waitFor({ state: "visible" });
+  const windows = page.locator("#convo-usage .usage-window");
+  assert.deepEqual(await windows.allTextContents(), ["5-hour 100%", "week 95%", "5-hour not reported", "week not reported"]);
+  assert.equal(await page.locator("#convo-usage meter").count(), 2);  // A bar only for a number that exists.
+  assert.equal(await page.locator("#convo-usage meter.reached").count(), 2);
+  assert.equal(await warning.textContent(), "Claude Code has used 100% of its 5-hour limit and 95% of its weekly limit.");
+
+  assert.equal(await page.locator("#convo-usage-warn").inputValue(), "90");
+  await setWarning(page, "100");  // Only the window that reaches the level is named.
+  assert.equal(await warning.textContent(), "Claude Code has used 100% of its 5-hour limit.");
+  assert.equal(await page.locator("#convo-usage meter.reached").count(), 1);
+  await setWarning(page, "off");
+  assert.equal(await warning.isHidden(), true);
+  assert.equal(await page.locator("#convo-usage meter.reached").count(), 0);
+  await setWarning(page, "90");
+
+  await page.locator("#convo-message").fill("Send anyway");
+  await page.getByRole("button", { name: "Send to Claude Code" }).click();
+  await page.locator("#convo-stop").waitFor({ state: "visible" });
+  await page.locator("#convo-stop").waitFor({ state: "hidden", timeout: 20_000 });
+  assert.equal(readFileSync(join(home.dir, "home/launches.log"), "utf8"), "launch\n");
+  assert.equal(await page.locator("#convo-send-error").isHidden(), true);
+});
+
+test("plan use nobody reported reads as not reported, never as 0%, and warns about nothing", async (t) => {
+  const home = scratch();
+  const id = conversation(home);
+  const { app } = await openApp(t, home, realBackend(home.dir), { env: { PATH: "/usr/bin:/bin" } });
+  const page = await windowShowing(app, "Live ·");
+  await page.evaluate((session) => void (window.location.hash = `#/sessions/${session}`), id);
+  await page.waitForFunction(() => document.getElementById("convo-usage")?.textContent?.includes("Codex"));
+  assert.deepEqual(await page.locator("#convo-usage .usage-window").allTextContents(), ["5-hour not reported", "week not reported", "5-hour not reported", "week not reported"]);
+  assert.equal(await page.locator("#convo-usage meter").count(), 0);
+  assert.equal(await page.locator("#convo-usage-warning").isHidden(), true);
+  await setWarning(page, "50");
+  assert.equal(await page.locator("#convo-usage-warning").isHidden(), true);
+});
+
 test("text written while a reply runs stays editable, says it is not sent, and starts nothing", async (t) => {
   const home = scratch();
   const id = conversation(home);
@@ -450,6 +509,37 @@ test("the new-conversation form starts in the project of the conversation just v
   await page.locator("#convo-message").waitFor();
   await open("#/sessions/new");
   await formShows("alpha");  // The conversation just viewed, not the earlier pick.
+});
+
+// ADR-0049: a subagent's own steps arrive between its start and its report, so each result goes to the call it answers, and the
+// subagent's prompt settles nothing.
+test("a subagent's report lands on its own step, which stays open until the report arrives", async (t) => {
+  const home = scratch();
+  const id = conversation(home, "request-agent-01");
+  const fixture = join(repo, "tests/fixtures/public/providers/claude-print-2.1.283-subagent.jsonl");
+  const bin = join(home.dir, "home/.local/bin");
+  mkdirSync(bin, { recursive: true });
+  writeFileSync(join(bin, "claude"), `#!/bin/sh
+cat > /dev/null
+head -n 4 '${fixture}'
+sleep 4
+tail -n +5 '${fixture}'
+`);
+  chmodSync(join(bin, "claude"), 0o755);
+  const { app } = await openApp(t, home, realBackend(home.dir), { env: { PATH: "/usr/bin:/bin" } });
+  const page = await windowShowing(app, "Live ·");
+  await page.evaluate((session) => void (window.location.hash = `#/sessions/${session}`), id);
+  await page.locator("#convo-message").fill("Delegate it");
+  await page.locator("#convo-message").blur();
+  await page.getByRole("button", { name: "Send to Claude Code" }).click();
+
+  const agent = page.locator("#convo-log li.reply-step > details", { has: page.locator("summary .step-tool", { hasText: /^Agent$/ }) });
+  await agent.locator("pre.step-output").first().waitFor({ state: "attached", timeout: 20_000 });  // Folded away; the subagent's prompt, while it works.
+  assert.doesNotMatch(await agent.getAttribute("class") ?? "", /done/);
+  await agent.locator("pre.step-output", { hasText: "Subagent hand-back" }).waitFor({ state: "attached", timeout: 20_000 });
+  assert.match(await agent.getAttribute("class") ?? "", /done/);
+  const write = page.locator("#convo-log li.reply-step > details", { has: page.locator("summary .step-tool", { hasText: "subagent · Write" }) });
+  assert.doesNotMatch(await write.textContent() ?? "", /Subagent hand-back/);
 });
 
 // ADR-0047: after a Codex turn that changed files, Hearth runs the project's check outside the sandbox; the page shows it running,

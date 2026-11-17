@@ -1721,7 +1721,7 @@ def _busy(kind: str) -> int:
     count = 0
     for path in _home().glob("tasks/*/task.json"):
         other = _read(path.parent)
-        implementing = other["runs"] and (other["runs"][-1]["role"] in IMPLEMENT_ROLES or other.get("session", {}).get("mode") == "edit")
+        implementing = other["runs"] and (other["runs"][-1]["role"] in IMPLEMENT_ROLES or other.get("session", {}).get("mode") in ("edit", "full"))
         if other["status"] == "running" and other["runs"] and bool(implementing) == (kind == "implement"):
             count += 1
     return count

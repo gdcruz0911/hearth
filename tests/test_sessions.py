@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
 import shutil
@@ -13,8 +15,9 @@ import time
 from pathlib import Path
 from unittest import mock
 
-from hearth.workbench import sessions, stats, tasks, transcript
-from test_tasks import TaskTestCase
+from hearth.cli import main
+from hearth.workbench import sessions, stats, tasks, transcript, usage
+from test_tasks import TaskTestCase, git
 
 # A stand-in for both CLIs: it logs how it was called, then prints that CLI's events. FAKE_SESSION picks the
 # scenario: reply (default), hang (some partial text, then waits to be stopped), detach (hang after starting work in its
@@ -26,10 +29,25 @@ FAKE = r'''
 import json, os, re, sys, time
 from pathlib import Path
 codex = Path(sys.argv[0]).name == "codex"
-prompt = sys.stdin.read()
+if codex and sys.argv[1:3] == ["debug", "models"]:  # The catalog, read outside any turn, so it is not logged as a call.
+    print(os.environ.get("FAKE_CATALOG", json.dumps({"models": [
+        {"slug": "gpt-big", "visibility": "list", "supported_reasoning_levels": [{"effort": "low"}, {"effort": "ultra"}]},
+        {"slug": "gpt-small", "visibility": "list", "supported_reasoning_levels": [{"effort": "low"}, {"effort": "medium"}]},
+        {"slug": "gpt-hidden", "visibility": "hide", "supported_reasoning_levels": [{"effort": "low"}]}]})))
+    sys.exit(int(os.environ.get("FAKE_CATALOG_EXIT", "0")))
+stream = "--input-format" in sys.argv  # ADR-0045: Claude's edit turns keep stdin open and speak the SDK's protocol.
+if stream:
+    first = json.loads(sys.stdin.readline())
+    if os.environ.get("FAKE_INIT") != "silent":
+        print(json.dumps({"type": "control_response", "response": {"subtype": os.environ.get("FAKE_INIT", "success"),
+                                                                   "request_id": first["request_id"], "response": {}}}), flush=True)
+    prompt = json.loads(sys.stdin.readline())["message"]["content"]
+else:
+    prompt = sys.stdin.read()
 scenario = os.environ.get("FAKE_SESSION", "reply")
 with open(Path.home() / ".fake-session-calls.jsonl", "a") as log:
-    log.write(json.dumps({"argv": sys.argv[1:], "cwd": os.getcwd(), "prompt": prompt, "codex_home": os.environ.get("CODEX_HOME")}) + "\n")
+    log.write(json.dumps({"argv": sys.argv[1:], "cwd": os.getcwd(), "prompt": prompt, "codex_home": os.environ.get("CODEX_HOME"),
+                          "no_memory": os.environ.get("CLAUDE_CODE_DISABLE_AUTO_MEMORY")}) + "\n")
 def emit(event):
     print(json.dumps(event), flush=True)
 args = sys.argv[1:]
@@ -63,6 +81,15 @@ if scenario == "chain":
 if scenario == "fail":
     print("Not logged in. Run login.", file=sys.stderr)
     sys.exit(1)
+if scenario == "refuse-model":  # As each CLI refused a model it does not know, in the real runs of 2026-11-06.
+    if codex:
+        emit({"type": "thread.started", "thread_id": "thread-0001"})
+        emit({"type": "turn.failed", "error": {"message": '{"error": {"code": "model_not_found"}}'}})
+    else:
+        print('[claude-code:unrecognized_model] {"model": "x"}', file=sys.stderr, flush=True)
+        emit({"type": "system", "subtype": "init", "model": "x", "session_id": "claude-session-1"})
+        emit({"type": "result", "result": "There's an issue with the selected model.", "is_error": True, "session_id": "claude-session-1"})
+    sys.exit(1)
 if scenario in ("edit", "edit-hang", "edit-go"):  # It changes a file in its worktree, as an editing turn does.
     Path("edited.txt").write_text(prompt)
 while scenario == "edit-go" and not (Path.home() / ".fake-go").exists():  # Then finishes once the test says go.
@@ -87,10 +114,31 @@ else:
     emit({"type": "stream_event", "event": {"type": "content_block_delta", "delta": {"type": "text_delta", "text": "Hel"}}, "session_id": session})
     if scenario in ("hang", "detach", "detach-wait", "term-spawn", "term-spawn-unmarked", "group-ignore", "chain", "edit-hang"):
         time.sleep(60)
+    # FAKE_ASK: the requests it makes of its host, in order; an allowed one leaves ran-<n> holding the input it was given back.
+    for number, ask in enumerate(json.loads(os.environ.get("FAKE_ASK", "[]")), 1):
+        emit({"type": "control_request", **({} if ask.get("no_id") else {"request_id": f"req-{number}"}),
+              "request": {"subtype": ask.get("subtype", "can_use_tool"), "tool_name": ask.get("tool", "Bash"), "tool_use_id": f"toolu-{number}",
+                          "input": ask.get("input", {"command": f"echo  {number}", "description": "Say a number"}),
+                          "permission_suggestions": [{"type": "addRules", "behavior": "allow"}], **ask.get("extra", {})}})
+        if ask.get("nowait"):
+            continue
+        line = sys.stdin.readline()
+        if not line:
+            sys.exit(0)  # Its input ended while it waited: the prompt is cancelled.
+        with open(Path.home() / ".fake-answers.jsonl", "a") as log:
+            log.write(line)
+        reply = json.loads(line)["response"]["response"]
+        if reply["behavior"] == "allow":
+            Path(f"ran-{number}").write_text(json.dumps(reply["updatedInput"]))
     emit({"type": "stream_event", "event": {"type": "content_block_delta", "delta": {"type": "text_delta", "text": "lo"}}, "session_id": session})
     emit({"type": "assistant", "message": {"content": [{"type": "text", "text": "Hello"}]}, "session_id": session})
     emit({"type": "result", "result": "Hello", "is_error": False, "session_id": session})
+    if stream:
+        sys.stdin.read()  # As Claude Code does: it exits once its input ends.
 '''
+
+
+REPORT = usage.report
 
 
 class SessionTestCase(TaskTestCase):
@@ -106,7 +154,16 @@ class SessionTestCase(TaskTestCase):
         for table, real in ((tasks.PROVIDERS, PROVIDERS), (tasks.REVIEWERS, REVIEWERS)):
             for name in ("claude", "codex"):
                 table[name] = [str(bin_dir / name), *real[name][1:]]
+        conversation = mock.patch.dict(sessions.CONVERSATION, {"claude": [str(bin_dir / "claude"), *CONVERSATION["claude"][1:]]})
+        conversation.start()
+        self.addCleanup(conversation.stop)
+        full = mock.patch.dict(sessions.FULL_ACCESS, {name: [str(bin_dir / name), *FULL_ACCESS[name][1:]] for name in ("claude", "codex")})
+        full.start()
+        self.addCleanup(full.stop)
         self.write_projects(check="true", providers=("claude", "codex", "antigravity"))
+        catalog = mock.patch.dict(sessions._catalog, clear=True)  # Each test reads its own fake's catalog.
+        catalog.start()
+        self.addCleanup(catalog.stop)
         quitting = mock.patch.object(sessions, "_quitting", False)  # stop_all sets it for good, as the backend then exits.
         quitting.start()
         self.addCleanup(quitting.stop)
@@ -160,6 +217,7 @@ DETACHED = (
 )
 FAKE = FAKE.replace("DETACHED", repr(DETACHED))
 PROVIDERS, REVIEWERS = dict(tasks.PROVIDERS), dict(tasks.REVIEWERS)  # Taken at import, before any test patches the tables.
+CONVERSATION, FULL_ACCESS = dict(sessions.CONVERSATION), dict(sessions.FULL_ACCESS)
 
 
 class SessionTests(SessionTestCase):
@@ -169,24 +227,68 @@ class SessionTests(SessionTestCase):
         for provider, mode in (("claude", "edit"), ("claude", "read"), ("codex", "edit"), ("codex", "read")):
             with self.subTest(provider=provider, mode=mode):
                 commands = sessions.detail(self.new(provider, mode))["commands"]
-                self.assertEqual(commands["check"], check if (provider, mode) == ("claude", "edit") else None)
+                self.assertIsNone(commands["check"])  # ADR-0046: with no turn_check, nothing runs without asking.
+                self.assertEqual(commands.get("host_check"), check if mode == "edit" else None)
                 if provider == "codex":
                     self.assertIn("workspace-write" if mode == "edit" else "read-only", commands["description"])
                 elif mode == "read":
                     self.assertIn("Shell commands are unavailable", commands["description"])
         self.assertEqual(self.calls(), [])
 
-    def test_command_guidance_uses_the_same_fallback_check_as_launch(self) -> None:
+    def test_command_guidance_and_launch_allow_no_command_unasked_without_a_turn_check(self) -> None:
         self.write_projects(check="")
         session_id = self.new()
-        self.assertEqual(sessions.detail(session_id)["commands"]["check"], "true")
+        self.assertIsNone(sessions.detail(session_id)["commands"]["check"])
         sessions.send(session_id, "Say hello", "send-0001")
         self.settled(session_id)
-        self.assertIn("Bash(true *)", self.calls()[0]["argv"])
+        self.assertNotIn("--allowedTools", self.calls()[0]["argv"])
 
     def test_the_list_works_before_any_project_is_added(self) -> None:
         (self.home / ".hearth/projects.json").unlink()
         self.assertEqual(sessions.listing()["options"]["projects"], {})
+
+    def real_usage(self) -> None:
+        patch = mock.patch.object(usage, "report", REPORT)  # TaskTestCase stubs it to nothing; these tests read the real files.
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def write_claude_usage(self, line: str) -> None:
+        self.real_usage()
+        samples = self.home / ".hearth/usage/claude-limits.jsonl"
+        samples.parent.mkdir(parents=True, exist_ok=True)
+        samples.write_text(line + "\n", encoding="utf-8")
+
+    def test_a_conversation_sends_at_full_usage_while_a_task_is_refused(self) -> None:
+        window = {"used_percentage": 100, "resets_at": time.time() + 3600}  # A future reset: an expired window reads as no data.
+        self.write_claude_usage(json.dumps({"rate_limits": {"five_hour": window, "seven_day": window}}))
+        self.assertEqual([row["five_hour"] for row in sessions.listing()["usage"] if row["provider"] == "claude"], [100])
+
+        session_id = self.new()
+        sessions.send(session_id, "Say hello", "send-0001")
+        self.settled(session_id)
+        self.assertEqual(len(self.calls()), 1)
+
+        errors = io.StringIO()
+        with contextlib.redirect_stderr(errors):
+            refused = main(["task", "new", "demo", "Add hello.txt"])
+        self.assertEqual(refused, 1)
+        self.assertIn("claude is at 90% or more of a plan limit", errors.getvalue())
+
+    def test_usage_without_a_sample_is_listed_as_missing_and_not_as_zero(self) -> None:
+        self.real_usage()
+        rows = sessions.listing()["usage"]
+        self.assertEqual({row["provider"] for row in rows}, {"claude", "codex"})
+        for row in rows:
+            self.assertIsNone(row["five_hour"])
+            self.assertIsNone(row["week"])
+
+    def test_an_unreadable_usage_log_never_stops_the_list_or_a_send(self) -> None:
+        self.write_claude_usage('{"rate_limits": {"five_hour"')  # The statusline may be mid-write.
+        self.assertEqual(sessions.listing()["usage"], [])
+        session_id = self.new()
+        sessions.send(session_id, "Say hello", "send-0001")
+        self.settled(session_id)
+        self.assertEqual(len(self.calls()), 1)
 
     def test_starting_a_conversation_runs_nothing_and_the_same_request_makes_one(self) -> None:
         first = sessions.create("demo", "claude", "edit", None, "medium", "request-0001")
@@ -756,6 +858,174 @@ class SessionTests(SessionTestCase):
         self.assertIn("slots", str(full.exception))
 
 
+class FullSetupTests(SessionTestCase):
+    """ADR-0049: a Claude conversation that edits runs with the keeper's own Claude setup."""
+
+    def test_an_editing_claude_conversation_runs_with_the_keepers_own_setup_and_resumes_it(self) -> None:
+        session_id = self.new()
+        sessions.send(session_id, "One", "send-0001")
+        self.settled(session_id)
+        sessions.send(session_id, "Two", "send-0002")
+        self.settled(session_id)
+
+        first, second = self.calls()
+        for flag in ("--setting-sources", "--strict-mcp-config", "--tools"):
+            self.assertNotIn(flag, first["argv"])
+        self.assertEqual(first["argv"][first["argv"].index("--permission-mode") + 1], "acceptEdits")
+        self.assertNotIn("--allowedTools", first["argv"])  # ADR-0046: other commands ask the keeper (ApprovalTests).
+        self.assertIn("PushNotification", first["argv"][first["argv"].index("--disallowedTools") + 1].split(","))
+        self.assertIsNone(first["no_memory"])
+        self.assertEqual(second["argv"][:2], ["--resume", "claude-session-1"])
+
+    def test_read_only_claude_and_codex_conversations_keep_their_restrictions(self) -> None:
+        for provider in ("claude", "codex"):
+            session_id = self.new(provider, "read")
+            sessions.send(session_id, "One", "send-0001")
+            self.settled(session_id)
+        claude, codex = self.calls()
+        self.assertIn("--strict-mcp-config", claude["argv"])
+        self.assertEqual(claude["no_memory"], "1")
+        self.assertIn("--ignore-user-config", codex["argv"])
+
+    def test_a_subagents_partial_text_never_joins_the_reply_draft(self) -> None:
+        delta = {"type": "stream_event", "event": {"delta": {"type": "text_delta", "text": "inner"}}}
+        self.assertEqual(transcript._items("claude", json.dumps({**delta, "parent_tool_use_id": "toolu_01"})), [])
+        self.assertEqual([item["text"] for item in transcript._items("claude", json.dumps(delta))], ["inner"])
+
+    def test_claude_configuration_the_agent_changed_stops_the_conversation(self) -> None:
+        for path in (".claude/agents/helper.md", ".mcp.json"):
+            with self.subTest(path=path):
+                session_id = self.new()
+                changed = Path(sessions.detail(session_id)["worktree"], path)
+                changed.parent.mkdir(parents=True, exist_ok=True)
+                changed.write_text("{}", encoding="utf-8")
+                with self.assertRaises(sessions.SessionError) as refused:
+                    sessions.send(session_id, "Hello", "send-0001")
+                self.assertEqual(refused.exception.status, 409)
+                self.assertIn(path, str(refused.exception))
+        self.assertEqual(self.calls(), [])
+
+    def test_tools_nobody_could_approve_are_recorded_from_the_result(self) -> None:
+        text = (FIXTURES / "claude-print-2.1.283-denied.jsonl").read_text(encoding="utf-8")
+        self.assertEqual(sessions._denied(text), ["mcp__claude_ai_Notion__notion-search (hearth)"])
+        refused = json.dumps({"type": "result", "permission_denials": [{"tool_name": "Bash", "tool_input": {"command": "python3 -c 1"}},
+                                                                       {"tool_name": "Bash", "tool_input": {"command": "python3 -c 1"}},
+                                                                       {"tool_name": "Read", "tool_input": {"file_path": "/etc/hosts"}}]})
+        self.assertEqual(sessions._denied(refused), ["Bash (python3 -c 1)", "Read (/etc/hosts)"])
+        self.assertIsNone(sessions._denied((FIXTURES / "claude-print-2.1.283-subagent.jsonl").read_text(encoding="utf-8")))
+
+    def test_a_subagents_and_a_skills_text_is_shown_as_tool_output_not_as_the_reply(self) -> None:
+        items = [item for line in (FIXTURES / "claude-print-2.1.283-subagent.jsonl").read_text(encoding="utf-8").splitlines()
+                 for item in transcript._items("claude", line)]
+        self.assertEqual([item["text"].split()[0] for item in items if item["kind"] == "message"], ["DONE"])
+        self.assertEqual([item["tool"] for item in items if item.get("subagent")], ["Write"])
+        report = next(item for item in items if item["kind"] == "output" and "hand-back" in item["text"])
+        prompt = next(item for item in items if item.get("note"))
+        self.assertEqual((report["for"], prompt["for"]), ("toolu_01", "toolu_01"))  # The Agent call, not the subagent's Write.
+        self.assertEqual([item["id"] for item in items if item["kind"] == "tool"], ["toolu_01", "toolu_02", "toolu_03"])
+
+    def track_configuration(self) -> None:
+        (self.repo / ".claude").mkdir()
+        (self.repo / ".claude/run.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+        (self.repo / ".claude/run.sh").chmod(0o755)
+        (self.repo / ".mcp.json").write_text("{}", encoding="utf-8")
+        git(self.repo, "add", ".claude", ".mcp.json")
+        git(self.repo, "commit", "-q", "-m", "configuration")
+
+    def test_configuration_hidden_from_git_by_an_index_flag_still_stops_the_conversation(self) -> None:
+        self.track_configuration()
+        for flag in ("--skip-worktree", "--assume-unchanged"):
+            with self.subTest(flag=flag):
+                session_id = self.new()
+                worktree = sessions.detail(session_id)["worktree"]
+                subprocess.run(["git", "-C", worktree, "update-index", flag, ".mcp.json"], check=True)
+                Path(worktree, ".mcp.json").write_text('{"mcpServers": {"x": {"command": "x"}}}', encoding="utf-8")
+                self.assertEqual(subprocess.run(["git", "-C", worktree, "status", "--porcelain"], capture_output=True).stdout, b"")
+                with self.assertRaises(sessions.SessionError) as refused:
+                    sessions.send(session_id, "Hello", "send-0001")
+                self.assertIn(".mcp.json", str(refused.exception))
+        self.assertEqual(self.calls(), [])
+
+    def test_unchanged_tracked_configuration_lets_the_conversation_run(self) -> None:
+        self.track_configuration()
+        session_id = self.new()
+        os.chmod(Path(sessions.detail(session_id)["worktree"], ".claude/run.sh"), 0o644)
+        with self.assertRaises(sessions.SessionError):  # A mode change counts.
+            sessions.send(session_id, "Hello", "send-0001")
+        os.chmod(Path(sessions.detail(session_id)["worktree"], ".claude/run.sh"), 0o755)
+        sessions.send(session_id, "Hello", "send-0001")
+        self.settled(session_id)
+        self.assertEqual(len(self.calls()), 1)
+
+FIXTURES = Path(__file__).with_name("fixtures") / "public/providers"
+
+
+class FullAccessTests(SessionTestCase):
+    """Full access, the keeper's choice: any command runs without asking and without a sandbox, in the conversation's worktree."""
+
+    def test_full_access_claude_bypasses_permissions_without_the_approval_protocol_and_resumes_the_same(self) -> None:
+        session_id = self.new(mode="full")
+        sessions.send(session_id, "One", "send-0001")
+        self.settled(session_id)
+        sessions.send(session_id, "Two", "send-0002")
+        self.settled(session_id)
+
+        first, second = self.calls()
+        self.assertEqual(first["argv"][first["argv"].index("--permission-mode") + 1], "bypassPermissions")
+        for flag in ("--settings", "--allowedTools", "--input-format", "--permission-prompt-tool", "--setting-sources", "--tools"):
+            self.assertNotIn(flag, first["argv"])
+        self.assertEqual(first["argv"][first["argv"].index("--disallowedTools") + 1], CONVERSATION["claude"][-1])
+        self.assertIsNone(first["no_memory"])  # The keeper's own setup, memory included.
+        self.assertEqual(second["argv"][:2], ["--resume", "claude-session-1"])
+        self.assertEqual(second["argv"][2:], first["argv"])
+        self.assertEqual(second["prompt"], "Two")
+
+    def test_full_access_codex_runs_without_a_sandbox_and_resumes_it_through_config(self) -> None:
+        session_id = self.new("codex", "full", model=None)
+        sessions.send(session_id, "One", "send-0001")
+        self.settled(session_id)
+        sessions.send(session_id, "Two", "send-0002")
+        self.settled(session_id)
+
+        first, second = self.calls()
+        self.assertEqual(FULL_ACCESS["codex"], [part.replace("workspace-write", "danger-full-access") for part in PROVIDERS["codex"]])
+        self.assertEqual(first["argv"][first["argv"].index("--sandbox") + 1], "danger-full-access")
+        self.assertNotIn("--sandbox", second["argv"])
+        self.assertIn('sandbox_mode="danger-full-access"', second["argv"])
+
+    def test_a_full_turn_takes_an_implement_slot_runs_no_host_check_and_ignores_claude_configuration_changes(self) -> None:
+        os.environ["FAKE_SESSION"] = "edit"
+        for provider in ("claude", "codex"):
+            with self.subTest(provider=provider):
+                session_id = self.new(provider, "full")
+                with mock.patch.dict(tasks.SLOTS, {"implement": 0}), self.assertRaises(sessions.SessionError) as full:
+                    sessions.send(session_id, "Change it", "send-0000")
+                self.assertIn("implement slots", str(full.exception))
+                changed = Path(sessions.detail(session_id)["worktree"], ".claude/agents/helper.md")  # Not settings.json: _tampered guards it.
+                changed.parent.mkdir(parents=True, exist_ok=True)
+                changed.write_text("{}", encoding="utf-8")
+                sessions.send(session_id, "Change it", "send-0001")
+                self.settled(session_id)
+                time.sleep(0.2)  # Long enough for a check after the turn to have been recorded.
+                runs = tasks._read(self.home / ".hearth/tasks" / session_id)["runs"]
+                self.assertEqual([run["role"] for run in runs], [sessions.KIND])
+                self.assertNotIn("host_check", runs[0])
+                self.assertTrue(Path(sessions.detail(session_id)["worktree"], "edited.txt").exists())
+
+    def test_a_running_full_turn_counts_as_implementing(self) -> None:
+        os.environ["FAKE_SESSION"] = "hang"
+        sessions.send(self.new("codex", "full"), "Wait", "send-0001")
+        self.assertEqual((tasks._busy("implement"), tasks._busy("support")), (1, 0))
+
+    def test_full_access_is_described_with_no_check_run_unasked(self) -> None:
+        self.write_projects(check="python -m unittest", providers=("claude", "codex"))
+        claude, codex = (sessions.detail(self.new(provider, "full"))["commands"] for provider in ("claude", "codex"))
+        self.assertEqual(claude, {"description": "Full access: your own Claude setup. It runs any command as you, without asking and without a "
+                                                 "sandbox.", "check": None})
+        self.assertEqual(codex, {"description": "Full access: Codex runs any command as you, without asking and without a sandbox.", "check": None})
+        self.assertEqual(self.calls(), [])
+
+
 class ReleasedReaderTests(SessionTestCase):
     RELEASE = "9372332"  # v0.3.0, the installed runtime before slice 1 and the version a rollback returns to.
 
@@ -922,6 +1192,105 @@ class SessionWorkTests(SessionTestCase):
         run.assert_not_called()
 
 
+# A gh that logs its arguments: `pr view` finds nothing until `pr create` has made the pull request.
+FAKE_GH = (
+    "import json, sys\n"
+    "from pathlib import Path\n"
+    "made = Path.home() / '.fake-gh-pr'\n"
+    "with open(Path.home() / '.fake-gh.jsonl', 'a') as log: log.write(json.dumps(sys.argv[1:]) + '\\n')\n"
+    "if sys.argv[1:3] == ['pr', 'view']:\n"
+    "    if not made.exists(): sys.exit('no pull requests found for branch')\n"
+    "    print(json.dumps({'url': made.read_text(), 'state': 'OPEN'}))\n"
+    "elif sys.argv[1:3] == ['pr', 'create']:\n"
+    "    made.write_text('https://github.com/keeper/demo/pull/7')\n"
+    "    print('https://github.com/keeper/demo/pull/7')\n"
+)
+
+
+class PublishTests(SessionTestCase):
+    """The Commit, push and open PR button: real Git with a local origin, and a fake gh."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.origin = self.home / "origin.git"
+        subprocess.run(["git", "init", "-q", "--bare", str(self.origin)], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "remote", "add", "origin", str(self.origin)], check=True)
+        gh = self.home / "bin" / "gh"
+        gh.write_text(f"#!{sys.executable}\n{FAKE_GH}", encoding="utf-8")
+        gh.chmod(0o755)
+        path = mock.patch.dict(os.environ, {"PATH": f"{gh.parent}{os.pathsep}{os.environ['PATH']}"})
+        path.start()
+        self.addCleanup(path.stop)
+
+    def gh_calls(self) -> list[list[str]]:
+        path = self.home / ".fake-gh.jsonl"
+        return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()] if path.exists() else []
+
+    def test_publishing_commits_the_agents_work_pushes_it_and_opens_one_pull_request(self) -> None:
+        (self.repo / "CONTEXT.md").write_text("Copied in by Hearth, never committed.\n", encoding="utf-8")
+        session_id = self.new(mode="full")
+        record = self.only_task()
+        worktree = Path(record["worktree"])
+        (worktree / "made.txt").write_text("by the agent\n", encoding="utf-8")
+        (worktree / "README.md").write_text("changed by the agent\n", encoding="utf-8")
+        (worktree / ".gitignore").unlink()
+
+        found = sessions.publish(session_id)
+
+        self.assertEqual(found["pr"], "https://github.com/keeper/demo/pull/7")
+        head = subprocess.run(["git", "-C", str(worktree), "rev-parse", "HEAD"], capture_output=True, text=True, check=True).stdout
+        pushed = subprocess.run(["git", "-C", str(self.origin), "rev-parse", f"refs/heads/{record['branch']}"], capture_output=True, text=True, check=True).stdout
+        self.assertEqual(head, pushed)
+        committed = subprocess.run(["git", "-C", str(worktree), "show", "--name-only", "--format=%s", "HEAD"], capture_output=True, text=True, check=True).stdout.split()
+        # The conversation's title, a tracked edit and deletion, and not the guidance Hearth copied in.
+        self.assertEqual(committed, ["New", "conversation", ".gitignore", "README.md", "made.txt"])
+        create = [call for call in self.gh_calls() if call[:2] == ["pr", "create"]]
+        self.assertEqual(len(create), 1)
+        self.assertEqual(create[0][create[0].index("--head") + 1], record["branch"])
+        self.assertIn("- New conversation", create[0][create[0].index("--body") + 1])
+        config = subprocess.run(["git", "-C", str(self.repo), "config", "--list", "--local"], capture_output=True, text=True, check=True).stdout
+        self.assertNotIn(f"branch.{record['branch']}", config)  # No -u: the shared config is never written.
+
+        (worktree / "more.txt").write_text("a second change\n", encoding="utf-8")
+        self.assertEqual(sessions.publish(session_id)["pr"], "https://github.com/keeper/demo/pull/7")
+        self.assertEqual(len([call for call in self.gh_calls() if call[:2] == ["pr", "create"]]), 1)  # The open one is found, not made again.
+        self.assertEqual(subprocess.run(["git", "-C", str(self.origin), "log", "--format=%s", record["branch"]], capture_output=True, text=True,
+                                        check=True).stdout.count("New conversation"), 2)
+        self.assertEqual(sessions.detail(session_id)["pr"], "https://github.com/keeper/demo/pull/7")
+
+    def test_a_guarded_turn_after_publishing_still_runs(self) -> None:
+        session_id = self.new()
+        (Path(self.only_task()["worktree"]) / "made.txt").write_text("by the agent\n", encoding="utf-8")
+        sessions.publish(session_id)
+
+        sessions.send(session_id, "Say hello", "send-0001")
+
+        self.assertEqual(self.settled(session_id)["turns"][-1]["outcome"], "done")  # Hearth's commit and push are not taken for tampering.
+
+    def test_nothing_changed_a_running_turn_and_a_failed_push_are_refused_and_said(self) -> None:
+        session_id = self.new(mode="full")
+        with self.assertRaises(sessions.SessionError) as nothing:
+            sessions.publish(session_id)
+        self.assertIn("Nothing to commit", str(nothing.exception))
+
+        task_dir = self.home / ".hearth/tasks" / session_id
+        record = json.loads((task_dir / "task.json").read_text(encoding="utf-8"))
+        (Path(record["worktree"]) / "made.txt").write_text("by the agent\n", encoding="utf-8")
+        running = {**record, "status": "running", "runs": [{"role": "full", "dir": "001", "started": "now", "finished": None, "pid": os.getpid()}]}
+        (task_dir / "task.json").write_text(json.dumps(running), encoding="utf-8")
+        with self.assertRaises(sessions.SessionError) as busy:
+            sessions.publish(session_id)
+        self.assertEqual(busy.exception.status, 409)
+        self.assertIn("still running", str(busy.exception))
+        (task_dir / "task.json").write_text(json.dumps(record), encoding="utf-8")
+
+        subprocess.run(["git", "-C", str(self.repo), "remote", "remove", "origin"], check=True)
+        with self.assertRaises(sessions.SessionError) as unpushed:
+            sessions.publish(session_id)
+        self.assertIn("Committed, but not pushed", str(unpushed.exception))
+        self.assertEqual(self.gh_calls(), [])
+
+
 class SessionGuardTests(SessionTestCase):
     def test_task_commands_dashboard_tasks_and_stats_leave_sessions_alone(self) -> None:
         session_id = self.new()
@@ -1001,7 +1370,7 @@ class HostCheckTests(SessionTestCase):
         self.assertEqual(third["prompt"], "Again")  # Delivered once.
         self.assertEqual([turn["check"] for turn in sessions.detail(session_id)["turns"][1:]], [None, None])  # Nothing changed.
 
-    def test_no_check_after_a_stopped_turn_or_a_claude_turn(self) -> None:
+    def test_no_check_after_a_stopped_turn_and_claude_gets_no_developer_instructions(self) -> None:
         self.project("echo check-ran")
         os.environ["FAKE_SESSION"] = "edit-hang"
         codex = self.new("codex")
@@ -1020,8 +1389,7 @@ class HostCheckTests(SessionTestCase):
         self.settled(claude)
         time.sleep(0.5)
 
-        for session_id in (codex, claude):
-            self.assertEqual([run["role"] for run in tasks._read(self.home / ".hearth/tasks" / session_id)["runs"]], ["session"])
+        self.assertEqual([run["role"] for run in tasks._read(self.home / ".hearth/tasks" / codex)["runs"]], ["session"])
         self.assertFalse(any(part.startswith("developer_instructions=") for part in self.calls()[1]["argv"]))
         self.assertEqual(self.calls()[1]["prompt"], "Change it")
 
@@ -1166,3 +1534,396 @@ class HostCheckTests(SessionTestCase):
         (worktree / f"new-{sessions.UNTRACKED_LIMIT:03d}.txt").write_text("b", encoding="utf-8")  # Past the Changes view's limit.
         self.assertNotEqual(sessions._fingerprint(task), before)
         self.assertIsNotNone(before)
+
+
+class SessionChoiceTests(SessionTestCase):
+    """ADR-0052 (proposed): the model and effort change from the next message, and a chat starts from one message."""
+
+    def flag(self, argv: list[str], name: str) -> str | None:
+        return argv[argv.index(name) + 1] if name in argv else None
+
+    def test_claude_switching_model_and_effort_between_turns_reaches_the_argv_and_each_turn_keeps_its_own(self) -> None:
+        session_id = self.new()
+        sessions.send(session_id, "One", "send-0001")
+        self.settled(session_id)
+        sessions.choose(session_id, "opus", "max")  # Picked in the box, then later sent with the box's values unchanged.
+        self.assertEqual((sessions.detail(session_id)["model"], sessions.detail(session_id)["effort"]), ("opus", "max"))
+        sessions.send(session_id, "Two", "send-0002")
+        turns = self.settled(session_id)["turns"]
+        while not turns[-1]["finished"] or len(turns) < 2:
+            turns = self.settled(session_id)["turns"]
+
+        first, second = self.calls()
+        self.assertEqual((self.flag(first["argv"], "--model"), self.flag(first["argv"], "--effort")), ("fake-model", "medium"))
+        self.assertEqual(second["argv"][:2], ["--resume", "claude-session-1"])
+        self.assertEqual((self.flag(second["argv"], "--model"), self.flag(second["argv"], "--effort")), ("opus", "max"))
+        self.assertEqual([(turn["model"], turn["effort"], turn["model_used"]) for turn in turns],
+                         [("fake-model", "medium", "fake-model"), ("opus", "max", "opus")])
+
+    def test_codex_switching_with_the_send_reaches_the_argv_and_stays_for_the_next_message(self) -> None:
+        session_id = self.new(provider="codex", mode="read", model="gpt-small")
+        sessions.send(session_id, "One", "send-0001")
+        self.settled(session_id)
+        sessions.send(session_id, "Two", "send-0002", None, "gpt-big", "ultra")
+        for _ in range(200):
+            if (turns := sessions.detail(session_id)["turns"])[-1]["finished"]:
+                break
+            time.sleep(0.05)
+        sessions.send(session_id, "Three", "send-0003")
+        for _ in range(200):
+            if (turns := sessions.detail(session_id)["turns"])[-1]["finished"]:
+                break
+            time.sleep(0.05)
+
+        first, second, third = self.calls()
+        self.assertEqual(second["argv"][:3], ["exec", "resume", "thread-0001"])
+        self.assertEqual((self.flag(first["argv"], "-m"), self.flag(second["argv"], "-m"), self.flag(third["argv"], "-m")), ("gpt-small", "gpt-big", "gpt-big"))
+        self.assertIn("model_reasoning_effort=medium", first["argv"])
+        self.assertIn("model_reasoning_effort=ultra", second["argv"])
+        self.assertIn("model_reasoning_effort=ultra", third["argv"])
+        self.assertEqual([turn["model_used"] for turn in turns], ["gpt-small", "gpt-big", "gpt-big"])
+
+    def test_a_turn_already_running_keeps_what_it_started_with(self) -> None:
+        session_id = self.new()
+        with mock.patch.dict(os.environ, {"FAKE_SESSION": "hang"}):
+            sessions.send(session_id, "One", "send-0001")
+            sessions.choose(session_id, "opus", "high")
+            detail = sessions.detail(session_id)
+            self.assertEqual((detail["turns"][0]["model"], detail["turns"][0]["effort"]), ("fake-model", "medium"))
+            self.assertEqual((detail["model"], detail["effort"]), ("opus", "high"))
+            sessions.stop(session_id, detail["turns"][0]["dir"])
+
+    def test_a_refused_value_changes_nothing_and_starts_no_turn(self) -> None:
+        session_id = self.new()
+        codex_id = self.new(provider="codex", mode="read", model="gpt-small")
+        cases = [(session_id, "opus", "silly"),  # Claude Code would drop this with a warning and run on.
+                 (session_id, "--dangerously-skip-permissions", "high"),  # Never a flag in the model's place.
+                 (session_id, "two words", "high"),
+                 (codex_id, "gpt-small", "ultra"),  # Codex would run this, though its catalog does not list it for this model.
+                 (codex_id, "gpt-unknown", "silly")]
+        for target, model, effort in cases:
+            before = sessions.detail(target)
+            with self.subTest(model=model, effort=effort):
+                with self.assertRaises(sessions.SessionError) as choosing:
+                    sessions.choose(target, model, effort)
+                with self.assertRaises(sessions.SessionError) as sending:
+                    sessions.send(target, "Hi", f"send-{time.time_ns()}", None, model, effort)
+                self.assertEqual((choosing.exception.status, sending.exception.status), (400, 400))
+                after = sessions.detail(target)
+                self.assertEqual((after["model"], after["effort"], after["turns"]), (before["model"], before["effort"], []))
+        self.assertEqual(self.calls(), [])
+        self.assertEqual(sessions.choose(codex_id, "gpt-unknown", "xhigh")["effort"], "xhigh")  # A typed model gets the CLI's whole list.
+        with self.assertRaises(sessions.SessionError):
+            sessions.create("demo", "claude", "edit", "-x", "medium", "request-refused-1")
+
+    def test_a_retried_send_keeps_the_settings_it_first_used(self) -> None:
+        session_id = self.new()
+        sessions.send(session_id, "One", "send-0001", None, "opus", "high")
+        self.settled(session_id)
+        sessions.send(session_id, "One", "send-0001", None, "sonnet", "low")  # The same click again, whatever the box now shows.
+        detail = sessions.detail(session_id)
+        self.assertEqual(len(self.calls()), 1)
+        self.assertEqual((detail["model"], detail["effort"], detail["turn_count"]), ("opus", "high", 1))
+
+    def test_a_chat_starts_from_one_message_and_a_retry_creates_and_sends_once(self) -> None:
+        def start() -> str:
+            session = sessions.create("demo", "claude", "edit", "opus", "high", "request-chat-0001")
+            sessions.send(session["id"], "Fix the bug", "send-chat-0001", None, "opus", "high")
+            return session["id"]
+
+        session_id = start()
+        detail = self.settled(session_id)
+        self.assertEqual(start(), session_id)  # The reply was lost, so the page sends both again with the same IDs.
+        self.assertEqual(len(self.calls()), 1)
+        self.assertEqual(self.calls()[0]["prompt"], "Fix the bug")
+        self.assertEqual((detail["title"], self.flag(self.calls()[0]["argv"], "--model")), ("Fix the bug", "opus"))
+        self.assertEqual(len([found for found in sessions._sessions() if found.get("request") == "request-chat-0001"]), 1)
+
+    def test_a_create_retried_while_the_first_still_runs_makes_one_conversation(self) -> None:
+        import threading
+        found = []
+        threads = [threading.Thread(target=lambda: found.append(sessions.create("demo", "claude", "edit", "opus", "high", "request-both-0001")["id"]))
+                   for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        self.assertEqual(len(set(found)), 1)
+        self.assertEqual(len(sessions._sessions()), 1)
+
+    def test_options_list_each_clis_models_and_efforts(self) -> None:
+        agents = sessions.options()["agents"]
+        self.assertEqual(agents["codex"]["models"], [{"id": "gpt-big", "efforts": ["low", "ultra"]}, {"id": "gpt-small", "efforts": ["low", "medium"]}])
+        self.assertEqual([row["id"] for row in agents["claude"]["models"]], ["fable", "opus", "sonnet", "haiku"])
+        self.assertEqual(agents["claude"]["efforts"], ["low", "medium", "high", "xhigh", "max"])
+
+    def test_the_codex_catalog_is_read_once_and_a_broken_one_falls_back(self) -> None:
+        real = subprocess.run
+        with mock.patch.object(sessions.subprocess, "run", side_effect=real) as run:
+            sessions.options()
+            sessions.options()
+        self.assertEqual(sum(call.args[0][1:] == ["debug", "models"] for call in run.call_args_list), 1)
+        for env in ({"FAKE_CATALOG": "not json"}, {"FAKE_CATALOG": '{"models": [{"slug": 5}, "x", {"slug": "--bad", "visibility": "list"}]}'},
+                    {"FAKE_CATALOG_EXIT": "2"}):
+            sessions._catalog.clear()
+            with self.subTest(env=env), mock.patch.dict(os.environ, env):
+                self.assertEqual(sessions.options()["agents"]["codex"]["models"], [])
+        sessions._catalog.clear()
+        with mock.patch.dict(tasks.PROVIDERS, {"codex": [str(self.home / "no-such-codex"), *tasks.PROVIDERS["codex"][1:]]}):
+            self.assertEqual(sessions.options()["agents"]["codex"]["models"], [])
+
+    def test_a_model_the_cli_refuses_fails_that_turn_says_so_and_the_next_model_resumes(self) -> None:
+        for provider, model, resume in (("claude", "fake-model", "--resume"), ("codex", "gpt-small", "resume")):
+            with self.subTest(provider=provider):
+                session_id = self.new(provider=provider, mode="read", model=model)
+                with mock.patch.dict(os.environ, {"FAKE_SESSION": "refuse-model"}):
+                    sessions.send(session_id, "One", f"send-{provider}-1")
+                    turn = self.settled(session_id)["turns"][0]
+                self.assertEqual((turn["outcome"], turn["model_refused"]), ("failed", True))
+                sessions.send(session_id, "Two", f"send-{provider}-2", None, "opus" if provider == "claude" else "gpt-big", "low")
+                for _ in range(200):
+                    if (turn := sessions.detail(session_id)["turns"][-1])["finished"]:
+                        break
+                    time.sleep(0.05)
+                self.assertEqual(turn["outcome"], "done")
+                self.assertFalse(turn["model_refused"])
+                self.assertIn(resume, self.calls()[-1]["argv"])
+
+
+class GitGuardTests(SessionTestCase):
+    """ADR-0046: the paths in the shared .git that an approved command may not write."""
+
+    def test_it_names_existing_history_and_other_work_and_leaves_the_conversations_own_branch(self) -> None:
+        git(self.repo, "branch", "other")
+        session_id, other = self.new(), self.new("codex")
+        dot = (self.repo / ".git").resolve()
+        loose = next(path for folder in (dot / "objects").iterdir() if len(folder.name) == 2 for path in folder.iterdir())
+
+        deny = set(sessions._git_guard(tasks._read(self.home / ".hearth/tasks" / session_id)))
+
+        for name in ("index", "index.lock", "HEAD", "config", "hooks", "info", "MERGE_HEAD", "packed-refs", "packed-refs.lock",
+                     "objects/pack", "objects/info", "refs/heads/other", "refs/heads/other.lock", "logs/refs/heads/other", "refs/tags",
+                     "refs/remotes", "refs/replace", "refs/notes", "refs/stash", "logs/refs/stash", "logs/HEAD",
+                     f"refs/heads/hearth/{other}", f"worktrees/{other}"):
+            self.assertIn(str(dot / name), deny)
+        self.assertIn(str(loose), deny)
+        for name in ("objects", "refs", "logs", "worktrees", "refs/heads", f"refs/heads/hearth/{session_id}",
+                     f"logs/refs/heads/hearth/{session_id}", f"worktrees/{session_id}"):
+            self.assertNotIn(str(dot / name), deny)
+
+
+class ApprovalTests(SessionTestCase):
+    """ADR-0045 and ADR-0046: a Claude conversation that edits asks the keeper before a command, and runs it in the sandbox."""
+
+    def ask(self, *requests: dict) -> str:
+        os.environ["FAKE_ASK"] = json.dumps(list(requests) or [{}])
+        self.addCleanup(os.environ.pop, "FAKE_ASK", None)
+        session_id = self.new()
+        sessions.send(session_id, "Run it", "send-0001")
+        return session_id
+
+    def approvals(self, session_id: str, pending: int | None = None) -> list[dict]:
+        for _ in range(200):
+            found = tasks._read(self.home / ".hearth/tasks" / session_id)["runs"][0].get("approvals") or []
+            if pending is None or sum(not entry["decision"] for entry in found) == pending and found:
+                return found
+            time.sleep(0.05)
+        self.fail("The request did not arrive.")
+
+    def answers(self) -> list[dict]:
+        path = self.home / ".fake-answers.jsonl"
+        return [json.loads(line)["response"] for line in path.read_text(encoding="utf-8").splitlines()] if path.exists() else []
+
+    def test_only_an_editing_claude_turn_asks_and_it_runs_sandboxed_without_the_host_check_allowed(self) -> None:
+        self.write_projects(check="echo full", providers=("claude", "codex"))
+        for provider, mode in (("claude", "edit"), ("claude", "read"), ("codex", "edit")):
+            session_id = self.new(provider, mode)
+            sessions.send(session_id, "Hello", f"send-{provider}-{mode}")
+            self.settled(session_id)
+        edit, read, codex = (call["argv"] for call in self.calls())
+
+        self.assertEqual(edit[-4:], ["--input-format", "stream-json", "--permission-prompt-tool", "stdio"])
+        settings = json.loads(edit[edit.index("--settings") + 1])["sandbox"]
+        self.assertEqual((settings["enabled"], settings["failIfUnavailable"], settings["allowUnsandboxedCommands"], settings["autoAllowBashIfSandboxed"]),
+                         (True, True, False, False))
+        self.assertIn(str((self.repo / ".git").resolve() / "HEAD"), settings["filesystem"]["denyWrite"])
+        self.assertNotIn("--allowedTools", edit)  # ADR-0046: the project's check is never run by the agent unasked.
+        self.assertFalse(any("echo full" in part for part in edit))
+        for argv in (read, codex):
+            self.assertFalse({"--input-format", "--permission-prompt-tool"} & set(argv))
+        self.assertNotIn("--input-format", PROVIDERS["claude"] + REVIEWERS["claude"])  # Tasks keep their tables.
+
+    def test_a_turn_check_is_the_only_command_allowed_without_asking(self) -> None:
+        config = {"path": str(self.repo), "check": "echo full", "turn_check": "echo quick", "providers": ["claude"]}
+        (self.home / ".hearth/projects.json").write_text(json.dumps({"demo": config}), encoding="utf-8")
+        session_id = self.new()
+        sessions.send(session_id, "Hello", "send-0001")
+        self.settled(session_id)
+        argv = self.calls()[0]["argv"]
+
+        self.assertEqual(argv[argv.index("--allowedTools") + 1], "Bash(echo quick *)")
+        self.assertEqual(sessions.detail(session_id)["commands"]["check"], "echo quick")
+
+    def test_allow_once_returns_the_command_unchanged_and_a_repeat_sends_nothing_more(self) -> None:
+        session_id = self.ask()
+        entry = self.approvals(session_id, pending=1)[0]
+        self.assertEqual((entry["tool"], entry["command"], entry["description"], entry["tool_use_id"]), ("Bash", "echo  1", "Say a number", "toolu-1"))
+        self.assertEqual(sessions.detail(session_id)["turns"][0]["approvals"][0]["decision"], None)
+
+        sessions.answer(session_id, "req-1", True)
+        again = sessions.answer(session_id, "req-1", False)  # A repeat, even a different one, returns what was recorded.
+        detail = self.settled(session_id)
+
+        self.assertEqual((again["turns"][0]["approvals"][0]["decision"], detail["turns"][0]["outcome"]), ("allowed", "done"))
+        entry = self.approvals(session_id)[0]
+        self.assertEqual((entry["decision"], entry["by"], entry["reason"]), ("allowed", "keeper", None))
+        self.assertEqual(self.answers(), [{"subtype": "success", "request_id": "req-1", "response": {
+            "behavior": "allow", "updatedInput": {"command": "echo  1", "description": "Say a number"}}}])
+        events = (self.home / ".hearth/tasks" / session_id / "runs/01-session-claude/events.jsonl").read_text(encoding="utf-8")
+        self.assertIn('"request_id": "req-1"', events)  # Kept as it arrived, with the rest of the turn.
+        self.assertIn('"type": "result"', events)
+
+    def test_deny_tells_claude_and_the_turn_goes_on(self) -> None:
+        session_id = self.ask()
+        self.approvals(session_id, pending=1)
+        sessions.answer(session_id, "req-1", False)
+        detail = self.settled(session_id)
+
+        self.assertEqual(self.answers()[0]["response"], {"behavior": "deny", "message": "The keeper declined this command."})
+        self.assertEqual((detail["turns"][0]["approvals"][0]["decision"], detail["turns"][0]["outcome"]), ("denied", "done"))
+        self.assertFalse((Path(detail["worktree"]) / "ran-1").exists())
+
+    def test_anything_but_a_bash_command_is_refused_without_asking_the_keeper(self) -> None:
+        session_id = self.ask({"tool": "Read", "input": {"file_path": "/etc/hosts"}, "extra": {"blocked_path": "/etc/hosts"}},
+                              {"tool": "SandboxNetworkAccess", "input": {"host": "example.com"}}, {"tool": "mcp__mail__send", "input": {}},
+                              {"input": {"command": None}})
+        detail = self.settled(session_id)
+
+        found = detail["turns"][0]["approvals"]
+        self.assertEqual([(entry["decision"], entry["by"]) for entry in found], [("refused", "policy")] * 4)
+        self.assertEqual([entry["reason"] for entry in found[:3]],
+                         ["Read on /etc/hosts", "a network host, example.com", "a tool other than Bash, mcp__mail__send"])
+        self.assertEqual({answer["response"]["behavior"] for answer in self.answers()}, {"deny"})
+
+    def test_an_unanswered_request_expires_and_the_turn_goes_on(self) -> None:
+        with mock.patch.object(sessions, "EXPIRY_SECONDS", 0.2):
+            session_id = self.ask()
+            detail = self.settled(session_id)
+
+        entry = detail["turns"][0]["approvals"][0]
+        self.assertEqual((entry["decision"], entry["by"], detail["turns"][0]["outcome"]), ("expired", "expiry", "done"))
+        self.assertEqual(self.answers()[0]["response"]["message"], "Nobody answered in time.")
+
+    def test_stop_cancels_a_pending_request_and_no_answer_is_ever_sent(self) -> None:
+        session_id = self.ask()
+        self.approvals(session_id, pending=1)
+        sessions.stop(session_id, "01-session-claude")
+        detail = sessions.detail(session_id)
+
+        entry = detail["turns"][0]["approvals"][0]
+        self.assertEqual((entry["decision"], entry["by"], detail["turns"][0]["outcome"]), ("cancelled", "stop", "cancelled"))
+        self.assertEqual(sessions.answer(session_id, "req-1", True)["turns"][0]["approvals"][0]["decision"], "cancelled")
+        self.assertEqual(self.answers(), [])
+
+    def test_an_answer_is_refused_once_the_stop_has_begun_or_by_a_backend_that_does_not_hold_the_turn(self) -> None:
+        session_id = self.ask()
+        self.approvals(session_id, pending=1)
+        task_dir = self.home / ".hearth/tasks" / session_id
+        with mock.patch.dict(sessions._streams, clear=True), self.assertRaises(sessions.SessionError) as other_backend:
+            sessions.answer(session_id, "req-1", True)
+        task = tasks._read(task_dir)
+        task["runs"][0]["stopping"] = "keeper"  # As Stop marks it, before it stops anything.
+        tasks._write(task_dir, task)
+        with self.assertRaises(sessions.SessionError) as stopping:
+            sessions.answer(session_id, "req-1", True)
+        with self.assertRaises(sessions.SessionError) as unknown:
+            sessions.answer(session_id, "req-9", True)
+
+        self.assertEqual((other_backend.exception.status, stopping.exception.status, unknown.exception.status), (409, 409, 404))
+        self.assertEqual(self.answers(), [])
+
+    def test_quitting_and_the_timeout_cancel_a_pending_request(self) -> None:
+        session_id = self.ask()
+        self.approvals(session_id, pending=1)
+        sessions.stop_all()
+        self.assertEqual([(entry["decision"], entry["by"]) for entry in self.approvals(session_id)], [("cancelled", "quit")])
+
+        with mock.patch.object(sessions, "_quitting", False), mock.patch.object(sessions, "TIMEOUT_SECONDS", 0.5):
+            timed = self.ask()
+            turn = self.settled(timed)["turns"][0]
+        self.assertEqual((turn["approvals"][0]["decision"], turn["approvals"][0]["by"], turn["stopped_by"]), ("cancelled", "timeout", "timeout"))
+        self.assertEqual(self.answers(), [])
+
+    def test_a_turn_left_by_a_crashed_backend_has_its_request_cancelled_and_is_never_answered(self) -> None:
+        session_id = self.ask()
+        self.approvals(session_id, pending=1)
+        with sessions._active_lock:  # As after a restart: this backend holds nothing.
+            process = sessions._active.pop(session_id)
+            sessions._streams.pop(session_id)
+        sessions.recover()
+        process.wait(timeout=10)
+
+        detail = sessions.detail(session_id)
+        entry = detail["turns"][0]["approvals"][0]
+        self.assertEqual((entry["decision"], entry["by"], detail["turns"][0]["outcome"]), ("cancelled", "crash", "interrupted"))
+        self.assertEqual(self.answers(), [])
+
+    def test_a_protocol_hearth_does_not_know_stops_the_turn_by_name(self) -> None:
+        cases = (({"FAKE_ASK": json.dumps([{"subtype": "hook_callback"}])}, "unknown control request, hook_callback"),
+                 ({"FAKE_ASK": json.dumps([{"no_id": True}])}, "without its ID"),
+                 ({"FAKE_ASK": json.dumps([{"nowait": True}, {"tool": 7}])}, "without its ID"),
+                 ({"FAKE_INIT": "error"}, "refused initialize"), ({"FAKE_INIT": "silent", "FAKE_SESSION": "hang"}, "did not answer initialize"))
+        for number, (env, why) in enumerate(cases):
+            wait = 0.3 if env.get("FAKE_INIT") == "silent" else sessions.INITIALIZE_SECONDS  # Short only where nothing answers: a slow start is not silence.
+            with self.subTest(why=why, env=env), mock.patch.dict(os.environ, env), mock.patch.object(sessions, "INITIALIZE_SECONDS", wait):
+                session_id = self.new()
+                sessions.send(session_id, "Run it", f"send-000{number}")
+                turn = self.settled(session_id)["turns"][0]
+                self.assertEqual(turn["outcome"], "failed")
+                self.assertTrue(turn["error"].startswith("claude_protocol_changed: "), turn["error"])
+                self.assertIn(why, turn["error"])
+                self.assertEqual(bool(turn["approvals"]), "nowait" in env.get("FAKE_ASK", ""))
+                if turn["approvals"]:  # One was waiting when the unknown request came: refused first, never allowed.
+                    self.assertEqual((turn["approvals"][0]["decision"], turn["approvals"][0]["reason"]), ("refused", "claude_protocol_changed"))
+
+    def test_a_long_message_arrives_whole_and_a_late_failure_from_another_turn_changes_nothing(self) -> None:
+        message = "word " * 3990  # More than a pipe holds at once, so it is written in parts while the agent starts.
+        session_id = self.ask()
+        self.approvals(session_id, pending=1)
+        task_dir = self.home / ".hearth/tasks" / session_id
+        sessions._protocol_changed(task_dir, "00-an-earlier-turn", sessions._active[session_id], "late")
+        self.assertNotIn("protocol_error", tasks._read(task_dir)["runs"][0])
+        sessions.answer(session_id, "req-1", False)
+        self.settled(session_id)
+        os.environ.pop("FAKE_ASK")
+        sessions.send(session_id, message, "send-0002")
+        self.settled(session_id)
+
+        self.assertEqual(self.calls()[-1]["prompt"], message.strip())
+
+    def test_a_turn_is_refused_when_settings_exclude_commands_from_the_sandbox_or_the_guard_is_too_long(self) -> None:
+        (self.home / ".claude").mkdir(exist_ok=True)
+        (self.home / ".claude/settings.json").write_text(json.dumps({"sandbox": {"excludedCommands": ["docker *"]}}), encoding="utf-8")
+        excluded = self.new()
+        sessions.send(excluded, "Hello", "send-0001")
+        (self.home / ".claude/settings.json").unlink()
+        with mock.patch.object(sessions, "GUARD_LIMIT", 3):
+            long = self.new()
+            sessions.send(long, "Hello", "send-0002")
+
+        self.assertTrue(sessions.detail(excluded)["turns"][0]["error"].startswith("sandbox_excluded_commands: "))
+        self.assertTrue(sessions.detail(long)["turns"][0]["error"].startswith("git_guard_too_large: "))
+        self.assertEqual(self.calls(), [])
+
+    def test_hearth_runs_the_projects_check_after_a_claude_turn_that_changed_files(self) -> None:
+        self.write_projects(check="echo host-check", providers=("claude",))
+        os.environ["FAKE_SESSION"] = "edit"
+        session_id = self.new()
+        sessions.send(session_id, "Change it", "send-0001")
+        for _ in range(200):
+            check = sessions.detail(session_id)["turns"][0]["check"]
+            if check and check["finished"]:
+                break
+            time.sleep(0.05)
+
+        self.assertEqual((check["command"], check["outcome"], check["tail"]), ("echo host-check", "done", "host-check"))

@@ -78,7 +78,8 @@
               <fieldset class="form-row">
                 <legend>What it may do</legend>
                 <div class="choices">
-                  <label class="choice"><input type="radio" name="convo-mode" value="edit" checked><span>Edit files in its own worktree</span></label>
+                  <label class="choice"><input type="radio" name="convo-mode" value="full" checked><span>Full access: runs any command, without asking</span></label>
+                  <label class="choice"><input type="radio" name="convo-mode" value="edit"><span>Guarded: Claude asks before a command, Codex stays in its sandbox</span></label>
                   <label class="choice"><input type="radio" name="convo-mode" value="read"><span>Read only</span></label>
                 </div>
               </fieldset>
@@ -102,7 +103,7 @@
               <nav id="convo-tabs" class="convo-tabs" aria-label="Conversations in this project"></nav>
               <div id="convo-scroll" class="convo-scroll">
                 <ol id="convo-log" class="convo-log" aria-label="Conversation"></ol>
-                <div id="convo-changes-card" class="changes-card" hidden><span id="convo-changes-line"></span><button id="convo-changes-open" class="btn small" type="button">Open changes</button></div>
+                <div id="convo-changes-card" class="changes-card" hidden><span id="convo-changes-line"></span><a id="convo-pr" class="btn small" target="_blank" rel="noopener" hidden>View PR</a><button id="convo-changes-open" class="btn small" type="button">Open changes</button><button id="convo-publish" class="btn small" type="button">Commit and open PR</button></div>
               </div>
               <div class="composer-wrap">
                 <form id="convo-composer" class="composer">
@@ -117,6 +118,8 @@
                   </div>
                 </form>
                 <p id="convo-hint" class="composer-hint"></p>
+                <p id="convo-usage-warning" class="composer-hint usage-warning" role="status" hidden></p>
+                <p id="convo-usage" class="composer-hint usage-line"></p>
               </div>
               <p id="convo-status" class="visually-hidden" role="status" aria-live="polite"></p>
             </div>
@@ -244,6 +247,17 @@
             <p id="convo-commands" class="convo-fixed meta"></p>
             <p class="convo-fixed meta">Model and effort are fixed for this conversation. For others, <a href="#/sessions/new">start a new conversation</a>; it begins without this one's context.</p>
             <button id="convo-open" class="btn" type="button" disabled><svg><use href="#i-folder"/></svg>Open work folder</button>
+            <label class="setting">Warn when usage reaches
+              <select id="convo-usage-warn">
+                <option value="off">Off</option>
+                <option value="50">50%</option>
+                <option value="70">70%</option>
+                <option value="80">80%</option>
+                <option value="90">90%</option>
+                <option value="95">95%</option>
+                <option value="100">100%</option>
+              </select>
+            </label>
           </div>
         </aside>
       </div>

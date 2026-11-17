@@ -359,13 +359,20 @@ class HearthWebApplication:
                                                                        text("effort"), text("request"))})
             if method == "POST" and len(parts) == 2 and parts[1] == "send":
                 at = payload.get("draft_at")
-                return self._json_response({"session": sessions.send(parts[0], text("message"), text("send"), at if isinstance(at, int) else None)})
+                return self._json_response({"session": sessions.send(parts[0], text("message"), text("send"), at if isinstance(at, int) else None,
+                                                                     text("model"), text("effort"))})
+            if method == "POST" and len(parts) == 2 and parts[1] == "settings":
+                return self._json_response({"session": sessions.choose(parts[0], text("model"), text("effort"))})
             if method == "POST" and len(parts) == 2 and parts[1] == "draft":
                 return self._json_response({"draft": sessions.save_draft(parts[0], text("text"), payload.get("at"))})
             if method == "GET" and len(parts) == 2 and parts[1] == "changes":
                 return self._json_response({"changes": sessions.changes(parts[0])})
             if method == "POST" and len(parts) == 2 and parts[1] == "open":
                 return self._json_response(sessions.open_folder(parts[0]))
+            if method == "POST" and len(parts) == 2 and parts[1] == "publish":
+                return self._json_response({"session": sessions.publish(parts[0])})
+            if method == "POST" and len(parts) == 2 and parts[1] == "answer":
+                return self._json_response({"session": sessions.answer(parts[0], text("request") or "", payload.get("allow") is True)})
             if method == "POST" and len(parts) == 2 and parts[1] == "stop":
                 return self._json_response({"session": sessions.stop(parts[0], text("run"))})
         except sessions.SessionError as exc:

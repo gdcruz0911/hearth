@@ -1,7 +1,7 @@
 // The Sessions view (ADR-0041): direct conversations with one CLI, from api/sessions, with each turn's events read
 // through the same transcript endpoint as tasks. Every value is written with textContent.
 (() => {
-  const { el, shown, badge, api } = window.Hearth;
+  const { el, shown, badge, safeLink, api, stored, store } = window.Hearth;
   const $ = (id) => document.getElementById(id);
   const AGENTS = { claude: "Claude Code", codex: "Codex" };
   const state = { visible: false, selected: null, options: null, sessions: [], detail: null, turns: new Map(), sending: null, timer: 0, said: "",
@@ -225,9 +225,43 @@
     return last.check && !last.check.finished ? last.check : null; // The check Hearth runs after a turn stops like a turn.
   }
 
+  function percent(value) {
+    return typeof value === "number" ? `${+value.toFixed(1)}%` : "not reported"; // UI-8: a missing number is never 0%.
+  }
+
+  function usageWindow(name, value, reached) {
+    const item = el("span", "usage-window");
+    if (typeof value === "number") {
+      const bar = el("meter", reached ? "reached" : "");
+      Object.assign(bar, { min: 0, max: 100, value });
+      bar.setAttribute("aria-hidden", "true"); // The number beside it says the same.
+      item.append(bar);
+    }
+    item.append(`${name} ${percent(value)}`);
+    return item;
+  }
+
+  function renderUsage() {
+    // Shown only: nothing here, or in the backend's send, stops a message at any level (ADR-0050).
+    const level = Number($("convo-usage-warn").value); // "Off" is NaN, which no number reaches.
+    const reached = (provider, value) => provider === state.detail?.provider && typeof value === "number" && value >= level;
+    $("convo-usage").replaceChildren(...Object.keys(AGENTS).flatMap((provider) => {
+      const row = (state.usage || []).find((item) => item.provider === provider) || {};
+      return [el("span", "usage-agent", agent(provider)),
+              usageWindow("5-hour", row.five_hour, reached(provider, row.five_hour)), usageWindow("week", row.week, reached(provider, row.week))];
+    }));
+    const mine = (state.usage || []).find((item) => item.provider === state.detail?.provider) || {};
+    const over = [["5-hour", mine.five_hour], ["weekly", mine.week]].filter(([, value]) => reached(mine.provider, value));
+    const warning = $("convo-usage-warning");
+    const text = over.length ? `${agent(mine.provider)} has used ${over.map(([name, value]) => `${percent(value)} of its ${name} limit`).join(" and ")}.` : "";
+    warning.hidden = !over.length;
+    if (warning.textContent !== text) warning.textContent = text; // Its own live region: unchanged text is not announced again.
+  }
+
   function renderDetail() {
     const session = state.detail;
     if (!session) return;
+    renderUsage();
     $("convo-title").textContent = shown(session.title);
     $("convo-project-name").textContent = session.project;
     const field = (label, value) => {
@@ -236,10 +270,10 @@
       return row;
     };
     $("convo-meta").replaceChildren(field("Agent", agent(session.provider)), field("Model asked for", session.model || "the CLI's default"),
-      field("Effort", session.effort), field("May", session.mode === "edit" ? "edit its own worktree" : "read only"),
+      field("Effort", session.effort), field("May", session.mode === "full" ? "full access: any command, without asking" : session.mode === "edit" ? "edit, guarded: Claude asks before a command, Codex stays in its sandbox" : "read only"),
       field("Agent session kept", session.resumable ? "yes, the next message resumes it" : "not yet"), field("Work folder", session.worktree));
     $("convo-meta").lastElementChild.lastElementChild.classList.add("path");
-    $("convo-mode").replaceChildren(icon("shield"), el("span", "", session.mode === "edit" ? "Own worktree" : "Read only"));
+    $("convo-mode").replaceChildren(icon("shield"), el("span", "", session.mode === "full" ? "Full access" : session.mode === "edit" ? "Guarded" : "Read only"));
     // The recipient is fixed for a conversation: another agent is another conversation.
     $("convo-recipient").replaceChildren(icon("flame"), el("span", "", "To "), el("strong", "", agent(session.provider)),
       el("span", "", `· ${session.model || "CLI default"} · ${session.effort}`));
@@ -251,6 +285,9 @@
     if (session.commands?.host_check) commands.append(" After a turn that changes files, Hearth runs ", el("code", "", session.commands.host_check), " outside the sandbox.");
     commands.append(" Hearth cannot approve extra commands here.");
     $("convo-badge").replaceChildren(session.status ? badge(session.status) : el("span", "badge other", "new"));
+    $("convo-pr").hidden = !safeLink(session.pr);
+    if (safeLink(session.pr)) $("convo-pr").href = safeLink(session.pr);
+    $("convo-publish").hidden = session.mode === "read";
     const finished = session.turns.filter((turn) => turn.finished).length;
     const key = `${session.id}:${finished}`;
     if (key !== state.changesKey) {
@@ -303,18 +340,60 @@
     return { node, items, foot, turn, offset: 0, done: false, draft: null, tool: null, footKey: "", work: null, steps: 0, failed: 0 };
   }
 
+  // ADR-0045: a command Claude asked to run. A pending one waits for Allow once or Deny; the others say what was decided.
+  function approvalViews(turn) {
+    const said = { allowed: "You allowed", denied: "You declined", expired: "Nobody answered in time, so Hearth refused",
+      cancelled: "Never answered, because the reply ended:", refused: "Hearth refused without asking:" };
+    return (turn.approvals || []).map((entry) => {
+      if (entry.decision) {
+        const note = el("p", "turn-note", `${said[entry.decision] || entry.decision} `);
+        note.append(el("code", "", entry.command || entry.reason || entry.tool));
+        if (entry.command && entry.reason) note.append(` ${entry.reason}`);
+        return note;
+      }
+      const box = el("div", "approval");
+      box.append(el("p", "approval-title", `${agent(state.detail.provider)} asks to run a command`), el("pre", "approval-command", entry.command));
+      if (entry.description) box.append(el("p", "turn-note", entry.description));
+      box.append(el("p", "turn-note", `It runs in ${state.detail.worktree}, inside Claude Code's sandbox: no network, none of your `
+        + "sign-ins, and no writes outside this folder. Allowing covers this one command. Unanswered, it is refused after 10 minutes."));
+      const row = el("div", "approval-actions");
+      for (const [label, allow, style] of [["Allow once", true, "btn small primary"], ["Deny", false, "btn small"]]) {
+        const button = el("button", style, label);
+        button.type = "button";
+        button.addEventListener("click", () => answer(entry.request_id, allow, row));
+        row.append(button);
+      }
+      box.append(row);
+      return box;
+    });
+  }
+
+  async function answer(request, allow, row) {
+    const from = state.selected;
+    for (const button of row.children) button.disabled = true;
+    try {
+      await api(`sessions/${encodeURIComponent(from)}/answer`, { request, allow });
+      if (state.selected === from) $("convo-send-error").hidden = true;
+    } catch (failure) {
+      if (state.selected !== from) return; // Shown only with the conversation it is about.
+      $("convo-send-error").hidden = false;
+      $("convo-send-error").textContent = failure.message;
+    }
+    await tick();
+  }
+
   function footer(view) {
     const { turn } = view;
     // Whether anything arrived is part of the key: on reopening, the footer is drawn before the transcript is read.
     const key = JSON.stringify([turn.finished, turn.outcome, turn.model_used, turn.warnings, turn.error, Boolean(view.draft),
-      view.items.children.length > 0, turn.left_running, turn.left_in_folder, turn.cleanup_unchecked, turn.check]);
+      view.items.children.length > 0, turn.left_running, turn.left_in_folder, turn.cleanup_unchecked, turn.check, turn.denied, turn.approvals]);
     if (key === view.footKey) return;
     view.footKey = key;
     const parts = [];
     if (!turn.finished) {
       const line = el("p", "turn-live");
       line.append(el("span", "pulse"), el("span", "", view.items.children.length ? "Working…" : "Starting the agent…"));
-      parts.push(line);
+      parts.push(line, ...approvalViews(turn));
     } else {
       const line = el("p", "turn-meta");
       const took = window.Hearth.span(turn.started, turn.finished);
@@ -326,7 +405,8 @@
       }
       if (turn.outcome === "cancelled") {
         // Who stopped it comes only from the record; older records did not keep it, and it is never guessed.
-        const who = { keeper: "You stopped this reply.", quit: "Hearth stopped this reply when it quit." }[turn.stopped_by] || "Stop reason not recorded.";
+        const who = { keeper: "You stopped this reply.", quit: "Hearth stopped this reply when it quit.",
+          timeout: "Hearth stopped this reply because it ran too long." }[turn.stopped_by] || "Stop reason not recorded.";
         const kept = view.draft || view.items.children.length
           ? " Hearth keeps what arrived above; the agent's own session does not, so it will not remember this reply."
           : " No output had arrived.";
@@ -346,6 +426,10 @@
         parts.push(el("p", "turn-note failed", "Hearth stopped this reply when it quit or lost its backend. Nothing was resent; send again to continue."));
       }
       if (turn.outcome === "failed") parts.push(el("p", "turn-note failed", shown(turn.error)));
+      parts.push(...approvalViews(turn));
+      if ((turn.denied || []).length && !(turn.approvals || []).length) {  // With approvals, each refusal is listed above, once.
+        parts.push(el("p", "turn-note", `${agent(state.detail.provider)} asked to use ${turn.denied.join(", ")}. Hearth cannot approve that yet, so it was refused.`));
+      }
       if (turn.check) parts.push(checkView(turn.check));
     }
     if (view.draft && turn.finished) view.draft.classList.add("partial");
@@ -419,29 +503,33 @@
       const step = el("li", "reply-step");
       const details = el("details");
       const summary = el("summary");
-      summary.append(el("span", "step-tool", item.tool || "tool"), el("span", "step-arg", item.text));
+      summary.append(el("span", "step-tool", `${item.subagent ? "subagent · " : ""}${item.tool || "tool"}`), el("span", "step-arg", item.text));
       details.append(summary);
       step.append(details);
       steps(view).append(step);
       view.tool = details;
+      if (item.id) (view.calls ||= {})[item.id] = details;
       view.steps += 1;
       workLine(view);
     } else if (item.kind === "output") {
+      // A result goes to the call it answers: a subagent's own steps run between its start and its report.
+      const tool = (item.for && view.calls?.[item.for]) || view.tool;
       const pre = el("pre", `step-output${item.error ? " error" : ""}`, item.text || "(no output)");
-      if (view.tool) view.tool.append(pre);
+      if (tool) tool.append(pre);
       else {  // Output with no tool line before it; append() returns nothing, so it cannot be chained.
         const step = el("li", "reply-step");
         step.append(pre);
         steps(view).append(step);
       }
+      if (item.note) return;  // A prompt or loaded text, not a result: it settles nothing.
       if (item.error) {
-        view.tool?.classList.remove("done");
-        view.tool?.classList.add("error");
-        if (view.tool) view.tool.open = true;
+        tool?.classList.remove("done");
+        tool?.classList.add("error");
+        if (tool) tool.open = true;
         view.failed += 1;
         view.work.open = true; // Folding never hides a failed step.
         workLine(view);
-      } else if (!view.tool?.classList.contains("error")) view.tool?.classList.add("done");
+      } else if (!tool?.classList.contains("error")) tool?.classList.add("done");
     } else if (item.kind === "error" || (item.kind === "result" && item.error)) {
       view.items.append(el("li", "reply-text failed", shown(item.text)));
     }
@@ -522,6 +610,27 @@
     }
   }
 
+  async function publish() {
+    const from = state.selected;
+    state.publishing = from;
+    composer();
+    try {
+      const { session } = await api(`sessions/${encodeURIComponent(from)}/publish`, {});
+      if (state.selected === from) {
+        state.detail = { ...state.detail, pr: session.pr };
+        renderDetail();
+        $("convo-send-error").hidden = true;
+      }
+    } catch (failure) {
+      if (state.selected !== from) return; // Shown only with the conversation it is about.
+      $("convo-send-error").hidden = false;
+      $("convo-send-error").textContent = failure.message;
+    } finally {
+      state.publishing = null;
+      composer();
+    }
+  }
+
   function stick(change) {
     // Follow new output only while the keeper is at the bottom; reading further up is never interrupted.
     const scroller = $("convo-scroll");
@@ -537,6 +646,8 @@
     $("convo-send").setAttribute("aria-label", state.sending ? "Sending…" : state.detail ? `Send to ${agent(state.detail.provider)}` : "Send");
     $("convo-send").title = $("convo-send").getAttribute("aria-label");
     $("convo-stop").hidden = !turn;
+    $("convo-publish").disabled = Boolean(turn) || Boolean(state.publishing);
+    $("convo-publish").textContent = state.publishing ? "Pushing…" : state.detail?.pr ? "Commit and push" : "Commit and open PR";
     $("convo-message").placeholder = state.detail ? `Message ${agent(state.detail.provider)}` : "";
     // Without a queue, text written during a reply waits here: say so, so it is never taken for sent.
     const mine = state.drafts.get(state.selected) || {};
@@ -620,11 +731,13 @@
     try {
       const listing = await api("sessions");
       state.sessions = listing.sessions;
+      state.usage = listing.usage;
       document.dispatchEvent(new CustomEvent("hearth:sessions", { detail: listing }));
       if (state.visible) {
         const changed = JSON.stringify(listing.options) !== JSON.stringify(state.options);
         state.options = listing.options;
         renderList();
+        renderUsage();
         if (changed && !$("convo-form").hidden) fillForm(); // Never rebuilt under the keeper's pointer for nothing.
       }
       // Read from the address, not state.visible: the keeper may have just left, and the page hears of it only after this runs.
@@ -681,6 +794,11 @@
   $("convo-composer").addEventListener("submit", send);
   $("convo-stop").addEventListener("click", stop);
   $("convo-open").addEventListener("click", openFolder);
+  $("convo-publish").addEventListener("click", publish);
+  // shortcut: the desktop app's storage lasts one launch, so a chosen level returns to 90%; move it to a file if that matters (ADR-0050).
+  $("convo-usage-warn").value = stored("hearth-usage-warn", "90");
+  if (!$("convo-usage-warn").value) $("convo-usage-warn").value = "90";
+  $("convo-usage-warn").addEventListener("change", () => { store("hearth-usage-warn", $("convo-usage-warn").value); renderUsage(); });
   $("convo-changes-open").addEventListener("click", () => document.dispatchEvent(new CustomEvent("hearth:inspect", { detail: "changes" })));
   $("convo-message").addEventListener("input", () => {
     if (state.selected) typed(state.selected, $("convo-message").value);

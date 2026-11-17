@@ -19,6 +19,8 @@ from test_sessions import FAKE
 SCENARIOS = """
 import json, os, subprocess, sys, time
 from pathlib import Path
+if sys.argv[1:3] == ["debug", "models"]:  # The model list, read outside any turn: it starts no work.
+    os.environ["FAKE_SESSION"] = "reply"
 def start(*args):
     return subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)", *args], start_new_session=True,
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).pid
