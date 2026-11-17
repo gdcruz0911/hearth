@@ -1,1 +1,2 @@
 Throwaway file from a test of Hearth's Commit and open PR button. This PR is closed unmerged.
+second click
