@@ -18,7 +18,7 @@ import threading
 import time
 from pathlib import Path
 
-from . import recall, roles, tasks, usage
+from . import roles, tasks, usage
 
 KIND = "session"
 # Any command without asking, edit in the session's own worktree, or read it only; each names its table, in tasks except FULL_ACCESS.
@@ -442,8 +442,6 @@ def publish(session_id: str) -> dict:
         task = tasks._read(task_dir)
         if task["runs"] and not task["runs"][-1].get("finished"):
             raise SessionError("A turn is still running in this conversation. Next: wait for it, or stop it.", 409)
-        if recall.delivered(task_dir):  # ADR-0024: excerpts from the keeper's notes never reach GitHub from a button.
-            raise SessionError("This conversation received excerpts from your notes, so Hearth will not push it. Next: hearth task publish has the review step.", 409)
         branch, title = task["branch"], task["goal"]
         try:
             # Named one by one, as git add fails when an exclusion names an ignored file, such as copied-in guidance.

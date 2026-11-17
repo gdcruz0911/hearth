@@ -1232,6 +1232,8 @@ class PublishTests(SessionTestCase):
         record = self.only_task()
         worktree = Path(record["worktree"])
         (worktree / "made.txt").write_text("by the agent\n", encoding="utf-8")
+        (worktree / "README.md").write_text("changed by the agent\n", encoding="utf-8")
+        (worktree / ".gitignore").unlink()
 
         found = sessions.publish(session_id)
 
@@ -1240,7 +1242,8 @@ class PublishTests(SessionTestCase):
         pushed = subprocess.run(["git", "-C", str(self.origin), "rev-parse", f"refs/heads/{record['branch']}"], capture_output=True, text=True, check=True).stdout
         self.assertEqual(head, pushed)
         committed = subprocess.run(["git", "-C", str(worktree), "show", "--name-only", "--format=%s", "HEAD"], capture_output=True, text=True, check=True).stdout.split()
-        self.assertEqual(committed, ["New", "conversation", "made.txt"])  # The conversation's title, and not the guidance Hearth copied in.
+        # The conversation's title, a tracked edit and deletion, and not the guidance Hearth copied in.
+        self.assertEqual(committed, ["New", "conversation", ".gitignore", "README.md", "made.txt"])
         create = [call for call in self.gh_calls() if call[:2] == ["pr", "create"]]
         self.assertEqual(len(create), 1)
         self.assertEqual(create[0][create[0].index("--head") + 1], record["branch"])
@@ -1254,6 +1257,15 @@ class PublishTests(SessionTestCase):
         self.assertEqual(subprocess.run(["git", "-C", str(self.origin), "log", "--format=%s", record["branch"]], capture_output=True, text=True,
                                         check=True).stdout.count("New conversation"), 2)
         self.assertEqual(sessions.detail(session_id)["pr"], "https://github.com/keeper/demo/pull/7")
+
+    def test_a_guarded_turn_after_publishing_still_runs(self) -> None:
+        session_id = self.new()
+        (Path(self.only_task()["worktree"]) / "made.txt").write_text("by the agent\n", encoding="utf-8")
+        sessions.publish(session_id)
+
+        sessions.send(session_id, "Say hello", "send-0001")
+
+        self.assertEqual(self.settled(session_id)["turns"][-1]["outcome"], "done")  # Hearth's commit and push are not taken for tampering.
 
     def test_nothing_changed_a_running_turn_and_a_failed_push_are_refused_and_said(self) -> None:
         session_id = self.new(mode="full")
